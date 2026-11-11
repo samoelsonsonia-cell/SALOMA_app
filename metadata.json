@@ -1,0 +1,6 @@
+{
+  "name": "SALOMA Crypto Exchange",
+  "description": "Plateforme d'échange crypto moderne et sécurisée - Trading Spot & Levier, Earn, Échange et Portefeuille multi-réseaux.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
