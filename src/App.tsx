@@ -41,6 +41,7 @@ import {
   Play,
   RotateCcw
 } from 'lucide-react';
+import { PWAInstallButton, OfflineIndicator } from './components/PWAInstall';
 
 // --- DATA STRUCTURES ---
 
@@ -800,6 +801,7 @@ export default function App() {
           <span>{toastMessage}</span>
         </div>
       )}
+      <OfflineIndicator />
 
       {/* ========================================================
           SPLASH SCREEN
@@ -890,6 +892,7 @@ export default function App() {
                 Créer un compte
               </button>
             </div>
+            <PWAInstallButton />
           </div>
         </div>
       )}
@@ -1158,6 +1161,7 @@ export default function App() {
             </div>
 
             <div className="flex items-center gap-1.5">
+              <PWAInstallButton compact />
               <button
                 onClick={() => setActiveModal('guide')}
                 className="p-1.5 rounded-xl bg-[#23154D] text-purple-300 border border-[#8B5CF6]/30 shadow"
@@ -2050,6 +2054,7 @@ export default function App() {
                 <HelpCircle className="w-4 h-4 text-[#8B5CF6]" /> Mode d'emploi
               </button>
             </div>
+            <PWAInstallButton />
             <button
               onClick={() => {
                 setActiveModal(null);
