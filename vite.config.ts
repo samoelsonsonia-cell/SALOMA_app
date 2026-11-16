@@ -1,12 +1,39 @@
 import tailwindcss from '@tailwindcss/vite';
 import react from '@vitejs/plugin-react';
 import path from 'path';
-import {defineConfig} from 'vite';
+import {defineConfig, type Plugin} from 'vite';
 import {VitePWA} from 'vite-plugin-pwa';
+
+function safeHmrClientPlugin(): Plugin {
+  return {
+    name: 'saloma-safe-hmr-client',
+    apply: 'serve',
+    enforce: 'post',
+    load(id) {
+      if (id.includes('pwa-entry-point-loaded')) {
+        return 'export default function registerDevSW() {}';
+      }
+      return null;
+    },
+    transform(code, id) {
+      if (
+        id.includes('vite/dist/client/client.mjs') ||
+        id.includes('vite/dist/client/bundledDevClient.mjs')
+      ) {
+        return code.replace(
+          'ws.send(JSON.stringify(data));',
+          'if (ws && ws.readyState === ws.OPEN) ws.send(JSON.stringify(data));'
+        );
+      }
+      return null;
+    },
+  };
+}
 
 export default defineConfig(() => {
   return {
     plugins: [
+      safeHmrClientPlugin(),
       react(),
       tailwindcss(),
       VitePWA({
@@ -22,6 +49,7 @@ export default defineConfig(() => {
         ],
         manifest: false,
         workbox: {
+          maximumFileSizeToCacheInBytes: 5 * 1024 * 1024,
           globPatterns: ['**/*.{js,css,html,ico,png,svg,woff,woff2}'],
           runtimeCaching: [
             {
@@ -55,8 +83,7 @@ export default defineConfig(() => {
           ],
         },
         devOptions: {
-          enabled: true,
-          type: 'module',
+          enabled: false,
         },
       }),
     ],

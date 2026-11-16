@@ -1,12 +1,13 @@
 /**
  * @license
  * SPDX-License-Identifier: Apache-2.0
- * SALOMA - Crypto Exchange & Trading Platform
+ * SALOMA - Crypto Exchange & Trading Platform (Style Binance Pro)
+ * Backend: Appwrite Auth, TablesDB & Realtime via /api/*
  * Colors: Violet Brillant #7C3AED, #8B5CF6, Fond Sombre #150D2E
  * Mobile-First, Français (Malagasy)
  */
 
-import React, { useState, useEffect, useMemo, useRef } from 'react';
+import React, { useState, useEffect, useMemo, useRef, useCallback } from 'react';
 import {
   TrendingUp,
   TrendingDown,
@@ -14,7 +15,6 @@ import {
   ArrowDownLeft,
   Wallet,
   Repeat,
-  Bot,
   Gift,
   Users,
   ShieldCheck,
@@ -24,371 +24,334 @@ import {
   X,
   Lock,
   AlertTriangle,
-  RefreshCw,
   BarChart2,
   Zap,
   HelpCircle,
   User,
-  Trash2,
-  CheckCircle2,
   Layers,
   Activity,
   ArrowRightLeft,
   Server,
   Search,
   ChevronDown,
-  Sliders,
+  Send,
+  RefreshCw,
+  BookOpen,
+  Info,
   Play,
-  RotateCcw
+  Video,
+  Share2,
+  Megaphone,
+  MessageSquare,
+  Phone,
+  Eye,
+  EyeOff,
+  Bell,
+  Mail,
+  KeyRound,
+  LogOut,
+  Clock,
+  Bot,
+  ArrowUpDown,
+  Square,
+  Trash2
 } from 'lucide-react';
 import { PWAInstallButton, OfflineIndicator } from './components/PWAInstall';
+import { TurnstileWidget } from './components/TurnstileWidget';
+import {
+  Coin,
+  BackendPublicCoin,
+  ApiProviderStatus,
+  INITIAL_COINS,
+  INITIAL_API_PROVIDERS,
+  getBlockchainFromNetwork,
+  getNetworkShortLabel,
+  fetchSalomaMarketPrices,
+  mergeSalomaMarketPrices,
+  subscribeToPricesWebSocket,
+  formatCoinPrice
+} from './services/priceAggregator';
+import { apiRequest, subscribeToNotificationsStream } from './lib/appwrite';
 
-// --- DATA STRUCTURES ---
+const SESSION_STORAGE_KEY = 'saloma_session_secret';
+const USD_TO_MGA = 4750;
 
-export interface CoinNetwork {
-  chain: string;
-  name: string;
-  depositFee: number;
-  withdrawFee: number;
-  feeSymbol: string;
-  minDeposit: number;
-  minWithdraw: number;
-  addressExample: string;
+// --- APPWRITE DOCUMENT INTERFACES ---
+
+export interface AppwriteUserRow {
+  $id: string;
+  user_id: string;
+  name?: string;
+  nom: string;
+  prenom?: string;
+  email: string;
+  telephone: string;
+  solde: number;
+  code_parrainage: string;
+  parrain?: string;
+  date_inscription?: string;
+  statut?: string;
+  email_verifie: boolean;
+  kyc_level?: number;
+  kyc_cin?: string;
+  kyc_adresse?: string;
+  kyc_code_postal?: string;
+  kyc_statut?: string;
+  pays?: string;
+  role?: string;
 }
 
-export interface Coin {
-  id: string;
+export interface AppwriteWalletRow {
+  $id: string;
+  user_id: string;
+  solde_total: number;
+  solde_disponible: number;
+  solde_bloque: number;
+  compte_trade?: number;
+  solde_wallet?: number;
+  devise: string;
+  date_maj?: string;
+  coins_json?: string;
+}
+
+export interface AppwriteTradeRow {
+  $id: string;
+  user_id: string;
+  paire: string;
+  type: 'achat' | 'vente';
+  montant: number;
+  prix: number;
+  profit: number;
+  statut: 'en_cours' | 'termine' | 'annule';
+  date_creation: string;
+  date_cloture?: string;
+  leverage?: number;
+  close_price?: number;
+  mode?: string;
+}
+
+export interface AppwriteEchangeRow {
+  $id: string;
+  user_id: string;
+  de_devise: string;
+  vers_devise: string;
+  montant_envoye: number;
+  montant_recu: number;
+  taux: number;
+  frais: number;
+  statut: string;
+  date: string;
+}
+
+export interface AppwriteDepotRetraitRow {
+  $id: string;
+  user_id: string;
+  type: 'depot' | 'retrait';
+  montant: number;
+  methode: string;
+  numero_compte: string;
+  statut: 'en_attente' | 'valide' | 'refuse';
+  preuve?: string;
+  date: string;
+  devise: string;
+  frais?: number;
+}
+
+export interface AppwriteEarnRow {
+  $id: string;
+  user_id: string;
+  type_gain: string;
+  montant: number;
+  description: string;
+  date: string;
+  task_id?: string;
+}
+
+export interface AppwriteNotificationRow {
+  $id: string;
+  user_id: string;
+  titre: string;
+  message: string;
+  type: string;
+  lu: boolean;
+  date: string;
+}
+
+export interface AppwriteProblemRow {
+  $id: string;
+  user_id: string;
+  nom: string;
+  email: string;
+  telephone: string;
+  message: string;
+  statut: string;
+  date: string;
+}
+
+export interface AdminProfitBucket {
+  tradeAr: number;
+  echangeAr: number;
+  retraitAr: number;
+  totalAr: number;
+}
+
+export interface AdminProfitsSummary {
+  jour: AdminProfitBucket;
+  semaine: AdminProfitBucket;
+  mois: AdminProfitBucket;
+  total: AdminProfitBucket;
+}
+
+export interface AdminMarketComparisonRow {
   symbol: string;
   name: string;
-  sponsorPrice: number; // Internal Bybit feed
-  price: number; // SALOMA price (confidential discount)
+  bybitPrice: number;
+  salomaPrice: number;
+  spreadDiff: number;
+  spreadPct: number;
+  bybitHiddenFeePct: number;
   change24h: number;
-  iconBg: string;
-  iconColor: string;
-  networks: CoinNetwork[];
 }
 
-export interface Position {
-  id: string;
-  clientName?: string;
-  coinId: string;
-  type: 'BUY' | 'SELL';
-  entryPrice: number;
-  currentPrice: number;
-  amountUsd: number;
-  leverage: number;
-  liquidationPrice: number;
-  pnlUsd: number;
-  pnlPercent: number;
-  timestamp: number;
-  mode: 'Manuel' | 'Auto' | 'Semi-Auto';
+export interface AdminApiProviderEntry {
+  id: 'bybit' | 'okx' | 'binance';
+  label: string;
+  enabled: boolean;
+  isPrimary: boolean;
+  hasApiKey: boolean;
+  apiKeyMasked: string;
+  hasSecret: boolean;
+  secretMasked: string;
+  hasPassphrase?: boolean;
+  passphraseMasked?: string;
 }
 
-export interface TradeHistoryItem {
-  id: string;
-  clientName?: string;
-  coinSymbol: string;
-  type: 'BUY' | 'SELL';
-  entryPrice: number;
-  closePrice: number;
-  amountUsd: number;
-  leverage: number;
-  pnlUsd: number;
-  pnlPercent: number;
-  timestamp: number;
-  mode: 'Manuel' | 'Auto' | 'Semi-Auto';
+export interface AdminApisConfig {
+  primaryApi: 'bybit' | 'okx' | 'binance';
+  providers: AdminApiProviderEntry[];
 }
 
-export interface ExchangeHistoryItem {
-  id: string;
-  fromCoin: string;
-  toCoin: string;
-  fromAmount: number;
-  toAmount: number;
-  feeUsd: number;
-  timestamp: number;
+export interface AdminTurnstileConfig {
+  siteKey: string;
+  hasSecretKey: boolean;
+  secretKeyMasked: string;
+  isCustomConfigured: boolean;
 }
 
-export interface WalletTransaction {
-  id: string;
-  type: 'DEPOT' | 'RETRAIT' | 'TRANSFERT';
-  coinSymbol: string;
-  network?: string;
-  amount: number;
-  amountUsd: number;
-  salomaFee: number;
-  networkFee: number;
-  totalDebited: number;
-  netReceived: number;
-  status: 'Complété' | 'En attente' | 'Vérifié';
-  address?: string;
-  timestamp: number;
-  transferDetails?: {
-    from: 'Trading' | 'Wallet';
-    to: 'Trading' | 'Wallet';
-  };
-}
-
-export interface ClientRecord {
-  id: string;
-  name: string;
-  country: string;
-  investmentUsd: number;
-  problems: string;
-  hasProblem: boolean;
-  email: string;
-  phone: string;
-  kycLevel: number;
-  registeredAt: string;
-}
-
-// --- EXTENSIVE GLOBAL COINS LIST ---
-const INITIAL_COINS: Coin[] = [
-  {
-    id: 'btc',
-    symbol: 'BTC',
-    name: 'Bitcoin',
-    sponsorPrice: 68420.00,
-    price: 68150.00,
-    change24h: 3.42,
-    iconBg: 'bg-amber-500/25 text-amber-300 border-amber-400/40 shadow-[0_0_10px_rgba(245,158,11,0.3)]',
-    iconColor: 'text-amber-400',
-    networks: [
-      { chain: 'BTC-Native', name: 'Bitcoin (Native SegWit bech32)', depositFee: 0, withdrawFee: 0.00025, feeSymbol: 'BTC', minDeposit: 0.0001, minWithdraw: 0.0005, addressExample: 'bc1q9h6x743j2y0z5v4km89x2026saloma' },
-      { chain: 'Taproot', name: 'Bitcoin (Taproot bech32m)', depositFee: 0, withdrawFee: 0.0002, feeSymbol: 'BTC', minDeposit: 0.0001, minWithdraw: 0.0005, addressExample: 'bc1p5d7rjq7g6e8z8e9q8v8026saloma' },
-      { chain: 'Lightning', name: 'Lightning Network (Fast / Instantané)', depositFee: 0, withdrawFee: 0.00001, feeSymbol: 'BTC', minDeposit: 0.00001, minWithdraw: 0.0001, addressExample: 'lnbc10u1p3saloma9823610924' },
-      { chain: 'BEP20', name: 'BNB Smart Chain (BEP20 Wrapped)', depositFee: 0, withdrawFee: 0.00008, feeSymbol: 'BTC', minDeposit: 0.0002, minWithdraw: 0.0004, addressExample: '0x71C8A331c2612745345719329705E32bA' },
-      { chain: 'ERC20', name: 'Ethereum ERC20 (WBTC)', depositFee: 0, withdrawFee: 0.00035, feeSymbol: 'BTC', minDeposit: 0.0005, minWithdraw: 0.001, addressExample: '0x2260FAC5E5542a773Aa44fBCfeDf7C193bc2C599' }
-    ]
-  },
-  {
-    id: 'eth',
-    symbol: 'ETH',
-    name: 'Ethereum',
-    sponsorPrice: 3580.00,
-    price: 3562.00,
-    change24h: 2.15,
-    iconBg: 'bg-indigo-500/25 text-indigo-300 border-indigo-400/40 shadow-[0_0_10px_rgba(99,102,241,0.3)]',
-    iconColor: 'text-indigo-400',
-    networks: [
-      { chain: 'ERC20', name: 'Ethereum Mainnet (ERC20)', depositFee: 0, withdrawFee: 0.0035, feeSymbol: 'ETH', minDeposit: 0.005, minWithdraw: 0.01, addressExample: '0x992B28B3eB9229555C09F6eF83A8992026' },
-      { chain: 'Arbitrum', name: 'Arbitrum One (L2 Rapide)', depositFee: 0, withdrawFee: 0.0006, feeSymbol: 'ETH', minDeposit: 0.001, minWithdraw: 0.002, addressExample: '0x992B28B3eB9229555C09F6eF83A8992026' },
-      { chain: 'Optimism', name: 'OP Mainnet (Optimism)', depositFee: 0, withdrawFee: 0.0006, feeSymbol: 'ETH', minDeposit: 0.001, minWithdraw: 0.002, addressExample: '0x992B28B3eB9229555C09F6eF83A8992026' },
-      { chain: 'Base', name: 'Base Network (Coinbase L2)', depositFee: 0, withdrawFee: 0.0004, feeSymbol: 'ETH', minDeposit: 0.001, minWithdraw: 0.002, addressExample: '0x992B28B3eB9229555C09F6eF83A8992026' },
-      { chain: 'BEP20', name: 'BNB Smart Chain (BEP20)', depositFee: 0, withdrawFee: 0.0008, feeSymbol: 'ETH', minDeposit: 0.002, minWithdraw: 0.005, addressExample: '0x992B28B3eB9229555C09F6eF83A8992026' },
-      { chain: 'Polygon', name: 'Polygon POS (WETH)', depositFee: 0, withdrawFee: 0.0005, feeSymbol: 'ETH', minDeposit: 0.001, minWithdraw: 0.002, addressExample: '0x992B28B3eB9229555C09F6eF83A8992026' }
-    ]
-  },
-  {
-    id: 'usdt',
-    symbol: 'USDT',
-    name: 'Tether USD',
-    sponsorPrice: 1.0002,
-    price: 1.00,
-    change24h: 0.01,
-    iconBg: 'bg-emerald-500/25 text-emerald-300 border-emerald-400/40 shadow-[0_0_10px_rgba(16,185,129,0.3)]',
-    iconColor: 'text-emerald-400',
-    networks: [
-      { chain: 'TRC20', name: 'TRON (TRC20 - Le plus populaire & rapide)', depositFee: 0, withdrawFee: 1.20, feeSymbol: 'USDT', minDeposit: 1, minWithdraw: 5, addressExample: 'TJX9zK2B7YmNQ9sLo2481A2026SalomaTRC' },
-      { chain: 'ERC20', name: 'Ethereum (ERC20 Mainnet)', depositFee: 0, withdrawFee: 4.50, feeSymbol: 'USDT', minDeposit: 10, minWithdraw: 20, addressExample: '0x43bFa92104192bC18E9712aD90176882a' },
-      { chain: 'BEP20', name: 'BNB Smart Chain (BEP20 - Très faibles frais)', depositFee: 0, withdrawFee: 0.35, feeSymbol: 'USDT', minDeposit: 1, minWithdraw: 3, addressExample: '0x882a4C82b28F03294E83b271391781290' },
-      { chain: 'Polygon', name: 'Polygon POS Network', depositFee: 0, withdrawFee: 0.40, feeSymbol: 'USDT', minDeposit: 1, minWithdraw: 3, addressExample: '0x43bFa92104192bC18E9712aD90176882a' },
-      { chain: 'Solana', name: 'Solana (SPL Token)', depositFee: 0, withdrawFee: 0.80, feeSymbol: 'USDT', minDeposit: 1, minWithdraw: 5, addressExample: '4k3Dyjzvzp8eMZWUXbBCjEvwSkkk9817' },
-      { chain: 'Arbitrum', name: 'Arbitrum One (L2)', depositFee: 0, withdrawFee: 0.50, feeSymbol: 'USDT', minDeposit: 1, minWithdraw: 5, addressExample: '0x43bFa92104192bC18E9712aD90176882a' },
-      { chain: 'Optimism', name: 'OP Mainnet (L2)', depositFee: 0, withdrawFee: 0.50, feeSymbol: 'USDT', minDeposit: 1, minWithdraw: 5, addressExample: '0x43bFa92104192bC18E9712aD90176882a' },
-      { chain: 'AVAX-C', name: 'Avalanche C-Chain', depositFee: 0, withdrawFee: 0.60, feeSymbol: 'USDT', minDeposit: 1, minWithdraw: 5, addressExample: '0x43bFa92104192bC18E9712aD90176882a' },
-      { chain: 'TON', name: 'TON Network (Telegram Ecosystem)', depositFee: 0, withdrawFee: 0.20, feeSymbol: 'USDT', minDeposit: 1, minWithdraw: 3, addressExample: 'EQBvW8Z5huBkMJYdn3PCDnHo4619' }
-    ]
-  },
-  {
-    id: 'sol',
-    symbol: 'SOL',
-    name: 'Solana',
-    sponsorPrice: 184.50,
-    price: 183.20,
-    change24h: 5.84,
-    iconBg: 'bg-purple-500/25 text-purple-300 border-purple-400/40 shadow-[0_0_10px_rgba(168,85,247,0.3)]',
-    iconColor: 'text-purple-400',
-    networks: [
-      { chain: 'Solana', name: 'Solana Native Mainnet (Ultra-Rapide)', depositFee: 0, withdrawFee: 0.01, feeSymbol: 'SOL', minDeposit: 0.05, minWithdraw: 0.1, addressExample: '7Np41oeYqPefeNQEHSv13918z88fSalomaSol' },
-      { chain: 'BEP20', name: 'BNB Smart Chain (BEP20)', depositFee: 0, withdrawFee: 0.015, feeSymbol: 'SOL', minDeposit: 0.05, minWithdraw: 0.1, addressExample: '0x38Bc491A2026aD728F6b2819876291' }
-    ]
-  },
-  {
-    id: 'bnb',
-    symbol: 'BNB',
-    name: 'BNB Chain',
-    sponsorPrice: 598.00,
-    price: 594.50,
-    change24h: -1.12,
-    iconBg: 'bg-yellow-500/25 text-yellow-300 border-yellow-400/40 shadow-[0_0_10px_rgba(234,179,8,0.3)]',
-    iconColor: 'text-yellow-400',
-    networks: [
-      { chain: 'BEP20', name: 'BNB Smart Chain (BEP20 Native)', depositFee: 0, withdrawFee: 0.001, feeSymbol: 'BNB', minDeposit: 0.01, minWithdraw: 0.02, addressExample: '0x55d398326f99059fF775485246999027B3197955' },
-      { chain: 'Beacon', name: 'BNB Beacon Chain (BEP2)', depositFee: 0, withdrawFee: 0.002, feeSymbol: 'BNB', minDeposit: 0.02, minWithdraw: 0.05, addressExample: 'bnb1grpf0955h0ykzq3as5x00eSaloma' },
-      { chain: 'opBNB', name: 'opBNB Mainnet (L2)', depositFee: 0, withdrawFee: 0.0005, feeSymbol: 'BNB', minDeposit: 0.01, minWithdraw: 0.02, addressExample: '0x55d398326f99059fF775485246999027B3197955' }
-    ]
-  },
-  {
-    id: 'saloma',
-    symbol: 'SALOMA',
-    name: 'Saloma Native Coin',
-    sponsorPrice: 1.25,
-    price: 1.18,
-    change24h: 14.80,
-    iconBg: 'bg-[#7C3AED]/40 text-purple-200 border-[#8B5CF6] shadow-[0_0_15px_rgba(124,58,237,0.6)]',
-    iconColor: 'text-[#8B5CF6]',
-    networks: [
-      { chain: 'SalomaNet', name: 'Saloma High-Speed Mainnet (0 Gas)', depositFee: 0, withdrawFee: 0.00, feeSymbol: 'SALOMA', minDeposit: 1, minWithdraw: 2, addressExample: 'saloma1vola98273645gasy2026official' },
-      { chain: 'BEP20', name: 'BNB Smart Chain (BEP20 Wrapped)', depositFee: 0, withdrawFee: 0.5, feeSymbol: 'SALOMA', minDeposit: 5, minWithdraw: 10, addressExample: '0x2170Ed0880ac9A755fd29B2688956BD959F933F8' },
-      { chain: 'Polygon', name: 'Polygon POS Bridge', depositFee: 0, withdrawFee: 0.2, feeSymbol: 'SALOMA', minDeposit: 5, minWithdraw: 10, addressExample: '0x2170Ed0880ac9A755fd29B2688956BD959F933F8' }
-    ]
-  },
-  {
-    id: 'xrp',
-    symbol: 'XRP',
-    name: 'Ripple',
-    sponsorPrice: 0.62,
-    price: 0.612,
-    change24h: 4.20,
-    iconBg: 'bg-blue-500/25 text-blue-300 border-blue-400/40',
-    iconColor: 'text-blue-400',
-    networks: [
-      { chain: 'Ripple', name: 'XRP Ledger (Ripple Native - Tag Requis)', depositFee: 0, withdrawFee: 0.25, feeSymbol: 'XRP', minDeposit: 1, minWithdraw: 5, addressExample: 'rEb8TK3gBgk5auZyyb6328026Saloma' },
-      { chain: 'BEP20', name: 'BNB Smart Chain (BEP20)', depositFee: 0, withdrawFee: 0.30, feeSymbol: 'XRP', minDeposit: 1, minWithdraw: 5, addressExample: '0x1d2f0da169ceb9fc7b3144628db156f3f6c60dbe' }
-    ]
-  },
-  {
-    id: 'doge',
-    symbol: 'DOGE',
-    name: 'Dogecoin',
-    sponsorPrice: 0.165,
-    price: 0.162,
-    change24h: -2.40,
-    iconBg: 'bg-amber-600/25 text-amber-200 border-amber-500/40',
-    iconColor: 'text-amber-300',
-    networks: [
-      { chain: 'Dogecoin', name: 'Dogecoin Core Network', depositFee: 0, withdrawFee: 2.0, feeSymbol: 'DOGE', minDeposit: 10, minWithdraw: 20, addressExample: 'D8vG43901kLx2026SalomaMadagascar' },
-      { chain: 'BEP20', name: 'BNB Smart Chain (BEP20)', depositFee: 0, withdrawFee: 1.5, feeSymbol: 'DOGE', minDeposit: 10, minWithdraw: 20, addressExample: '0xba2ae424d960c26247dd6c32edc70b295c744c43' }
-    ]
-  },
-  {
-    id: 'ada',
-    symbol: 'ADA',
-    name: 'Cardano',
-    sponsorPrice: 0.495,
-    price: 0.489,
-    change24h: 1.85,
-    iconBg: 'bg-sky-500/25 text-sky-300 border-sky-400/40',
-    iconColor: 'text-sky-400',
-    networks: [
-      { chain: 'Cardano', name: 'Cardano Native (Shelley)', depositFee: 0, withdrawFee: 0.8, feeSymbol: 'ADA', minDeposit: 2, minWithdraw: 5, addressExample: 'addr1q9h6x743j2y0z5v4km89x2026saloma' },
-      { chain: 'BEP20', name: 'BNB Smart Chain (BEP20)', depositFee: 0, withdrawFee: 0.5, feeSymbol: 'ADA', minDeposit: 2, minWithdraw: 5, addressExample: '0x3ee2200efb3400fabb9aacf31297cbdd1d435d47' }
-    ]
-  },
-  {
-    id: 'ton',
-    symbol: 'TON',
-    name: 'Toncoin',
-    sponsorPrice: 5.85,
-    price: 5.78,
-    change24h: 7.20,
-    iconBg: 'bg-cyan-500/25 text-cyan-300 border-cyan-400/40',
-    iconColor: 'text-cyan-400',
-    networks: [
-      { chain: 'TON', name: 'The Open Network (TON Native)', depositFee: 0, withdrawFee: 0.05, feeSymbol: 'TON', minDeposit: 0.2, minWithdraw: 0.5, addressExample: 'EQBvW8Z5huBkMJYdn3PCDnHo4619SalomaTON' },
-      { chain: 'BEP20', name: 'BNB Smart Chain (BEP20)', depositFee: 0, withdrawFee: 0.08, feeSymbol: 'TON', minDeposit: 0.5, minWithdraw: 1, addressExample: '0x76a797a59ba2c17726896976b7b3747bfd1d220f' }
-    ]
-  },
-  {
-    id: 'avax',
-    symbol: 'AVAX',
-    name: 'Avalanche',
-    sponsorPrice: 34.20,
-    price: 33.85,
-    change24h: 3.10,
-    iconBg: 'bg-red-500/25 text-red-300 border-red-400/40',
-    iconColor: 'text-red-400',
-    networks: [
-      { chain: 'AVAX-C', name: 'Avalanche C-Chain Native', depositFee: 0, withdrawFee: 0.01, feeSymbol: 'AVAX', minDeposit: 0.1, minWithdraw: 0.2, addressExample: '0x1ceb83918a2026salomaavax0192' },
-      { chain: 'BEP20', name: 'BNB Smart Chain (BEP20)', depositFee: 0, withdrawFee: 0.02, feeSymbol: 'AVAX', minDeposit: 0.1, minWithdraw: 0.2, addressExample: '0x1ceb83918a2026salomaavax0192' }
-    ]
-  },
-  {
-    id: 'sui',
-    symbol: 'SUI',
-    name: 'Sui Network',
-    sponsorPrice: 2.15,
-    price: 2.12,
-    change24h: 9.40,
-    iconBg: 'bg-blue-600/25 text-blue-200 border-blue-400/40',
-    iconColor: 'text-blue-300',
-    networks: [
-      { chain: 'Sui', name: 'Sui Native Mainnet', depositFee: 0, withdrawFee: 0.05, feeSymbol: 'SUI', minDeposit: 1, minWithdraw: 2, addressExample: '0x43bFa92104192bC18E9712aD90176882aSalomaSui' }
-    ]
-  },
-  {
-    id: 'pepe',
-    symbol: 'PEPE',
-    name: 'Pepe Coin',
-    sponsorPrice: 0.0000098,
-    price: 0.0000084,
-    change24h: 16.50,
-    iconBg: 'bg-green-600/25 text-green-300 border-green-500/40',
-    iconColor: 'text-green-300',
-    networks: [
-      { chain: 'ERC20', name: 'Ethereum Mainnet (ERC20)', depositFee: 0, withdrawFee: 250000, feeSymbol: 'PEPE', minDeposit: 500000, minWithdraw: 1000000, addressExample: '0x6982508145454Ce325dDbE47a25d4ec3d2311933' },
-      { chain: 'BEP20', name: 'BNB Smart Chain (BEP20)', depositFee: 0, withdrawFee: 100000, feeSymbol: 'PEPE', minDeposit: 200000, minWithdraw: 500000, addressExample: '0x25d887ce7a35172C62FeBFD67a1856620DAEb000' }
-    ]
+function parseCoinsJson(raw: unknown): Record<string, number> {
+  if (typeof raw !== 'string' || !raw.trim()) return {};
+  try {
+    const parsed = JSON.parse(raw);
+    if (parsed && typeof parsed === 'object') {
+      const out: Record<string, number> = {};
+      for (const [k, v] of Object.entries(parsed)) {
+        const num = Number(v);
+        if (!Number.isNaN(num) && num >= 0) out[k] = num;
+      }
+      return out;
+    }
+  } catch {
+    // ignore malformed json
   }
+  return {};
+}
+
+const VIDEO_TASKS_CATALOG = [
+  { id: 'vid-1', title: 'Découverte Sécurité SALOMA', sponsor: 'Partenaire FinTech MG', rewardAr: 2500, durationSec: 5 },
+  { id: 'vid-2', title: 'Guide Dépôt & Retrait Crypto', sponsor: 'Sponsor Crypto Pay', rewardAr: 2500, durationSec: 5 },
+  { id: 'vid-3', title: 'Stratégie Trading Responsable', sponsor: 'Partenaire Officiel', rewardAr: 2500, durationSec: 5 }
+];
+
+const COUNTRY_OPTIONS = [
+  { label: 'Madagascar 🇲🇬', dialCode: '+261', placeholder: '38 63 40 354' },
+  { label: 'France 🇫🇷', dialCode: '+33', placeholder: '6 12 34 56 78' },
+  { label: 'Comores 🇰🇲', dialCode: '+269', placeholder: '321 12 34' },
+  { label: 'Maurice 🇲🇺', dialCode: '+230', placeholder: '5 123 4567' },
+  { label: 'Seychelles 🇸🇨', dialCode: '+248', placeholder: '2 512 345' },
+  { label: 'Réunion 🇷🇪', dialCode: '+262', placeholder: '692 12 34 56' },
+  { label: 'Afrique du Sud 🇿🇦', dialCode: '+27', placeholder: '82 123 4567' },
+  { label: 'Canada 🇨🇦', dialCode: '+1', placeholder: '514 123 4567' },
+  { label: 'USA 🇺🇸', dialCode: '+1', placeholder: '202 555 0123' },
+  { label: 'Belgique 🇧🇪', dialCode: '+32', placeholder: '470 12 34 56' },
+  { label: 'Suisse 🇨🇭', dialCode: '+41', placeholder: '79 123 45 67' }
 ];
 
 export default function App() {
-  // --- NAVIGATION ---
-  const [screen, setScreen] = useState<'splash' | 'main' | 'signup' | 'login' | 'admin'>('splash');
+  // --- NAVIGATION & AUTH SESSION ---
+  const [screen, setScreen] = useState<
+    'splash' | 'main' | 'signup' | 'verifyEmail' | 'conditions' | 'login' | 'forgotPassword' | 'admin'
+  >('splash');
   const [activeTab, setActiveTab] = useState<'earn' | 'trading' | 'exchange' | 'wallet'>('trading');
-  const [activeModal, setActiveModal] = useState<null | 'deposit' | 'withdraw' | 'transfer' | 'kyc' | 'profile' | 'guide' | 'adminUnlock'>(null);
+  const [activeModal, setActiveModal] = useState<
+    | null
+    | 'deposit'
+    | 'withdraw'
+    | 'convert'
+    | 'kyc'
+    | 'profile'
+    | 'guide'
+    | 'notifications'
+    | 'adminUnlock'
+    | 'reportProblem'
+  >(null);
 
-  // Logo 5x click for admin
+  const [sessionToken, setSessionToken] = useState<string | null>(() => {
+    try {
+      return localStorage.getItem(SESSION_STORAGE_KEY);
+    } catch {
+      return null;
+    }
+  });
+  const [bootstrapping, setBootstrapping] = useState<boolean>(Boolean(sessionToken));
+
+  // Logo 4x click for Admin
   const [logoClicks, setLogoClicks] = useState<number>(0);
-  const clickTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+  const clickTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  // --- USER & TEST STATE ---
-  const [isTestMode, setIsTestMode] = useState<boolean>(true);
-  const [user, setUser] = useState({
-    name: 'Invité SALOMA (Mode Test)',
-    email: 'test@saloma.mg',
-    phone: '+261 34 00 000 00',
-    country: 'Madagascar 🇲🇬',
-    kycLevel: 1,
-    referralCode: 'SALOMA-MG-2026'
-  });
+  // Toast
+  const [toastMessage, setToastMessage] = useState<string | null>(null);
+  const toastTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const showToast = useCallback((msg: string) => {
+    setToastMessage(msg);
+    if (toastTimerRef.current) clearTimeout(toastTimerRef.current);
+    toastTimerRef.current = setTimeout(() => setToastMessage(null), 3800);
+  }, []);
 
-  const USD_TO_MGA = 4750;
-  const [displayCurrency, setDisplayCurrency] = useState<'USD' | 'MGA'>('USD');
+  // --- REAL APPWRITE USER & DATABASE STATE ---
+  const [userRow, setUserRow] = useState<AppwriteUserRow | null>(null);
+  const [walletRow, setWalletRow] = useState<AppwriteWalletRow | null>(null);
+  const [tradesList, setTradesList] = useState<AppwriteTradeRow[]>([]);
+  const [echangesList, setEchangesList] = useState<AppwriteEchangeRow[]>([]);
+  const [depotsRetraitsList, setDepotsRetraitsList] = useState<AppwriteDepotRetraitRow[]>([]);
+  const [earnList, setEarnList] = useState<AppwriteEarnRow[]>([]);
+  const [notificationsList, setNotificationsList] = useState<AppwriteNotificationRow[]>([]);
 
-  // Balances
-  const [walletBalanceUsd, setWalletBalanceUsd] = useState<number>(8000.00);
-  const [walletBalanceMga, setWalletBalanceMga] = useState<number>(1000000);
-  const [tradingBalanceUsd, setTradingBalanceUsd] = useState<number>(2000.00);
+  const [displayCurrency, setDisplayCurrency] = useState<'MGA' | 'USD'>('MGA');
 
-  const [userCoins, setUserCoins] = useState<{ [symbol: string]: number }>({
-    BTC: 0.05,
-    ETH: 0.45,
-    USDT: 500,
-    SOL: 2.5,
-    BNB: 1.2,
-    SALOMA: 120,
-    XRP: 150,
-    DOGE: 400,
-    TON: 15,
-    AVAX: 8,
-    SUI: 80,
-    PEPE: 1500000
-  });
+  // Derived wallet values from Appwrite (strictly 0 when empty)
+  // soldeDisponibleAr = WALLET (argent déposé / retirable)
+  // soldeCompteTradeAr = COMPTE TRADE (solde pour trader)
+  const soldeDisponibleAr = Number(walletRow?.solde_disponible) || 0;
+  const soldeCompteTradeAr = Number(walletRow?.compte_trade) || 0;
+  const soldeBloqueAr = Number(walletRow?.solde_bloque) || 0;
+  const soldeTotalAr =
+    Number(walletRow?.solde_total) || soldeDisponibleAr + soldeCompteTradeAr + soldeBloqueAr;
+  const coinsJson = useMemo(() => parseCoinsJson(walletRow?.coins_json), [walletRow?.coins_json]);
 
-  // --- COINS & DROPDOWN (Modif 6: Vertical Dropdown + Search) ---
+  const unreadNotificationsCount = useMemo(
+    () => notificationsList.filter(n => !n.lu).length,
+    [notificationsList]
+  );
+
+  // --- LIVE CRYPTO PRICES (Pont Broker Actif: Bybit / OKX / Binance via WebSocket) ---
+  const [apiProviders, setApiProviders] = useState<ApiProviderStatus[]>(INITIAL_API_PROVIDERS);
+  const [activeBrokerExchange, setActiveBrokerExchange] = useState<'BYBIT' | 'OKX' | 'BINANCE'>('BYBIT');
+  const [isWsLive, setIsWsLive] = useState<boolean>(false);
+  const isWsLiveRef = useRef<boolean>(false);
   const [coins, setCoins] = useState<Coin[]>(INITIAL_COINS);
+  const apiProvidersRef = useRef(apiProviders);
+  apiProvidersRef.current = apiProviders;
+
   const [selectedCoinId, setSelectedCoinId] = useState<string>('btc');
   const [isCoinDropdownOpen, setIsCoinDropdownOpen] = useState<boolean>(false);
   const [coinSearchTerm, setCoinSearchTerm] = useState<string>('');
@@ -403,391 +366,2123 @@ export default function App() {
     return coins.filter(c => c.symbol.toLowerCase().includes(q) || c.name.toLowerCase().includes(q));
   }, [coins, coinSearchTerm]);
 
-  // Network dropdown state (Modif 6)
-  const [selectedWalletCoin, setSelectedWalletCoin] = useState<Coin>(INITIAL_COINS[2]); // USDT
+  const [selectedWalletCoinId, setSelectedWalletCoinId] = useState<string>('usdt');
+  const selectedWalletCoin = useMemo(
+    () => coins.find(c => c.id === selectedWalletCoinId) || coins.find(c => c.id === 'usdt') || coins[0],
+    [coins, selectedWalletCoinId]
+  );
   const [selectedNetworkIndex, setSelectedNetworkIndex] = useState<number>(0);
-  const [isNetworkDropdownOpen, setIsNetworkDropdownOpen] = useState<boolean>(false);
-  const [networkSearchTerm, setNetworkSearchTerm] = useState<string>('');
+  const [isWalletCoinDropdownOpen, setIsWalletCoinDropdownOpen] = useState<boolean>(false);
+  const [walletCoinSearchTerm, setWalletCoinSearchTerm] = useState<string>('');
 
-  const filteredNetworks = useMemo(() => {
-    if (!networkSearchTerm.trim()) return selectedWalletCoin.networks;
-    const q = networkSearchTerm.toLowerCase();
-    return selectedWalletCoin.networks.filter(n => n.name.toLowerCase().includes(q) || n.chain.toLowerCase().includes(q));
-  }, [selectedWalletCoin, networkSearchTerm]);
+  const filteredWalletCoins = useMemo(() => {
+    if (!walletCoinSearchTerm.trim()) return coins;
+    const q = walletCoinSearchTerm.toLowerCase().trim();
+    return coins.filter(
+      c =>
+        c.symbol.toLowerCase().includes(q) ||
+        c.name.toLowerCase().includes(q) ||
+        (c.symbol.toUpperCase() === 'POL' && 'matic'.includes(q))
+    );
+  }, [coins, walletCoinSearchTerm]);
 
-  // Fast lightweight price engine
+  const activeNetwork = selectedWalletCoin.networks[selectedNetworkIndex] || selectedWalletCoin.networks[0];
+  const activeBlockchain = getBlockchainFromNetwork(activeNetwork);
+  const activeNetworkLabel = getNetworkShortLabel(activeNetwork);
+  const availableBlockchains = useMemo(
+    () => Array.from(new Set(selectedWalletCoin.networks.map(getBlockchainFromNetwork))),
+    [selectedWalletCoin]
+  );
+
   useEffect(() => {
-    const interval = setInterval(() => {
-      setCoins(prevCoins =>
-        prevCoins.map(coin => {
-          const delta = (Math.random() - 0.49) * 0.0025;
-          const newSponsor = Math.max(0.0000001, coin.sponsorPrice * (1 + delta));
-          const margin = coin.symbol === 'SALOMA' ? 0.94 : 0.996;
-          const newPrice = Number((newSponsor * margin).toFixed(coin.sponsorPrice < 0.01 ? 8 : coin.sponsorPrice < 1 ? 4 : 2));
-          return {
-            ...coin,
-            sponsorPrice: Number(newSponsor.toFixed(coin.sponsorPrice < 0.01 ? 8 : coin.sponsorPrice < 1 ? 4 : 2)),
-            price: newPrice,
-            change24h: Number((coin.change24h + (delta * 80)).toFixed(2))
-          };
-        })
+    let mounted = true;
+    const pendingTicks = new Map<string, BackendPublicCoin>();
+    let rafId: number | null = null;
+
+    const flushPendingTicks = () => {
+      rafId = null;
+      if (!mounted || pendingTicks.size === 0) return;
+      const batch = Array.from(pendingTicks.values());
+      pendingTicks.clear();
+      setCoins(prevCoins => mergeSalomaMarketPrices(prevCoins, batch));
+    };
+
+    const runLiveSync = async () => {
+      const { coins: backendCoins, activeExchange, latencyMs, ok, wsOnline } = await fetchSalomaMarketPrices();
+      if (!mounted) return;
+
+      setActiveBrokerExchange(activeExchange);
+      const liveNow = Boolean(wsOnline || isWsLiveRef.current || ok);
+      setIsWsLive(liveNow);
+      setApiProviders(prev =>
+        prev.map(p => ({
+          ...p,
+          online: liveNow,
+          latencyMs: ok ? latencyMs : 0,
+          lastSync: ok ? Date.now() : p.lastSync
+        }))
       );
-    }, 2800);
-    return () => clearInterval(interval);
+
+      if (backendCoins.length > 0) {
+        setCoins(prevCoins => mergeSalomaMarketPrices(prevCoins, backendCoins));
+      }
+    };
+
+    runLiveSync();
+
+    const unsubscribeWs = subscribeToPricesWebSocket({
+      onSnapshot: payload => {
+        if (!mounted) return;
+        setActiveBrokerExchange(payload.activeExchange);
+        isWsLiveRef.current = true;
+        setIsWsLive(true);
+        setApiProviders(prev =>
+          prev.map(p => ({
+            ...p,
+            online: true,
+            lastSync: Date.now()
+          }))
+        );
+        if (payload.coins.length > 0) {
+          setCoins(prevCoins => mergeSalomaMarketPrices(prevCoins, payload.coins));
+        }
+      },
+      onTick: payload => {
+        if (!mounted) return;
+        setActiveBrokerExchange(payload.activeExchange);
+        isWsLiveRef.current = true;
+        setIsWsLive(true);
+        pendingTicks.set(payload.coin.symbol.toUpperCase(), payload.coin);
+        if (rafId === null && typeof window !== 'undefined') {
+          rafId = window.requestAnimationFrame(flushPendingTicks);
+        }
+      },
+      onStatusChange: online => {
+        if (!mounted) return;
+        isWsLiveRef.current = online;
+        setIsWsLive(online);
+      }
+    });
+
+    const safetyPoll = setInterval(() => {
+      if (!isWsLiveRef.current) {
+        runLiveSync();
+      }
+    }, 5000);
+
+    return () => {
+      mounted = false;
+      unsubscribeWs();
+      clearInterval(safetyPoll);
+      if (rafId !== null && typeof window !== 'undefined') {
+        window.cancelAnimationFrame(rafId);
+      }
+    };
   }, []);
 
-  // --- TRADING STATE ---
-  const [tradingModeType, setTradingModeType] = useState<'SPOT' | 'LEVIER'>('SPOT');
+  const [turnstileSiteKey, setTurnstileSiteKey] = useState<string>('1x00000000000000000000AA');
+  const [signUpTurnstileToken, setSignUpTurnstileToken] = useState<string>('');
+  const [signUpTurnstileReset, setSignUpTurnstileReset] = useState<number>(0);
+  const [loginTurnstileToken, setLoginTurnstileToken] = useState<string>('');
+  const [loginTurnstileReset, setLoginTurnstileReset] = useState<number>(0);
+  const [withdrawTurnstileToken, setWithdrawTurnstileToken] = useState<string>('');
+  const [withdrawTurnstileReset, setWithdrawTurnstileReset] = useState<number>(0);
+
+  useEffect(() => {
+    let cancelled = false;
+    apiRequest<{ siteKey: string; isCustomConfigured?: boolean }>('/api/security/turnstile')
+      .then(data => {
+        if (!cancelled && data?.siteKey) {
+          setTurnstileSiteKey(data.siteKey);
+        }
+      })
+      .catch(() => {
+        // fallback to default test siteKey
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    setSignUpTurnstileToken('');
+    setLoginTurnstileToken('');
+  }, [screen]);
+
+  // --- DASHBOARD LOADER & SESSION RESTORE ---
+  const loadDashboard = useCallback(async (token: string) => {
+    const data = await apiRequest<{
+      user: AppwriteUserRow;
+      wallet: AppwriteWalletRow;
+      trades: AppwriteTradeRow[];
+      echanges: AppwriteEchangeRow[];
+      depotsRetraits: AppwriteDepotRetraitRow[];
+      earn: AppwriteEarnRow[];
+      notifications: AppwriteNotificationRow[];
+    }>('/api/me/dashboard', { token });
+
+    setUserRow(data.user);
+    setWalletRow(data.wallet);
+    setTradesList(data.trades || []);
+    setEchangesList(data.echanges || []);
+    setDepotsRetraitsList(data.depotsRetraits || []);
+    setEarnList(data.earn || []);
+    setNotificationsList(data.notifications || []);
+  }, []);
+
+  const clearAuthSession = useCallback(() => {
+    try {
+      localStorage.removeItem(SESSION_STORAGE_KEY);
+    } catch {
+      // ignore storage errors
+    }
+    setSessionToken(null);
+    setUserRow(null);
+    setWalletRow(null);
+    setTradesList([]);
+    setEchangesList([]);
+    setDepotsRetraitsList([]);
+    setEarnList([]);
+    setNotificationsList([]);
+  }, []);
+
+  useEffect(() => {
+    if (!sessionToken) {
+      setBootstrapping(false);
+      return;
+    }
+    let cancelled = false;
+    (async () => {
+      try {
+        const sess = await apiRequest<{
+          userId: string;
+          requiresEmailVerification: boolean;
+          user: AppwriteUserRow;
+          wallet: AppwriteWalletRow;
+        }>('/api/me/session', { token: sessionToken });
+
+        if (cancelled) return;
+        setUserRow(sess.user);
+        setWalletRow(sess.wallet);
+        if (sess.requiresEmailVerification) {
+          setScreen('verifyEmail');
+        } else {
+          await loadDashboard(sessionToken);
+          if (!cancelled) setScreen('main');
+        }
+      } catch {
+        if (!cancelled) {
+          clearAuthSession();
+          setScreen('splash');
+        }
+      } finally {
+        if (!cancelled) setBootstrapping(false);
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  // --- SERVER-SENT EVENTS (SSE) FOR LIVE NOTIFICATIONS ---
+  useEffect(() => {
+    if (!sessionToken || !userRow?.user_id || !userRow?.email_verifie) return;
+
+    const unsubscribe = subscribeToNotificationsStream<AppwriteNotificationRow>(
+      sessionToken,
+      payload => {
+        if (!payload || payload.user_id !== userRow.user_id) return;
+
+        setNotificationsList(prev => {
+          const exists = prev.some(n => n.$id === payload.$id);
+          if (exists) {
+            return prev.map(n => (n.$id === payload.$id ? payload : n));
+          }
+          showToast(`🔔 ${payload.message}`);
+          return [payload, ...prev];
+        });
+
+        if (payload.type === 'success' || payload.titre === 'Dépôt validé') {
+          void loadDashboard(sessionToken);
+        }
+      }
+    );
+
+    return () => {
+      unsubscribe();
+    };
+  }, [sessionToken, userRow?.user_id, userRow?.email_verifie, showToast, loadDashboard]);
+
+  // --- FORMAT HELPERS ---
+  const formatMoney = (amountAr: number, cur: 'MGA' | 'USD' = displayCurrency) => {
+    if (cur === 'USD') {
+      const usd = amountAr / USD_TO_MGA;
+      return `$${usd.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+    }
+    return `${Math.round(amountAr).toLocaleString('fr-FR')} Ar`;
+  };
+
+  // --- AUTHENTICATION FORMS STATE ---
+  const [signUpData, setSignUpData] = useState({
+    nom: '',
+    prenom: '',
+    email: '',
+    password: '',
+    confirmPassword: '',
+    paysOrigine: 'Madagascar 🇲🇬',
+    numero: '',
+    parrain: '',
+    accepteConditions: false
+  });
+  const [showSignUpPassword, setShowSignUpPassword] = useState(false);
+  const [showSignUpConfirmPassword, setShowSignUpConfirmPassword] = useState(false);
+  const [signUpError, setSignUpError] = useState('');
+  const [signUpLoading, setSignUpLoading] = useState(false);
+
+  // Verification email OTP state
+  const [verifyOtpInput, setVerifyOtpInput] = useState('');
+  const [verifyOtpError, setVerifyOtpError] = useState('');
+  const [verifyOtpLoading, setVerifyOtpLoading] = useState(false);
+  const [resendCooldown, setResendCooldown] = useState(60);
+  const [resendLoading, setResendLoading] = useState(false);
+
+  useEffect(() => {
+    if (screen !== 'verifyEmail' || resendCooldown <= 0) return;
+    const t = setTimeout(() => setResendCooldown(c => c - 1), 1000);
+    return () => clearTimeout(t);
+  }, [screen, resendCooldown]);
+
+  // Login & Forgot Password state
+  const [loginEmail, setLoginEmail] = useState('');
+  const [loginPassword, setLoginPassword] = useState('');
+  const [showLoginPassword, setShowLoginPassword] = useState(false);
+  const [loginError, setLoginError] = useState('');
+  const [loginLoading, setLoginLoading] = useState(false);
+
+  const [forgotStep, setForgotStep] = useState<'email' | 'code'>('email');
+  const [forgotEmail, setForgotEmail] = useState('');
+  const [forgotUserId, setForgotUserId] = useState('');
+  const [forgotCode, setForgotCode] = useState('');
+  const [forgotNewPassword, setForgotNewPassword] = useState('');
+  const [showForgotPassword, setShowForgotPassword] = useState(false);
+  const [forgotError, setForgotError] = useState('');
+  const [forgotLoading, setForgotLoading] = useState(false);
+
+  const selectedCountryOption = useMemo(
+    () => COUNTRY_OPTIONS.find(c => c.label === signUpData.paysOrigine) || COUNTRY_OPTIONS[0],
+    [signUpData.paysOrigine]
+  );
+
+  const passwordChecks = useMemo(() => {
+    const pw = signUpData.password;
+    const hasMinLen = pw.length >= 8;
+    const hasUpper = /[A-Z]/.test(pw);
+    const hasLower = /[a-z]/.test(pw);
+    const hasDigit = /[0-9]/.test(pw);
+    const hasSpecial = /[^A-Za-z0-9]/.test(pw);
+    const missing: string[] = [];
+    if (!hasMinLen) missing.push('8 caractères min');
+    if (!hasUpper) missing.push('Majuscule');
+    if (!hasLower) missing.push('lettre minuscule');
+    if (!hasDigit) missing.push('chiffre');
+    if (!hasSpecial) missing.push('caractère spécial');
+    const score = [hasMinLen, hasUpper, hasLower, hasDigit, hasSpecial].filter(Boolean).length;
+    return { score, missing, isValid: score === 5 };
+  }, [signUpData.password]);
+
+  const passwordsMatch =
+    signUpData.password.length > 0 && signUpData.password === signUpData.confirmPassword;
+  const localPhoneDigits = signUpData.numero.replace(/[^0-9]/g, '');
+  const fullPhoneWithPrefix = `${selectedCountryOption.dialCode}${localPhoneDigits}`;
+
+  const canSubmitSignUp =
+    signUpData.nom.trim().length > 0 &&
+    /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(signUpData.email.trim()) &&
+    passwordChecks.isValid &&
+    passwordsMatch &&
+    localPhoneDigits.length >= 6 &&
+    signUpData.accepteConditions;
+
+  const handleSignUpSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setSignUpError('');
+    if (!canSubmitSignUp) {
+      setSignUpError('Veuillez remplir correctement tous les champs obligatoires.');
+      return;
+    }
+    if (!signUpTurnstileToken) {
+      setSignUpError('Veuillez valider la vérification Cloudflare (Je ne suis pas un robot).');
+      return;
+    }
+
+    setSignUpLoading(true);
+    try {
+      const res = await apiRequest<{
+        sessionSecret: string;
+        userId: string;
+        requiresEmailVerification: boolean;
+        user: AppwriteUserRow;
+        wallet: AppwriteWalletRow;
+      }>('/api/auth/register', {
+        method: 'POST',
+        body: {
+          nom: signUpData.nom.trim(),
+          prenom: signUpData.prenom.trim(),
+          email: signUpData.email.trim().toLowerCase(),
+          telephone: fullPhoneWithPrefix,
+          password: signUpData.password,
+          parrain: signUpData.parrain.trim(),
+          pays: signUpData.paysOrigine,
+          turnstileToken: signUpTurnstileToken
+        }
+      });
+
+      localStorage.setItem(SESSION_STORAGE_KEY, res.sessionSecret);
+      setSessionToken(res.sessionSecret);
+      setUserRow(res.user);
+      setWalletRow(res.wallet);
+      setVerifyOtpInput('');
+      setVerifyOtpError('');
+      setResendCooldown(60);
+      setSignUpTurnstileToken('');
+      setSignUpTurnstileReset(k => k + 1);
+      setScreen('verifyEmail');
+      showToast('Code de vérification envoyé à votre email');
+    } catch (err) {
+      setSignUpTurnstileToken('');
+      setSignUpTurnstileReset(k => k + 1);
+      setSignUpError(err instanceof Error ? err.message : 'Erreur lors de l’inscription.');
+    } finally {
+      setSignUpLoading(false);
+    }
+  };
+
+  const handleVerifyEmailCode = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setVerifyOtpError('');
+    const code = verifyOtpInput.trim();
+    if (!/^\d{6}$/.test(code)) {
+      setVerifyOtpError('Code incorrect');
+      return;
+    }
+    if (!sessionToken) return;
+
+    setVerifyOtpLoading(true);
+    try {
+      await apiRequest('/api/auth/verify-email', {
+        method: 'POST',
+        token: sessionToken,
+        body: { code }
+      });
+      await loadDashboard(sessionToken);
+      setScreen('main');
+      setActiveTab('trading');
+      showToast('✅ Compte vérifié avec succès');
+    } catch (err) {
+      setVerifyOtpError(err instanceof Error ? err.message : 'Code incorrect');
+    } finally {
+      setVerifyOtpLoading(false);
+    }
+  };
+
+  const handleResendEmailCode = async () => {
+    if (!sessionToken || resendCooldown > 0 || resendLoading) return;
+    setVerifyOtpError('');
+    setResendLoading(true);
+    try {
+      await apiRequest('/api/auth/resend-code', {
+        method: 'POST',
+        token: sessionToken
+      });
+      setResendCooldown(60);
+      showToast('Code de vérification envoyé à votre email');
+    } catch (err) {
+      setVerifyOtpError(err instanceof Error ? err.message : 'Impossible de renvoyer le code.');
+    } finally {
+      setResendLoading(false);
+    }
+  };
+
+  const handleRealLogin = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setLoginError('');
+    if (!loginEmail.trim() || !loginPassword) {
+      setLoginError('Veuillez entrer votre email et votre mot de passe.');
+      return;
+    }
+    if (!loginTurnstileToken) {
+      setLoginError('Veuillez valider la vérification Cloudflare (Je ne suis pas un robot).');
+      return;
+    }
+
+    setLoginLoading(true);
+    try {
+      const res = await apiRequest<{
+        sessionSecret: string;
+        userId: string;
+        requiresEmailVerification: boolean;
+        user: AppwriteUserRow;
+        wallet: AppwriteWalletRow;
+      }>('/api/auth/login', {
+        method: 'POST',
+        body: {
+          email: loginEmail.trim().toLowerCase(),
+          password: loginPassword,
+          turnstileToken: loginTurnstileToken
+        }
+      });
+
+      localStorage.setItem(SESSION_STORAGE_KEY, res.sessionSecret);
+      setSessionToken(res.sessionSecret);
+      setUserRow(res.user);
+      setWalletRow(res.wallet);
+      setLoginTurnstileToken('');
+      setLoginTurnstileReset(k => k + 1);
+
+      if (res.requiresEmailVerification) {
+        setVerifyOtpInput('');
+        setVerifyOtpError('');
+        setResendCooldown(60);
+        setScreen('verifyEmail');
+        showToast('Veuillez entrer le code envoyé à votre email.');
+      } else {
+        await loadDashboard(res.sessionSecret);
+        setScreen('main');
+        setActiveTab('trading');
+        showToast(`Bienvenue ${res.user.nom} !`);
+      }
+    } catch (err) {
+      setLoginTurnstileToken('');
+      setLoginTurnstileReset(k => k + 1);
+      setLoginError(err instanceof Error ? err.message : 'Email ou mot de passe incorrect.');
+    } finally {
+      setLoginLoading(false);
+    }
+  };
+
+  const handleLogout = async () => {
+    if (sessionToken) {
+      try {
+        await apiRequest('/api/auth/logout', { method: 'POST', token: sessionToken });
+      } catch {
+        // ignore logout error
+      }
+    }
+    clearAuthSession();
+    setActiveModal(null);
+    setScreen('splash');
+    showToast('Déconnecté');
+  };
+
+  const handleSendForgotCode = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setForgotError('');
+    setForgotLoading(true);
+    try {
+      const res = await apiRequest<{ ok: boolean; userId: string }>('/api/auth/forgot-password', {
+        method: 'POST',
+        body: { email: forgotEmail.trim().toLowerCase() }
+      });
+      setForgotUserId(res.userId);
+      setForgotStep('code');
+      showToast('Un code à 6 chiffres a été envoyé à votre email.');
+    } catch (err) {
+      setForgotError(err instanceof Error ? err.message : 'Adresse e-mail introuvable.');
+    } finally {
+      setForgotLoading(false);
+    }
+  };
+
+  const handleResetPassword = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setForgotError('');
+    setForgotLoading(true);
+    try {
+      await apiRequest('/api/auth/reset-password', {
+        method: 'POST',
+        body: {
+          userId: forgotUserId,
+          code: forgotCode.trim(),
+          newPassword: forgotNewPassword
+        }
+      });
+      setForgotStep('email');
+      setForgotCode('');
+      setForgotNewPassword('');
+      setScreen('login');
+      showToast('✓ Mot de passe mis à jour ! Connectez-vous.');
+    } catch (err) {
+      setForgotError(err instanceof Error ? err.message : 'Code incorrect ou expiré.');
+    } finally {
+      setForgotLoading(false);
+    }
+  };
+
+  // --- NOTIFICATIONS ACTIONS ---
+  const handleMarkNotificationRead = async (notif: AppwriteNotificationRow) => {
+    if (!sessionToken || notif.lu) return;
+    setNotificationsList(prev => prev.map(n => (n.$id === notif.$id ? { ...n, lu: true } : n)));
+    try {
+      await apiRequest(`/api/notifications/${notif.$id}/read`, {
+        method: 'PATCH',
+        token: sessionToken
+      });
+    } catch {
+      // keep optimistic update
+    }
+  };
+
+  const handleMarkAllNotificationsRead = async () => {
+    if (!sessionToken) return;
+    setNotificationsList(prev => prev.map(n => ({ ...n, lu: true })));
+    try {
+      await apiRequest('/api/notifications/read-all', {
+        method: 'POST',
+        token: sessionToken
+      });
+    } catch {
+      // ignore
+    }
+  };
+
+  // --- TRADING STATE & ACTIONS (APPWRITE) ---
+  const [tradeStrategyChoice, setTradeStrategyChoice] = useState<'MANUEL' | 'BOT'>('MANUEL');
+  const [tradingModeType, setTradingModeType] = useState<'SPOT' | 'LEVIER'>('LEVIER');
   const [selectedTimeframe, setSelectedTimeframe] = useState<'1m' | '5m' | '15m' | '1h' | '4h' | '1D'>('1m');
+  const [leverageInput, setLeverageInput] = useState<string>('10');
+  const [tradeAmountCurrency, setTradeAmountCurrency] = useState<string>('ARIARY');
+  const [tradeAmountInput, setTradeAmountInput] = useState<string>('5000');
+  const [autoPercentInput, setAutoPercentInput] = useState<string>('25');
+  const [tradeSubmitting, setTradeSubmitting] = useState<boolean>(false);
 
-  // Modif 5: FIX BUG LEVIER & INVESTISSEMENT (String inputs for free erase and clean numbers)
-  const [leverageInput, setLeverageInput] = useState<string>('100');
-  const [tradeAmountInput, setTradeAmountInput] = useState<string>('50');
+  // --- AUTO STRATEGIE (BOTS BINANCE: Spot Grid Bot & DCA Bot) ---
+  const [selectedBotType, setSelectedBotType] = useState<'SPOT_GRID' | 'DCA'>('SPOT_GRID');
+  const [botAmountCurrency, setBotAmountCurrency] = useState<string>('ARIARY');
+  const [botAmountInput, setBotAmountInput] = useState<string>('10000');
+  const [botGridProfile, setBotGridProfile] = useState<'Prudent (5 grilles)' | 'Équilibré (10 grilles)' | 'Dynamique (20 grilles)'>('Équilibré (10 grilles)');
+  const [botDcaFreq, setBotDcaFreq] = useState<'Toutes les 1h' | 'Toutes les 4h' | 'Quotidien'>('Toutes les 4h');
+  const [botDcaTp, setBotDcaTp] = useState<'+2%' | '+5%' | '+10%'>('+5%');
+  const [botSubmitting, setBotSubmitting] = useState<boolean>(false);
 
-  // Parsed numeric values without locking
+  const sanitizeDecimalInput = useCallback((raw: string): string => {
+    const filtered = raw.replace(/[^0-9.,]/g, '');
+    let seenSep = false;
+    let out = '';
+    for (const ch of filtered) {
+      if (ch === '.' || ch === ',') {
+        if (!seenSep) {
+          out += ch;
+          seenSep = true;
+        }
+      } else {
+        out += ch;
+      }
+    }
+    return out;
+  }, []);
+
+  const parseDecimalValue = useCallback((raw: string): number => {
+    const norm = raw.trim().replace(',', '.');
+    if (!norm || norm === '.') return 0;
+    const n = parseFloat(norm);
+    return isNaN(n) || n < 0 ? 0 : n;
+  }, []);
+
+  const tradeAmountCurrencies = useMemo(() => {
+    const priority = ['BTC', 'DOGE', 'USDT', 'ETH', 'SOL', 'SALOMA'];
+    const baseList = [
+      { symbol: 'ARIARY', shortLabel: 'Ar', label: 'ARIARY (Ar)', priceUsd: 1 / USD_TO_MGA, priceAr: 1 },
+      { symbol: 'USD', shortLabel: 'USD', label: 'USD ($)', priceUsd: 1, priceAr: USD_TO_MGA }
+    ];
+    const seen = new Set<string>(['ARIARY', 'USD']);
+    const prioritizedCoins: typeof baseList = [];
+    const restCoins: typeof baseList = [];
+
+    for (const sym of priority) {
+      const c = coins.find(item => item.symbol.toUpperCase() === sym);
+      if (c && !seen.has(sym)) {
+        seen.add(sym);
+        prioritizedCoins.push({
+          symbol: sym,
+          shortLabel: sym,
+          label: `${sym} (${c.name})`,
+          priceUsd: c.price,
+          priceAr: c.price * USD_TO_MGA
+        });
+      }
+    }
+    for (const c of coins) {
+      const sym = c.symbol.toUpperCase();
+      if (!seen.has(sym)) {
+        seen.add(sym);
+        restCoins.push({
+          symbol: sym,
+          shortLabel: sym,
+          label: `${sym} (${c.name})`,
+          priceUsd: c.price,
+          priceAr: c.price * USD_TO_MGA
+        });
+      }
+    }
+    return [...baseList, ...prioritizedCoins, ...restCoins];
+  }, [coins]);
+
+  const selectedTradeCurrencyObj = useMemo(
+    () =>
+      tradeAmountCurrencies.find(c => c.symbol === tradeAmountCurrency) ||
+      tradeAmountCurrencies[0],
+    [tradeAmountCurrencies, tradeAmountCurrency]
+  );
+
+  const selectedBotCurrencyObj = useMemo(
+    () =>
+      tradeAmountCurrencies.find(c => c.symbol === botAmountCurrency) ||
+      tradeAmountCurrencies[0],
+    [tradeAmountCurrencies, botAmountCurrency]
+  );
+
+  const formatConvertedCurrencyAmount = useCallback(
+    (amountAr: number, sym: string, priceAr: number): string => {
+      if (amountAr <= 0) return '0';
+      if (sym === 'ARIARY') return String(Math.round(amountAr));
+      const val = amountAr / Math.max(priceAr, 1e-12);
+      if (sym === 'USD') {
+        return val >= 0.01 ? String(Number(val.toFixed(2))) : String(Number(val.toFixed(4)));
+      }
+      if (val >= 100) return String(Number(val.toFixed(2)));
+      if (val >= 1) return String(Number(val.toFixed(4)));
+      return String(Number(val.toFixed(8)));
+    },
+    []
+  );
+
+  const handleChangeTradeAmountCurrency = useCallback(
+    (nextSym: string) => {
+      const currentAr =
+        parseDecimalValue(tradeAmountInput) * selectedTradeCurrencyObj.priceAr;
+      const nextObj =
+        tradeAmountCurrencies.find(c => c.symbol === nextSym) ||
+        tradeAmountCurrencies[0];
+      setTradeAmountCurrency(nextSym);
+      if (tradeAmountInput.trim() === '') {
+        setTradeAmountInput('');
+      } else {
+        setTradeAmountInput(
+          formatConvertedCurrencyAmount(currentAr, nextSym, nextObj.priceAr)
+        );
+      }
+    },
+    [
+      tradeAmountInput,
+      selectedTradeCurrencyObj,
+      tradeAmountCurrencies,
+      parseDecimalValue,
+      formatConvertedCurrencyAmount
+    ]
+  );
+
+  const handleChangeBotAmountCurrency = useCallback(
+    (nextSym: string) => {
+      const currentAr =
+        parseDecimalValue(botAmountInput) * selectedBotCurrencyObj.priceAr;
+      const nextObj =
+        tradeAmountCurrencies.find(c => c.symbol === nextSym) ||
+        tradeAmountCurrencies[0];
+      setBotAmountCurrency(nextSym);
+      if (botAmountInput.trim() === '') {
+        setBotAmountInput('');
+      } else {
+        setBotAmountInput(
+          formatConvertedCurrencyAmount(currentAr, nextSym, nextObj.priceAr)
+        );
+      }
+    },
+    [
+      botAmountInput,
+      selectedBotCurrencyObj,
+      tradeAmountCurrencies,
+      parseDecimalValue,
+      formatConvertedCurrencyAmount
+    ]
+  );
+
   const numericLeverage = useMemo(() => {
     const val = parseFloat(leverageInput);
     if (isNaN(val) || val <= 0) return 1;
-    return Math.min(500, val);
+    return Math.min(500, Math.round(val));
   }, [leverageInput]);
 
-  const numericAmount = useMemo(() => {
-    const val = parseFloat(tradeAmountInput);
-    if (isNaN(val) || val < 0) return 0;
-    return val;
-  }, [tradeAmountInput]);
+  const numericAmountAr = useMemo(() => {
+    const rawVal = parseDecimalValue(tradeAmountInput);
+    return Math.round(rawVal * selectedTradeCurrencyObj.priceAr);
+  }, [tradeAmountInput, selectedTradeCurrencyObj, parseDecimalValue]);
+
+  const numericBotAmountAr = useMemo(() => {
+    const rawVal = parseDecimalValue(botAmountInput);
+    return Math.round(rawVal * selectedBotCurrencyObj.priceAr);
+  }, [botAmountInput, selectedBotCurrencyObj, parseDecimalValue]);
 
   const liquidationThreshold = useMemo(() => {
     return Number((100 / Math.max(1, numericLeverage)).toFixed(2));
   }, [numericLeverage]);
 
-  // Active positions & history
-  const [activePositions, setActivePositions] = useState<Position[]>([]);
-  const [tradeHistory, setTradeHistory] = useState<TradeHistoryItem[]>([
-    {
-      id: 'th-1',
-      clientName: 'Invité SALOMA',
-      coinSymbol: 'BTC',
-      type: 'BUY',
-      entryPrice: 67200,
-      closePrice: 68150,
-      amountUsd: 100,
-      leverage: 50,
-      pnlUsd: 70.68,
-      pnlPercent: 70.68,
-      timestamp: Date.now() - 3600000 * 4,
-      mode: 'Manuel'
-    },
-    {
-      id: 'th-2',
-      clientName: 'Jean-Luc Rakoto',
-      coinSymbol: 'SOL',
-      type: 'SELL',
-      entryPrice: 188.4,
-      closePrice: 183.2,
-      amountUsd: 50,
-      leverage: 25,
-      pnlUsd: 34.50,
-      pnlPercent: 69.00,
-      timestamp: Date.now() - 3600000 * 12,
-      mode: 'Auto'
-    }
-  ]);
-
-  // Update position PnL live
-  useEffect(() => {
-    if (activePositions.length === 0) return;
-    setActivePositions(prev =>
-      prev.map(pos => {
-        const curCoin = coins.find(c => c.id === pos.coinId);
-        const curPrice = curCoin ? curCoin.price : pos.currentPrice;
-        let diff = pos.type === 'BUY'
-          ? (curPrice - pos.entryPrice) / pos.entryPrice
-          : (pos.entryPrice - curPrice) / pos.entryPrice;
-        const pnlPct = diff * pos.leverage * 100;
-        const pnlUsd = (pos.amountUsd * pnlPct) / 100;
-        return {
-          ...pos,
-          currentPrice: curPrice,
-          pnlPercent: Number(pnlPct.toFixed(2)),
-          pnlUsd: Number(pnlUsd.toFixed(2))
-        };
-      })
+  const applyAutoPercent = (pctValue: number | 'MAX') => {
+    const pct = pctValue === 'MAX' ? 100 : Math.max(0, Math.min(100, pctValue));
+    setAutoPercentInput(String(pct));
+    const computedAr = (soldeCompteTradeAr * pct) / 100;
+    setTradeAmountInput(
+      formatConvertedCurrencyAmount(
+        computedAr,
+        tradeAmountCurrency,
+        selectedTradeCurrencyObj.priceAr
+      )
     );
+  };
+
+  const activeTrades = useMemo(
+    () => tradesList.filter(t => t.statut === 'en_cours'),
+    [tradesList]
+  );
+  const activeBotTrades = useMemo(
+    () =>
+      activeTrades.filter(
+        t => (t.mode || '').includes('Spot Grid Bot') || (t.mode || '').includes('DCA Bot')
+      ),
+    [activeTrades]
+  );
+  const closedTrades = useMemo(
+    () => tradesList.filter(t => t.statut !== 'en_cours'),
+    [tradesList]
+  );
+
+  const getLivePriceForPair = useCallback(
+    (paire: string, fallback: number) => {
+      const baseSym = paire.split('/')[0]?.toUpperCase();
+      const found = coins.find(c => c.symbol.toUpperCase() === baseSym);
+      return found ? found.price : fallback;
+    },
+    [coins]
+  );
+
+  const handleExecuteTrade = async (side: 'BUY' | 'SELL', mode = 'Manuel') => {
+    if (!sessionToken) return;
+    if (numericAmountAr < 500) {
+      showToast('Montant minimum de trading : 500 Ar.');
+      return;
+    }
+    if (numericAmountAr > soldeCompteTradeAr) {
+      showToast('Solde Compte Trade insuffisant. Convertissez depuis votre Wallet vers Compte Trade.');
+      return;
+    }
+
+    setTradeSubmitting(true);
+    try {
+      const lev = tradingModeType === 'SPOT' ? 1 : numericLeverage;
+      await apiRequest('/api/trades', {
+        method: 'POST',
+        token: sessionToken,
+        body: {
+          paire: `${selectedCoin.symbol}/USDT`,
+          type: side === 'BUY' ? 'achat' : 'vente',
+          montant: numericAmountAr,
+          prix: selectedCoin.price,
+          leverage: lev,
+          mode
+        }
+      });
+      await loadDashboard(sessionToken);
+      showToast(
+        `${side === 'BUY' ? 'BUY (Achat)' : 'SELL (Vente)'} x${lev} via ${activeBrokerExchange} ouvert à $${formatCoinPrice(selectedCoin.price)} (Frais 0.1%)`
+      );
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : 'Erreur création trade.');
+    } finally {
+      setTradeSubmitting(false);
+    }
+  };
+
+  const handleStartBot = async () => {
+    if (!sessionToken) return;
+    if (numericBotAmountAr < 500) {
+      showToast('Montant minimum pour démarrer un Bot : 500 Ar.');
+      return;
+    }
+    if (numericBotAmountAr > soldeCompteTradeAr) {
+      showToast('Solde Compte Trade insuffisant. Convertissez depuis votre Wallet vers Compte Trade.');
+      return;
+    }
+
+    setBotSubmitting(true);
+    const botLabel =
+      selectedBotType === 'SPOT_GRID'
+        ? `Spot Grid Bot (${botGridProfile})`
+        : `DCA Bot (${botDcaFreq}, TP ${botDcaTp})`;
+
+    try {
+      await apiRequest('/api/trades', {
+        method: 'POST',
+        token: sessionToken,
+        body: {
+          paire: `${selectedCoin.symbol}/USDT`,
+          type: 'achat',
+          montant: numericBotAmountAr,
+          prix: selectedCoin.price,
+          leverage: 1,
+          mode: botLabel
+        }
+      });
+      await loadDashboard(sessionToken);
+      showToast(`🤖 ${selectedBotType === 'SPOT_GRID' ? 'Spot Grid Bot' : 'DCA Bot'} démarré sur ${selectedCoin.symbol}/USDT !`);
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : 'Erreur démarrage du bot.');
+    } finally {
+      setBotSubmitting(false);
+    }
+  };
+
+  const handleClosePosition = async (trade: AppwriteTradeRow) => {
+    if (!sessionToken) return;
+    try {
+      const curPrice = getLivePriceForPair(trade.paire, trade.prix);
+      const res = await apiRequest<{ trade: AppwriteTradeRow }>(`/api/trades/${trade.$id}/close`, {
+        method: 'POST',
+        token: sessionToken,
+        body: { currentPrice: curPrice }
+      });
+      await loadDashboard(sessionToken);
+      const p = Number(res.trade.profit) || 0;
+      showToast(`Position clôturée — Profit : ${p >= 0 ? '+' : ''}${p.toLocaleString('fr-FR')} Ar (Compte Trade)`);
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : 'Erreur lors de la clôture.');
+    }
+  };
+
+  // --- ÉCHANGE BYBIT STYLE (SWAP AR <-> CRYPTO & CRYPTO <-> CRYPTO, FRAIS 0.1%) ---
+  const [swapFromSym, setSwapFromSym] = useState<string>('AR');
+  const [swapToSym, setSwapToSym] = useState<string>('BTC');
+  const [swapAmountInput, setSwapAmountInput] = useState<string>('');
+  const [exchangeSubmitting, setExchangeSubmitting] = useState<boolean>(false);
+
+  const exchangeCurrencies = useMemo(() => {
+    const arCurrency = { symbol: 'AR', label: 'Ar (Ariary)', priceUsd: 1 / USD_TO_MGA };
+    const cryptoCurrencies = coins.map(c => ({
+      symbol: c.symbol.toUpperCase(),
+      label: c.symbol.toUpperCase(),
+      priceUsd: c.price
+    }));
+    return [arCurrency, ...cryptoCurrencies];
   }, [coins]);
 
-  // --- ÉCHANGE / SWAP ---
-  const [swapFromCoin, setSwapFromCoin] = useState<string>('usdt');
-  const [swapToCoin, setSwapToCoin] = useState<string>('btc');
-  const [swapAmount, setSwapAmount] = useState<number>(100);
-  const [exchangeHistory, setExchangeHistory] = useState<ExchangeHistoryItem[]>([]);
+  const getAvailableExchangeBalance = useCallback(
+    (sym: string) => {
+      if (sym.toUpperCase() === 'AR') return soldeDisponibleAr;
+      return coinsJson[sym.toUpperCase()] || 0;
+    },
+    [soldeDisponibleAr, coinsJson]
+  );
 
-  // --- WALLET & TRANSFERS ---
-  const [walletHistory, setWalletHistory] = useState<WalletTransaction[]>([]);
-  const [copiedAddress, setCopiedAddress] = useState<boolean>(false);
-  const [withdrawAddress, setWithdrawAddress] = useState<string>('');
-  const [withdrawAmount, setWithdrawAmount] = useState<number>(50);
-  const [transferDirection, setTransferDirection] = useState<'walletToTrading' | 'tradingToWallet'>('walletToTrading');
-  const [transferAmount, setTransferAmount] = useState<number>(100);
+  const fromCurrencyObj = useMemo(
+    () => exchangeCurrencies.find(c => c.symbol === swapFromSym) || exchangeCurrencies[0],
+    [exchangeCurrencies, swapFromSym]
+  );
+  const toCurrencyObj = useMemo(
+    () => exchangeCurrencies.find(c => c.symbol === swapToSym) || exchangeCurrencies[1],
+    [exchangeCurrencies, swapToSym]
+  );
 
-  // --- EARN & SURPRISE ---
-  const [epargnePlan, setEpargnePlan] = useState<'flexible' | '30d' | '90d' | '365d'>('365d');
-  const [epargneAmount, setEpargneAmount] = useState<number>(100);
-  const [activeEpargneList, setActiveEpargneList] = useState<{ id: string; amount: number; apy: number; duration: string; earned: number }[]>([]);
-  const [surpriseClaimed, setSurpriseClaimed] = useState<boolean>(false);
-  const [surpriseOpening, setSurpriseOpening] = useState<boolean>(false);
-  const [surpriseReward, setSurpriseReward] = useState<number | null>(null);
+  const handleFlipExchangePair = () => {
+    const prevFrom = swapFromSym;
+    setSwapFromSym(swapToSym);
+    setSwapToSym(prevFrom);
+  };
 
-  // --- MODIF 1, 2, 3, 4: ADMIN APPLICATION STATE ---
-  const [adminTab, setAdminTab] = useState<'overview' | 'trading' | 'wallet' | 'security'>('overview');
+  const handleExecuteExchange = async () => {
+    if (!sessionToken) return;
+    const amt = parseDecimalValue(swapAmountInput);
+    if (isNaN(amt) || amt <= 0) {
+      showToast('Veuillez saisir un montant valide.');
+      return;
+    }
+    if (fromCurrencyObj.symbol === toCurrencyObj.symbol) {
+      showToast('Choisissez deux devises différentes.');
+      return;
+    }
+
+    setExchangeSubmitting(true);
+    try {
+      await apiRequest('/api/exchanges', {
+        method: 'POST',
+        token: sessionToken,
+        body: {
+          de_devise: fromCurrencyObj.symbol,
+          vers_devise: toCurrencyObj.symbol,
+          montant_envoye: amt,
+          fromPriceUsd: fromCurrencyObj.priceUsd,
+          toPriceUsd: toCurrencyObj.priceUsd
+        }
+      });
+      await loadDashboard(sessionToken);
+      setSwapAmountInput('');
+      showToast('✓ Échange réussi');
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : 'Erreur lors de l’échange.');
+    } finally {
+      setExchangeSubmitting(false);
+    }
+  };
+
+  // --- DÉPÔTS & RETRAITS CRYPTO UNIQUEMENT (50 COINS + CHAÎNE & RÉSEAU) ---
+  const [depositAmountInput, setDepositAmountInput] = useState<string>('');
+  const [depositAccountInput, setDepositAccountInput] = useState<string>('');
+  const [depositPreuveInput, setDepositPreuveInput] = useState<string>('');
+  const [depositSubmitting, setDepositSubmitting] = useState<boolean>(false);
+  const [copiedDepositAddress, setCopiedDepositAddress] = useState<boolean>(false);
+
+  const [withdrawAmountInput, setWithdrawAmountInput] = useState<string>('');
+  const [withdrawAccountInput, setWithdrawAccountInput] = useState<string>('');
+  const [withdrawSubmitting, setWithdrawSubmitting] = useState<boolean>(false);
+
+  // --- CONVERTIR INTERNE (WALLET <-> COMPTE TRADE) ---
+  const [convertDirection, setConvertDirection] = useState<'WALLET_TO_TRADE' | 'TRADE_TO_WALLET'>('WALLET_TO_TRADE');
+  const [convertAmountInput, setConvertAmountInput] = useState<string>('');
+  const [convertSubmitting, setConvertSubmitting] = useState<boolean>(false);
+
+  const handleConfirmConvertWalletTrade = async () => {
+    if (!sessionToken) return;
+    const amt = Math.round(Number(convertAmountInput));
+    if (isNaN(amt) || amt < 100) {
+      showToast('Montant minimum de conversion : 100 Ar.');
+      return;
+    }
+    const maxAvail = convertDirection === 'WALLET_TO_TRADE' ? soldeDisponibleAr : soldeCompteTradeAr;
+    if (amt > maxAvail) {
+      showToast(
+        convertDirection === 'WALLET_TO_TRADE'
+          ? 'Solde WALLET insuffisant.'
+          : 'Solde COMPTE TRADE disponible insuffisant.'
+      );
+      return;
+    }
+
+    setConvertSubmitting(true);
+    try {
+      await apiRequest('/api/wallet/convert', {
+        method: 'POST',
+        token: sessionToken,
+        body: {
+          direction: convertDirection,
+          amount: amt
+        }
+      });
+      await loadDashboard(sessionToken);
+      setConvertAmountInput('');
+      setActiveModal(null);
+      showToast(
+        convertDirection === 'WALLET_TO_TRADE'
+          ? `✓ ${amt.toLocaleString('fr-FR')} Ar transféré vers Compte Trade !`
+          : `✓ ${amt.toLocaleString('fr-FR')} Ar transféré vers Wallet !`
+      );
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : 'Erreur lors de la conversion.');
+    } finally {
+      setConvertSubmitting(false);
+    }
+  };
+
+  const handleOpenDeposit = () => {
+    setIsWalletCoinDropdownOpen(false);
+    setWalletCoinSearchTerm('');
+    setCopiedDepositAddress(false);
+    setActiveModal('deposit');
+  };
+
+  const handleOpenWithdraw = () => {
+    if ((userRow?.kyc_level ?? 0) < 2) {
+      showToast('Veuillez compléter votre KYC avant de retirer');
+      setActiveModal('kyc');
+      return;
+    }
+    setIsWalletCoinDropdownOpen(false);
+    setWalletCoinSearchTerm('');
+    setWithdrawTurnstileToken('');
+    setWithdrawTurnstileReset(k => k + 1);
+    setActiveModal('withdraw');
+  };
+
+  const handleConfirmDepositRequest = async () => {
+    if (!sessionToken) return;
+    const coinSym = selectedWalletCoin.symbol.toUpperCase();
+    const amt = parseFloat(depositAmountInput);
+    if (isNaN(amt) || amt < activeNetwork.minDeposit) {
+      showToast(`Montant minimum de dépôt ${coinSym} (${activeNetworkLabel}) : ${activeNetwork.minDeposit} ${coinSym}.`);
+      return;
+    }
+    if (!depositAccountInput.trim() || depositAccountInput.trim().length < 6) {
+      showToast('Veuillez entrer le TX Hash de votre transaction blockchain.');
+      return;
+    }
+
+    setDepositSubmitting(true);
+    try {
+      await apiRequest('/api/wallet/deposit', {
+        method: 'POST',
+        token: sessionToken,
+        body: {
+          montant: amt,
+          methode: 'Crypto',
+          numero_compte: depositAccountInput.trim(),
+          devise: coinSym,
+          chain: activeBlockchain,
+          networkCode: activeNetwork.chain,
+          networkLabel: activeNetworkLabel,
+          preuve: depositPreuveInput.trim()
+        }
+      });
+      await loadDashboard(sessionToken);
+      setDepositAmountInput('');
+      setDepositAccountInput('');
+      setDepositPreuveInput('');
+      setActiveModal(null);
+      showToast('✓ Dépôt reçu - en attente de validation');
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : 'Erreur lors du dépôt.');
+    } finally {
+      setDepositSubmitting(false);
+    }
+  };
+
+  const handleConfirmWithdraw = async () => {
+    if (!sessionToken) return;
+    if (!withdrawTurnstileToken) {
+      showToast('Veuillez valider la vérification Cloudflare avant de retirer.');
+      return;
+    }
+    const coinSym = selectedWalletCoin.symbol.toUpperCase();
+    const amt = parseFloat(withdrawAmountInput);
+    const salomaWithdrawFee = (amt || 0) * 0.0015;
+    const totalFrais = salomaWithdrawFee + activeNetwork.withdrawFee;
+    if (isNaN(amt) || amt <= totalFrais) {
+      showToast(`Le montant doit dépasser 0.15% + frais réseau (${activeNetwork.withdrawFee} ${coinSym}).`);
+      return;
+    }
+    if (amt < activeNetwork.minWithdraw) {
+      showToast(`Montant minimum de retrait ${coinSym} (${activeNetworkLabel}) : ${activeNetwork.minWithdraw} ${coinSym}.`);
+      return;
+    }
+    if (!withdrawAccountInput.trim() || withdrawAccountInput.trim().length < 6) {
+      showToast(`Veuillez entrer une adresse de réception ${coinSym} (${activeBlockchain} • ${activeNetworkLabel}) valide.`);
+      return;
+    }
+
+    const coinPrice = selectedWalletCoin.price || 0;
+    setWithdrawSubmitting(true);
+    try {
+      await apiRequest('/api/wallet/withdraw', {
+        method: 'POST',
+        token: sessionToken,
+        body: {
+          montant: amt,
+          methode: 'Crypto',
+          numero_compte: withdrawAccountInput.trim(),
+          devise: coinSym,
+          chain: activeBlockchain,
+          networkCode: activeNetwork.chain,
+          networkLabel: activeNetworkLabel,
+          priceUsd: coinPrice,
+          turnstileToken: withdrawTurnstileToken
+        }
+      });
+      await loadDashboard(sessionToken);
+      setWithdrawAmountInput('');
+      setWithdrawAccountInput('');
+      setWithdrawTurnstileToken('');
+      setWithdrawTurnstileReset(k => k + 1);
+      setActiveModal(null);
+      showToast('✓ Retrait en cours');
+    } catch (err) {
+      setWithdrawTurnstileToken('');
+      setWithdrawTurnstileReset(k => k + 1);
+      showToast(err instanceof Error ? err.message : 'Erreur lors du retrait.');
+    } finally {
+      setWithdrawSubmitting(false);
+    }
+  };
+
+  // --- EARN RÉEL (earn + Wallets) ---
+  const [earnLoadingId, setEarnLoadingId] = useState<string | null>(null);
+  const [watchingVideoId, setWatchingVideoId] = useState<string | null>(null);
+  const [videoCountdown, setVideoCountdown] = useState<number>(0);
+  const [epargneAmountInput, setEpargneAmountInput] = useState<string>('');
+  const [earnWithdrawLoading, setEarnWithdrawLoading] = useState<null | 'profit' | 'fund'>(null);
+  const [earnClockMs, setEarnClockMs] = useState<number>(() => Date.now());
+
+  useEffect(() => {
+    if (activeTab !== 'earn') return;
+    setEarnClockMs(Date.now());
+    const t = setInterval(() => setEarnClockMs(Date.now()), 5000);
+    return () => clearInterval(t);
+  }, [activeTab]);
+
+  const welcomeGiftClaimed = useMemo(
+    () => earnList.some(e => e.task_id === 'welcome-gift'),
+    [earnList]
+  );
+
+  const completedVideoIds = useMemo(
+    () => new Set(earnList.map(e => e.task_id).filter(Boolean)),
+    [earnList]
+  );
+
+  const totalEarnAr = useMemo(
+    () =>
+      earnList
+        .filter(e => e.type_gain !== 'epargne' && e.type_gain !== 'retrait_fond')
+        .reduce((s, e) => s + (Number(e.montant) || 0), 0),
+    [earnList]
+  );
+
+  const epargnePlans = useMemo(
+    () => earnList.filter(e => e.type_gain === 'epargne'),
+    [earnList]
+  );
+
+  const fondEpargneAr = useMemo(() => {
+    const deposited = earnList
+      .filter(e => e.type_gain === 'epargne')
+      .reduce((s, e) => s + (Number(e.montant) || 0), 0);
+    const withdrawn = earnList
+      .filter(e => e.type_gain === 'retrait_fond')
+      .reduce((s, e) => s + (Number(e.montant) || 0), 0);
+    const remaining = Math.max(0, Math.round(deposited - withdrawn));
+    return Math.min(remaining, Math.round(soldeBloqueAr));
+  }, [earnList, soldeBloqueAr]);
+
+  const profitEarnDisponibleAr = useMemo(() => {
+    let totalEpargne = 0;
+    let totalFondRetire = 0;
+    let totalProfitRetire = 0;
+    let rawAccrued = 0;
+    for (const row of earnList) {
+      const amt = Number(row.montant) || 0;
+      if (row.type_gain === 'epargne') {
+        totalEpargne += amt;
+        const ts = Date.parse(row.date || '');
+        if (!Number.isNaN(ts)) {
+          const elapsedMs = Math.max(0, earnClockMs - ts);
+          rawAccrued += (amt * 0.08 * elapsedMs) / (365 * 86400 * 1000);
+        }
+      } else if (row.type_gain === 'retrait_fond') {
+        totalFondRetire += amt;
+      } else if (row.type_gain === 'retrait_profit') {
+        totalProfitRetire += amt;
+      }
+    }
+    const remaining = Math.max(0, totalEpargne - totalFondRetire);
+    const activeRatio = totalEpargne > 0 ? Math.max(0, Math.min(1, remaining / totalEpargne)) : 0;
+    return Math.max(0, Math.floor(rawAccrued * activeRatio - totalProfitRetire));
+  }, [earnList, earnClockMs]);
+
+  const earnBalanceCurve = useMemo(() => {
+    const sorted = [...earnList].sort((a, b) => {
+      const ta = Date.parse(a.date || '') || 0;
+      const tb = Date.parse(b.date || '') || 0;
+      return ta - tb;
+    });
+    const points: Array<{
+      value: number;
+      delta: number;
+      label: string;
+      dateLabel: string;
+      isDown: boolean;
+    }> = [{ value: 0, delta: 0, label: 'Départ', dateLabel: '', isDown: false }];
+
+    let running = 0;
+    for (const row of sorted) {
+      const amt = Number(row.montant) || 0;
+      const isWithdraw = row.type_gain === 'retrait_fond' || row.type_gain === 'retrait_profit';
+      const delta = isWithdraw ? -amt : amt;
+      running = Math.max(0, running + delta);
+      points.push({
+        value: running,
+        delta,
+        label: row.description || row.type_gain,
+        dateLabel: row.date ? new Date(row.date).toLocaleDateString('fr-FR', { day: '2-digit', month: '2-digit' }) : '',
+        isDown: delta < 0
+      });
+    }
+    if (profitEarnDisponibleAr > 0) {
+      running += profitEarnDisponibleAr;
+      points.push({
+        value: running,
+        delta: profitEarnDisponibleAr,
+        label: 'Profit accumulé (8%/an)',
+        dateLabel: 'Live',
+        isDown: false
+      });
+    }
+    return points;
+  }, [earnList, profitEarnDisponibleAr]);
+
+  const handleWithdrawEarnProfit = async () => {
+    if (!sessionToken || earnWithdrawLoading) return;
+    setEarnWithdrawLoading('profit');
+    try {
+      const res = await apiRequest<{ amount: number }>('/api/earn/withdraw-profit', {
+        method: 'POST',
+        token: sessionToken
+      });
+      await loadDashboard(sessionToken);
+      showToast(`✓ Profit retiré : +${Number(res.amount || 0).toLocaleString('fr-FR')} Ar → Wallet`);
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : 'Aucun profit disponible à retirer.');
+    } finally {
+      setEarnWithdrawLoading(null);
+    }
+  };
+
+  const handleWithdrawEarnFund = async () => {
+    if (!sessionToken || earnWithdrawLoading) return;
+    setEarnWithdrawLoading('fund');
+    try {
+      const res = await apiRequest<{ amount: number }>('/api/earn/withdraw-fund', {
+        method: 'POST',
+        token: sessionToken
+      });
+      await loadDashboard(sessionToken);
+      showToast(`✓ Fond Épargne retiré : +${Number(res.amount || 0).toLocaleString('fr-FR')} Ar → Wallet`);
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : 'Aucun fond disponible à retirer.');
+    } finally {
+      setEarnWithdrawLoading(null);
+    }
+  };
+
+  const claimEarnReward = useCallback(
+    async (payload: { type_gain: string; montant: number; description: string; task_id?: string }) => {
+      if (!sessionToken) return;
+      setEarnLoadingId(payload.task_id || payload.type_gain);
+      try {
+        await apiRequest('/api/earn/claim', {
+          method: 'POST',
+          token: sessionToken,
+          body: payload
+        });
+        await loadDashboard(sessionToken);
+        if (payload.type_gain === 'epargne') {
+          showToast(`✓ Épargne activée : ${payload.montant.toLocaleString('fr-FR')} Ar`);
+        } else {
+          showToast(`🎁 Nouveau gain Earn : +${payload.montant.toLocaleString('fr-FR')} Ar`);
+        }
+      } catch (err) {
+        showToast(err instanceof Error ? err.message : 'Erreur Earn.');
+      } finally {
+        setEarnLoadingId(null);
+      }
+    },
+    [sessionToken, loadDashboard, showToast]
+  );
+
+  useEffect(() => {
+    if (!watchingVideoId) return;
+    if (videoCountdown <= 0) {
+      const doneTask = VIDEO_TASKS_CATALOG.find(v => v.id === watchingVideoId);
+      setWatchingVideoId(null);
+      if (doneTask && !completedVideoIds.has(doneTask.id)) {
+        claimEarnReward({
+          type_gain: 'video',
+          montant: doneTask.rewardAr,
+          description: `Tâche vidéo : ${doneTask.title}`,
+          task_id: doneTask.id
+        });
+      }
+      return;
+    }
+    const timer = setTimeout(() => setVideoCountdown(c => c - 1), 1000);
+    return () => clearTimeout(timer);
+  }, [watchingVideoId, videoCountdown, completedVideoIds, claimEarnReward]);
+
+  // --- SUPPRESSION COMPLÈTE DES HISTORIQUES (TRADE / PORTEFEUILLE / EARN) ---
+  const [clearHistoryTarget, setClearHistoryTarget] = useState<null | 'trade' | 'wallet' | 'earn'>(null);
+  const [clearHistorySubmitting, setClearHistorySubmitting] = useState<boolean>(false);
+
+  const handleConfirmClearHistory = async () => {
+    if (!sessionToken || !clearHistoryTarget) return;
+    const target = clearHistoryTarget;
+    const endpoint =
+      target === 'trade'
+        ? '/api/trades/history'
+        : target === 'wallet'
+        ? '/api/wallet/history'
+        : '/api/earn/history';
+
+    setClearHistorySubmitting(true);
+    try {
+      const res = await apiRequest<{ ok: boolean; deletedCount?: number; skippedPendingCount?: number }>(endpoint, {
+        method: 'DELETE',
+        token: sessionToken
+      });
+      await loadDashboard(sessionToken);
+      setClearHistoryTarget(null);
+
+      if (target === 'wallet') {
+        if ((res.deletedCount || 0) === 0 && (res.skippedPendingCount || 0) > 0) {
+          showToast('Aucune transaction clôturée à supprimer (les demandes en attente restent actives).');
+        } else if ((res.skippedPendingCount || 0) > 0) {
+          showToast('✓ Historique Portefeuille supprimé (demandes en attente conservées).');
+        } else {
+          showToast('✓ Historique Portefeuille supprimé !');
+        }
+      } else if (target === 'trade') {
+        showToast('✓ Historique Trade supprimé !');
+      } else {
+        showToast('✓ Historique Earn supprimé !');
+      }
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : 'Erreur lors de la suppression.');
+    } finally {
+      setClearHistorySubmitting(false);
+    }
+  };
+
+  // --- SIGNALER PROBLÈME (problemes table) ---
+  const [problemInput, setProblemInput] = useState<string>('');
+  const [problemSubmitting, setProblemSubmitting] = useState<boolean>(false);
+  const [whatsappCopied, setWhatsappCopied] = useState<boolean>(false);
+
+  const handleSubmitProblem = async () => {
+    const trimmed = problemInput.trim();
+    if (!trimmed) {
+      showToast('Veuillez décrire votre problème en texte avant d’envoyer.');
+      return;
+    }
+    if (!sessionToken) return;
+    setProblemSubmitting(true);
+    try {
+      await apiRequest('/api/problemes', {
+        method: 'POST',
+        token: sessionToken,
+        body: { message: trimmed }
+      });
+      setProblemInput('');
+      setActiveModal(null);
+      showToast('✓ Problème envoyé ! L’équipe SALOMA Admin l’a reçu.');
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : 'Erreur lors de l’envoi.');
+    } finally {
+      setProblemSubmitting(false);
+    }
+  };
+
+  // --- KYC LEVEL 2 REAL UPDATE (CIN + ADRESSE + CODE POSTAL) ---
+  const [kycSubmitting, setKycSubmitting] = useState(false);
+  const [kycCinInput, setKycCinInput] = useState('');
+  const [kycAdresseInput, setKycAdresseInput] = useState('');
+  const [kycCodePostalInput, setKycCodePostalInput] = useState('');
+
+  useEffect(() => {
+    if (activeModal === 'kyc' && userRow) {
+      setKycCinInput(userRow.kyc_cin || '');
+      setKycAdresseInput(userRow.kyc_adresse || '');
+      setKycCodePostalInput(userRow.kyc_code_postal || '');
+    }
+  }, [activeModal, userRow]);
+
+  const handleValidateKyc = async (e?: React.FormEvent) => {
+    if (e) e.preventDefault();
+    if (!sessionToken) return;
+    const cin = kycCinInput.trim();
+    const adresse = kycAdresseInput.trim();
+    const code_postal = kycCodePostalInput.trim();
+
+    if (!cin || cin.length < 4) {
+      showToast('Veuillez saisir un numéro CIN valide (min 4 caractères).');
+      return;
+    }
+    if (!adresse || adresse.length < 4) {
+      showToast('Veuillez saisir votre adresse complète.');
+      return;
+    }
+    if (!code_postal || code_postal.length < 2) {
+      showToast('Veuillez saisir votre code postal.');
+      return;
+    }
+
+    setKycSubmitting(true);
+    try {
+      const res = await apiRequest<{ user: AppwriteUserRow }>('/api/me/kyc', {
+        method: 'POST',
+        token: sessionToken,
+        body: { cin, adresse, code_postal }
+      });
+      setUserRow(res.user);
+      await loadDashboard(sessionToken);
+      showToast('✓ Pièces KYC envoyées ! En attente de validation Admin.');
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : 'Erreur envoi KYC.');
+    } finally {
+      setKycSubmitting(false);
+    }
+  };
+
+  // --- ADMIN PANEL (100% REAL APPWRITE DATA) ---
+  const [adminTab, setAdminTab] = useState<'overview' | 'kyc' | 'profit' | 'trading' | 'wallet' | 'apis' | 'security'>('overview');
+  const [adminKycActionId, setAdminKycActionId] = useState<string | null>(null);
+  const [adminProfitPeriod, setAdminProfitPeriod] = useState<'jour' | 'semaine' | 'mois' | 'total'>('jour');
   const [adminPin, setAdminPin] = useState<string>('88888888');
   const [adminUnlockInput1, setAdminUnlockInput1] = useState<string>('');
   const [adminUnlockInput2, setAdminUnlockInput2] = useState<string>('');
   const [adminUnlockError, setAdminUnlockError] = useState<string>('');
 
-  // Modif 3: Code Admin change fields (Ancien code + Nouveau + Confirmer)
+  const [adminUsers, setAdminUsers] = useState<AppwriteUserRow[]>([]);
+  const [adminTransactions, setAdminTransactions] = useState<AppwriteDepotRetraitRow[]>([]);
+  const [adminTrades, setAdminTrades] = useState<AppwriteTradeRow[]>([]);
+  const [adminEchanges, setAdminEchanges] = useState<AppwriteEchangeRow[]>([]);
+  const [adminProblems, setAdminProblems] = useState<AppwriteProblemRow[]>([]);
+  const [adminProfits, setAdminProfits] = useState<AdminProfitsSummary | null>(null);
+  const [adminMarketComparison, setAdminMarketComparison] = useState<AdminMarketComparisonRow[]>([]);
+  const [adminBybitStatus, setAdminBybitStatus] = useState<{
+    online: boolean;
+    latencyMs: number;
+    updatedAt: number;
+    primaryExchange?: 'BYBIT' | 'OKX' | 'BINANCE';
+  } | null>(null);
+  const [adminApisConfig, setAdminApisConfig] = useState<AdminApisConfig | null>(null);
+  const [adminTurnstileConfig, setAdminTurnstileConfig] = useState<AdminTurnstileConfig | null>(null);
+  const [cfSiteKeyInput, setCfSiteKeyInput] = useState<string>('');
+  const [cfSecretKeyInput, setCfSecretKeyInput] = useState<string>('');
+  const [cfSaving, setCfSaving] = useState<boolean>(false);
+  const [cfSaveMsg, setCfSaveMsg] = useState<{ text: string; isError: boolean } | null>(null);
+  const [apiFormInputs, setApiFormInputs] = useState<
+    Record<'bybit' | 'okx' | 'binance', { apiKey: string; secret: string; passphrase: string }>
+  >({
+    bybit: { apiKey: '', secret: '', passphrase: '' },
+    okx: { apiKey: '', secret: '', passphrase: '' },
+    binance: { apiKey: '', secret: '', passphrase: '' }
+  });
+  const [apiActionLoading, setApiActionLoading] = useState<string | null>(null);
+
+  const [adminLoading, setAdminLoading] = useState<boolean>(false);
+  const [filterOnlyProblems, setFilterOnlyProblems] = useState<boolean>(false);
+
   const [oldCodeInput, setOldCodeInput] = useState<string>('');
   const [newCodeInput1, setNewCodeInput1] = useState<string>('');
   const [newCodeInput2, setNewCodeInput2] = useState<string>('');
   const [codeChangeMsg, setCodeChangeMsg] = useState<{ text: string; isError: boolean } | null>(null);
 
-  // Modif 1: Admin Trading Semi-Auto / Auto / Manuel & Client viewer
-  const [adminTradingMode, setAdminTradingMode] = useState<'MANUEL' | 'SEMI-AUTO' | 'AUTO'>('SEMI-AUTO');
-  const [adminSelectedClientFilter, setAdminSelectedClientFilter] = useState<string>('ALL');
+  const fetchAdminOverview = useCallback(async (pin: string) => {
+    setAdminLoading(true);
+    try {
+      const data = await apiRequest<{
+        users: AppwriteUserRow[];
+        transactions: AppwriteDepotRetraitRow[];
+        trades: AppwriteTradeRow[];
+        echanges: AppwriteEchangeRow[];
+        problemes: AppwriteProblemRow[];
+        profits?: AdminProfitsSummary;
+        marketComparison?: AdminMarketComparisonRow[];
+        apis?: AdminApisConfig;
+        turnstile?: AdminTurnstileConfig;
+        bybitStatus?: {
+          online: boolean;
+          latencyMs: number;
+          updatedAt: number;
+          primaryExchange?: 'BYBIT' | 'OKX' | 'BINANCE';
+        };
+      }>('/api/admin/overview', { adminPin: pin });
 
-  // Modif 2: Admin Clients & Problems filter
-  const [filterOnlyProblems, setFilterOnlyProblems] = useState<boolean>(false);
-  const [adminClientsList, setAdminClientsList] = useState<ClientRecord[]>([
-    { id: 'cli-01', name: 'Jean-Luc Rakoto', country: 'Madagascar 🇲🇬', investmentUsd: 1420.50, problems: 'Aucun problème - Actif', hasProblem: false, email: 'j.rakoto@moov.mg', phone: '+261 34 11 222 33', kycLevel: 2, registeredAt: '02/03/2026' },
-    { id: 'cli-02', name: 'Aina Nirina', country: 'Madagascar 🇲🇬', investmentUsd: 850.00, problems: 'Validation Selfie Niveau 1 en attente', hasProblem: true, email: 'aina.nirina@gmail.com', phone: '+261 32 44 555 66', kycLevel: 1, registeredAt: '14/03/2026' },
-    { id: 'cli-03', name: 'Mamy Razafy', country: 'France 🇫🇷', investmentUsd: 3100.00, problems: 'Demande augmentation plafond retrait', hasProblem: true, email: 'mamy.r@yahoo.fr', phone: '+33 6 12 34 56 78', kycLevel: 2, registeredAt: '28/03/2026' },
-    { id: 'cli-04', name: 'Sonia Solo', country: 'Madagascar 🇲🇬', investmentUsd: 10000.00, problems: 'Aucun - Compte VIP', hasProblem: false, email: 'test@saloma.mg', phone: '+261 38 99 000 11', kycLevel: 2, registeredAt: '10/05/2026' }
-  ]);
-
-  const filteredClients = useMemo(() => {
-    if (filterOnlyProblems) {
-      return adminClientsList.filter(c => c.hasProblem);
+      setAdminUsers(data.users || []);
+      setAdminTransactions(data.transactions || []);
+      setAdminTrades(data.trades || []);
+      setAdminEchanges(data.echanges || []);
+      setAdminProblems(data.problemes || []);
+      setAdminProfits(data.profits || null);
+      setAdminMarketComparison(data.marketComparison || []);
+      if (data.apis) setAdminApisConfig(data.apis);
+      if (data.turnstile) {
+        setAdminTurnstileConfig(data.turnstile);
+        setTurnstileSiteKey(data.turnstile.siteKey);
+        setCfSiteKeyInput(data.turnstile.siteKey);
+      }
+      setAdminBybitStatus(data.bybitStatus || null);
+    } finally {
+      setAdminLoading(false);
     }
-    return adminClientsList;
-  }, [adminClientsList, filterOnlyProblems]);
+  }, []);
 
-  // Admin platform profits
-  const [adminProfits, setAdminProfits] = useState({
-    tradingFees: 24150.80,
-    exchangeFees: 11420.30,
-    withdrawalFees: 7117.30,
-    totalProfit: 42688.40
-  });
-
-  // Bybit credentials in Admin only
-  const [bybitConfig, setBybitConfig] = useState({
-    apiKey: 'bb_live_9a7f34810283c749b',
-    apiSecret: '••••••••••••••••••••••••••••••••',
-    passphrase: '••••••••••••',
-    isConnected: true,
-    lastPingMs: 20
-  });
-
-  // Sign up state
-  const [signUpData, setSignUpData] = useState({
-    nom: '',
-    mail: '',
-    verificationCode: '',
-    password: '',
-    confirmPassword: '',
-    paysOrigine: 'Madagascar 🇲🇬',
-    numero: '',
-    accepteConditions: false,
-    plus18ans: false
-  });
-  const [signUpError, setSignUpError] = useState<string>('');
-
-  // Toast
-  const [toastMessage, setToastMessage] = useState<string | null>(null);
-  const showToast = (msg: string) => {
-    setToastMessage(msg);
-    setTimeout(() => setToastMessage(null), 3000);
-  };
-
-  // Logo 5x click
-  const handleLogoClick = () => {
-    if (clickTimeoutRef.current) clearTimeout(clickTimeoutRef.current);
-    const n = logoClicks + 1;
-    setLogoClicks(n);
-    if (n >= 5) {
-      setLogoClicks(0);
-      showToast('🔒 Détection Administrateur SALOMA');
-      setActiveModal('adminUnlock');
-    } else {
-      clickTimeoutRef.current = setTimeout(() => setLogoClicks(0), 2200);
-    }
-  };
-
-  const formatMoney = (val: number, cur: 'USD' | 'MGA' = displayCurrency) => {
-    if (cur === 'MGA') {
-      const mga = val * USD_TO_MGA;
-      return `${Math.round(mga).toLocaleString('fr-FR')} Ar`;
-    }
-    return `$${val.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
-  };
-
-  const sanitizeAddress = (raw: string) => {
-    return raw.trim().replace(/^(bitcoincash:|ethereum:|bitcoin:)/i, '');
-  };
-
-  // --- ACTIONS ---
-
-  const enterTestMode = () => {
-    setIsTestMode(true);
-    setUser({
-      name: 'Invité SALOMA (Mode Test)',
-      email: 'test@saloma.mg',
-      phone: '+261 34 00 000 00',
-      country: 'Madagascar 🇲🇬',
-      kycLevel: 1,
-      referralCode: 'SALOMA-TEST-MG'
-    });
-    setWalletBalanceUsd(8000.00);
-    setWalletBalanceMga(1000000);
-    setTradingBalanceUsd(2000.00);
-    setScreen('main');
-    showToast('Bienvenue ! Mode Test actif : 10 000$ + 1 000 000 Ar virtuels');
-  };
-
-  const handleExecuteTrade = (type: 'BUY' | 'SELL', mode: 'Manuel' | 'Auto' | 'Semi-Auto' = 'Manuel') => {
-    if (numericAmount < 1) {
-      showToast('Investissement minimum : 1$ (Farafahakeliny 1$)');
+  const handleAdminSaveApiKeys = async (provider: 'bybit' | 'okx' | 'binance') => {
+    const form = apiFormInputs[provider];
+    if (!form.apiKey.trim() && !form.secret.trim() && !form.passphrase.trim()) {
+      showToast('Veuillez saisir au moins une clé ou secret à mettre à jour.');
       return;
     }
-    if (numericAmount > tradingBalanceUsd) {
-      showToast('Solde Trading insuffisant !');
-      return;
+    setApiActionLoading(`save-${provider}`);
+    try {
+      const res = await apiRequest<{ apis: AdminApisConfig }>(`/api/admin/apis/${provider}`, {
+        method: 'POST',
+        adminPin,
+        body: {
+          apiKey: form.apiKey.trim(),
+          secret: form.secret.trim(),
+          passphrase: form.passphrase.trim()
+        }
+      });
+      setAdminApisConfig(res.apis);
+      setApiFormInputs(prev => ({
+        ...prev,
+        [provider]: { apiKey: '', secret: '', passphrase: '' }
+      }));
+      showToast(`✓ Clés ${provider.toUpperCase()} enregistrées et masquées (****) !`);
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : 'Erreur sauvegarde API.');
+    } finally {
+      setApiActionLoading(null);
     }
-
-    const feeUsd = numericAmount * 0.001; // 0.1%
-    setTradingBalanceUsd(prev => Math.max(0, prev - numericAmount - feeUsd));
-
-    setAdminProfits(prev => ({
-      ...prev,
-      tradingFees: prev.tradingFees + feeUsd,
-      totalProfit: prev.totalProfit + feeUsd
-    }));
-
-    const curPrice = selectedCoin.price;
-    const lev = tradingModeType === 'SPOT' ? 1 : numericLeverage;
-
-    const newPos: Position = {
-      id: 'pos-' + Date.now(),
-      clientName: user.name,
-      coinId: selectedCoin.id,
-      type,
-      entryPrice: curPrice,
-      currentPrice: curPrice,
-      amountUsd: numericAmount,
-      leverage: lev,
-      liquidationPrice: type === 'BUY'
-        ? curPrice * (1 - (1 / lev))
-        : curPrice * (1 + (1 / lev)),
-      pnlUsd: 0,
-      pnlPercent: 0,
-      timestamp: Date.now(),
-      mode
-    };
-
-    setActivePositions(prev => [newPos, ...prev]);
-    showToast(`${type === 'BUY' ? 'Achat (Mividy)' : 'Vente (Mivarotra)'} ${mode !== 'Manuel' ? `(${mode})` : ''} à ${curPrice}$`);
   };
 
-  const handleClosePosition = (posId: string) => {
-    const pos = activePositions.find(p => p.id === posId);
-    if (!pos) return;
-    const returnAmount = Math.max(0, pos.amountUsd + pos.pnlUsd);
-    setTradingBalanceUsd(prev => prev + returnAmount);
-
-    const historyItem: TradeHistoryItem = {
-      id: 'th-' + Date.now(),
-      clientName: pos.clientName || user.name,
-      coinSymbol: coins.find(c => c.id === pos.coinId)?.symbol || 'CRYPTO',
-      type: pos.type,
-      entryPrice: pos.entryPrice,
-      closePrice: pos.currentPrice,
-      amountUsd: pos.amountUsd,
-      leverage: pos.leverage,
-      pnlUsd: pos.pnlUsd,
-      pnlPercent: pos.pnlPercent,
-      timestamp: Date.now(),
-      mode: pos.mode
-    };
-
-    setTradeHistory(prev => [historyItem, ...prev]);
-    setActivePositions(prev => prev.filter(p => p.id !== posId));
-    showToast(`Position fermée : ${pos.pnlUsd >= 0 ? '+' : ''}${pos.pnlUsd.toFixed(2)}$ (${pos.pnlPercent}%)`);
+  const handleAdminToggleApi = async (provider: 'bybit' | 'okx' | 'binance', nextEnabled: boolean) => {
+    setApiActionLoading(`toggle-${provider}`);
+    try {
+      const res = await apiRequest<{ apis: AdminApisConfig }>(`/api/admin/apis/${provider}/toggle`, {
+        method: 'POST',
+        adminPin,
+        body: { enabled: nextEnabled }
+      });
+      setAdminApisConfig(res.apis);
+      showToast(`${provider.toUpperCase()} ${nextEnabled ? 'activée' : 'désactivée'}.`);
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : 'Action impossible.');
+    } finally {
+      setApiActionLoading(null);
+    }
   };
 
-  // Modif 3: Change admin passcode
-  const handleChangeAdminCode = (e: React.FormEvent) => {
+  const handleAdminSetPrimaryApi = async (provider: 'bybit' | 'okx' | 'binance') => {
+    setApiActionLoading(`primary-${provider}`);
+    try {
+      const res = await apiRequest<{
+        apis: AdminApisConfig;
+        bybitStatus?: {
+          online: boolean;
+          latencyMs: number;
+          updatedAt: number;
+          primaryExchange?: 'BYBIT' | 'OKX' | 'BINANCE';
+        };
+      }>('/api/admin/apis/primary', {
+        method: 'POST',
+        adminPin,
+        body: { primaryApi: provider }
+      });
+      setAdminApisConfig(res.apis);
+      if (res.bybitStatus) setAdminBybitStatus(res.bybitStatus);
+      setActiveBrokerExchange(provider.toUpperCase() as 'BYBIT' | 'OKX' | 'BINANCE');
+      showToast(`★ ${provider.toUpperCase()} définie comme API principale pour les ordres !`);
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : 'Erreur sélection API principale.');
+    } finally {
+      setApiActionLoading(null);
+    }
+  };
+
+  const handleAdminSaveTurnstile = async (e: React.FormEvent) => {
     e.preventDefault();
-    setCodeChangeMsg(null);
-    if (oldCodeInput !== adminPin && oldCodeInput !== '88888888') {
-      setCodeChangeMsg({ text: 'Erreur : Ancien code administrateur incorrect.', isError: true });
+    setCfSaveMsg(null);
+    if (!cfSiteKeyInput.trim()) {
+      setCfSaveMsg({ text: 'Veuillez saisir la Cloudflare Site Key.', isError: true });
       return;
     }
-    if (newCodeInput1.length !== 8) {
-      setCodeChangeMsg({ text: 'Erreur : Le nouveau code doit comporter exactement 8 chiffres.', isError: true });
-      return;
+    setCfSaving(true);
+    try {
+      const res = await apiRequest<{ turnstile: AdminTurnstileConfig }>('/api/admin/turnstile', {
+        method: 'POST',
+        adminPin,
+        body: {
+          siteKey: cfSiteKeyInput.trim(),
+          secretKey: cfSecretKeyInput.trim()
+        }
+      });
+      setAdminTurnstileConfig(res.turnstile);
+      setTurnstileSiteKey(res.turnstile.siteKey);
+      setCfSiteKeyInput(res.turnstile.siteKey);
+      setCfSecretKeyInput('');
+      setCfSaveMsg({
+        text: 'Clés Cloudflare Turnstile enregistrées (Secret Key masquée par ****).',
+        isError: false
+      });
+      showToast('✓ Clés Cloudflare Turnstile mises à jour !');
+    } catch (err) {
+      setCfSaveMsg({
+        text: err instanceof Error ? err.message : 'Erreur sauvegarde Cloudflare Turnstile.',
+        isError: true
+      });
+    } finally {
+      setCfSaving(false);
     }
-    if (newCodeInput1 !== newCodeInput2) {
-      setCodeChangeMsg({ text: 'Erreur : Le nouveau code et la confirmation sont différents.', isError: true });
-      return;
-    }
-
-    setAdminPin(newCodeInput1);
-    setOldCodeInput('');
-    setNewCodeInput1('');
-    setNewCodeInput2('');
-    setCodeChangeMsg({ text: 'Succès : Code administrateur 8 chiffres mis à jour !', isError: false });
-    showToast('Code Administrateur 8 chiffres modifié avec succès');
   };
 
-  // Admin unlock
-  const handleAdminUnlock = () => {
+  const handleAdminResetTurnstileTest = async () => {
+    setCfSaveMsg(null);
+    setCfSaving(true);
+    try {
+      const res = await apiRequest<{ turnstile: AdminTurnstileConfig }>('/api/admin/turnstile', {
+        method: 'POST',
+        adminPin,
+        body: { resetToTest: true }
+      });
+      setAdminTurnstileConfig(res.turnstile);
+      setTurnstileSiteKey(res.turnstile.siteKey);
+      setCfSiteKeyInput(res.turnstile.siteKey);
+      setCfSecretKeyInput('');
+      setCfSaveMsg({
+        text: 'Clés de test Cloudflare Turnstile restaurées.',
+        isError: false
+      });
+      showToast('Clés Cloudflare de test activées');
+    } catch (err) {
+      setCfSaveMsg({
+        text: err instanceof Error ? err.message : 'Impossible de réinitialiser.',
+        isError: true
+      });
+    } finally {
+      setCfSaving(false);
+    }
+  };
+
+  const handleAdminUnlock = async () => {
     setAdminUnlockError('');
     if (!adminUnlockInput1 || !adminUnlockInput2) {
       setAdminUnlockError('Veuillez renseigner les 2 champs.');
       return;
     }
-    if (adminUnlockInput1.length !== 8 || adminUnlockInput2.length !== 8) {
-      setAdminUnlockError('Le code doit comporter exactement 8 chiffres.');
+    if (!/^\d{8}$/.test(adminUnlockInput1) || adminUnlockInput1 !== adminUnlockInput2) {
+      setAdminUnlockError('Les deux codes doivent comporter 8 chiffres identiques.');
       return;
     }
-    if (adminUnlockInput1 !== adminUnlockInput2) {
-      setAdminUnlockError('Erreur : Les deux codes à 8 chiffres sont différents.');
-      return;
+    try {
+      setAdminPin(adminUnlockInput1);
+      await fetchAdminOverview(adminUnlockInput1);
+      setActiveModal(null);
+      setScreen('admin');
+      showToast('Accès Administrateur Déverrouillé');
+    } catch (err) {
+      setAdminUnlockError(err instanceof Error ? err.message : 'Code administrateur invalide.');
     }
-    setAdminPin(adminUnlockInput1);
-    setActiveModal(null);
-    setScreen('admin');
-    showToast('Accès Administrateur Déverrouillé');
   };
 
-  // Candlestick generator
+  const handleAdminValidateTx = async (tx: AppwriteDepotRetraitRow) => {
+    const coinMatch = coins.find(c => c.symbol.toUpperCase() === (tx.devise || '').toUpperCase());
+    try {
+      await apiRequest(`/api/admin/transactions/${tx.$id}/validate`, {
+        method: 'POST',
+        adminPin,
+        body: { priceUsd: coinMatch ? coinMatch.price : 0 }
+      });
+      await fetchAdminOverview(adminPin);
+      if (sessionToken) await loadDashboard(sessionToken);
+      showToast('✓ Transaction validée dans Appwrite !');
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : 'Erreur validation.');
+    }
+  };
+
+  const handleAdminRejectTx = async (tx: AppwriteDepotRetraitRow) => {
+    const coinMatch = coins.find(c => c.symbol.toUpperCase() === (tx.devise || '').toUpperCase());
+    try {
+      await apiRequest(`/api/admin/transactions/${tx.$id}/reject`, {
+        method: 'POST',
+        adminPin,
+        body: { priceUsd: coinMatch ? coinMatch.price : 0 }
+      });
+      await fetchAdminOverview(adminPin);
+      if (sessionToken) await loadDashboard(sessionToken);
+      showToast('Transaction refusée.');
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : 'Erreur refus.');
+    }
+  };
+
+  const handleAdminKycAction = async (userRowId: string, action: 'validate' | 'reject') => {
+    setAdminKycActionId(`${action}-${userRowId}`);
+    try {
+      await apiRequest(`/api/admin/kyc/${userRowId}/${action}`, {
+        method: 'POST',
+        adminPin
+      });
+      await fetchAdminOverview(adminPin);
+      if (sessionToken) await loadDashboard(sessionToken);
+      showToast(action === 'validate' ? '✓ KYC client validé !' : 'KYC client refusé.');
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : 'Erreur action KYC.');
+    } finally {
+      setAdminKycActionId(null);
+    }
+  };
+
+  const handleToggleProblemResolved = async (prob: AppwriteProblemRow) => {
+    const nextResolved = prob.statut !== 'resolu';
+    try {
+      await apiRequest(`/api/admin/problemes/${prob.$id}/toggle`, {
+        method: 'POST',
+        adminPin,
+        body: { resolved: nextResolved }
+      });
+      await fetchAdminOverview(adminPin);
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : 'Erreur mise à jour.');
+    }
+  };
+
+  const handleChangeAdminCode = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setCodeChangeMsg(null);
+    if (!/^\d{8}$/.test(newCodeInput1) || newCodeInput1 !== newCodeInput2) {
+      setCodeChangeMsg({ text: 'Le nouveau code doit comporter 8 chiffres identiques.', isError: true });
+      return;
+    }
+    try {
+      await apiRequest('/api/admin/pin', {
+        method: 'POST',
+        adminPin: oldCodeInput,
+        body: { newPin: newCodeInput1 }
+      });
+      setAdminPin(newCodeInput1);
+      setOldCodeInput('');
+      setNewCodeInput1('');
+      setNewCodeInput2('');
+      setCodeChangeMsg({ text: 'Succès : Code administrateur 8 chiffres mis à jour !', isError: false });
+      showToast('Code Administrateur modifié');
+    } catch (err) {
+      setCodeChangeMsg({
+        text: err instanceof Error ? err.message : 'Ancien code administrateur incorrect.',
+        isError: true
+      });
+    }
+  };
+
+  const realBuyPercent = useMemo(() => {
+    if (adminTrades.length === 0) return 50;
+    const buys = adminTrades.filter(t => t.type === 'achat').length;
+    return Math.round((buys / adminTrades.length) * 100);
+  }, [adminTrades]);
+
+  const adminRealStats = useMemo(() => {
+    const swapFeesUsd = adminEchanges.reduce((s, e) => s + (Number(e.frais) || 0), 0);
+    const withdrawFeesAr = adminTransactions
+      .filter(t => t.type === 'retrait' && t.devise === 'Ar')
+      .reduce((s, t) => s + (Number(t.frais) || 0), 0);
+    const pendingDeposits = adminTransactions.filter(t => t.statut === 'en_attente').length;
+    return {
+      swapFeesUsd,
+      withdrawFeesAr,
+      pendingDeposits,
+      totalClients: adminUsers.length
+    };
+  }, [adminEchanges, adminTransactions, adminUsers]);
+
+  // Logo secret 4x click
+  const handleLogoClick = () => {
+    if (clickTimeoutRef.current) clearTimeout(clickTimeoutRef.current);
+    const n = logoClicks + 1;
+    if (n >= 4) {
+      setLogoClicks(0);
+      setActiveModal('adminUnlock');
+    } else {
+      setLogoClicks(n);
+      clickTimeoutRef.current = setTimeout(() => setLogoClicks(0), 2000);
+    }
+  };
+
+  // --- LIVE ORDER BOOK & CANDLESTICKS ---
+  const orderBook = useMemo(() => {
+    const mid = selectedCoin.price || 1;
+    const step = mid * 0.0006;
+    const asks = Array.from({ length: 5 }, (_, idx) => {
+      const level = 5 - idx;
+      const price = mid + step * level;
+      const qty = Number(
+        ((0.15 + ((idx * 17 + Math.round(mid)) % 19) * 0.08) * (mid > 100 ? 1 : 250)).toFixed(mid > 100 ? 3 : 1)
+      );
+      const depth = 25 + ((level * 14 + Math.round(mid)) % 70);
+      return { price, qty, depth };
+    });
+    const bids = Array.from({ length: 5 }, (_, idx) => {
+      const level = idx + 1;
+      const price = Math.max(0.0000001, mid - step * level);
+      const qty = Number(
+        ((0.18 + ((idx * 13 + Math.round(mid)) % 17) * 0.09) * (mid > 100 ? 1 : 250)).toFixed(mid > 100 ? 3 : 1)
+      );
+      const depth = 28 + ((level * 16 + Math.round(mid)) % 68);
+      return { price, qty, depth };
+    });
+    return { asks, bids, spread: (step * 2).toFixed(mid < 1 ? 5 : 2) };
+  }, [selectedCoin.price]);
+
   const candlestickData = useMemo(() => {
     const base = selectedCoin.price;
     const candles = [];
     let cur = base * 0.985;
-    const factor = selectedTimeframe === '1m' ? 0.005 : selectedTimeframe === '5m' ? 0.009 : selectedTimeframe === '15m' ? 0.015 : selectedTimeframe === '1h' ? 0.022 : selectedTimeframe === '4h' ? 0.035 : 0.05;
+    const factor =
+      selectedTimeframe === '1m'
+        ? 0.005
+        : selectedTimeframe === '5m'
+        ? 0.009
+        : selectedTimeframe === '15m'
+        ? 0.015
+        : selectedTimeframe === '1h'
+        ? 0.022
+        : selectedTimeframe === '4h'
+        ? 0.035
+        : 0.05;
 
     for (let i = 0; i < 26; i++) {
-      const delta = (Math.sin(i * 0.8) * factor + (Math.random() - 0.48) * factor) * base;
+      const delta = (Math.sin(i * 0.8) * factor + Math.cos(i * 1.3) * factor * 0.45) * base;
       const open = cur;
       const close = cur + delta;
-      const high = Math.max(open, close) + Math.random() * (factor * 0.5) * base;
-      const low = Math.min(open, close) - Math.random() * (factor * 0.5) * base;
+      const high = Math.max(open, close) + factor * 0.35 * base;
+      const low = Math.min(open, close) - factor * 0.35 * base;
       candles.push({ open, close, high, low, isUp: close >= open });
       cur = close;
     }
     return candles;
-  }, [selectedCoin.id, selectedTimeframe]);
+  }, [selectedCoin.id, selectedCoin.price, selectedTimeframe]);
+
+  const renderWalletCoinChainNetworkSelector = () => (
+    <div className="space-y-3">
+      {/* 1. COIN : MENU DÉROULANT AVEC RECHERCHE (50 COINS) */}
+      <div className="relative">
+        <label className="text-[11px] font-bold text-purple-300 block mb-1">
+          1. Coin ({coins.length} Coins disponibles) :
+        </label>
+        <button
+          type="button"
+          onClick={() => {
+            setIsWalletCoinDropdownOpen(!isWalletCoinDropdownOpen);
+            setWalletCoinSearchTerm('');
+          }}
+          className="w-full px-3 py-2.5 rounded-xl bg-[#150D2E] border-2 border-[#8B5CF6]/70 text-white text-xs font-black flex items-center justify-between shadow-inner"
+        >
+          <span className="flex items-center gap-2 min-w-0">
+            <span className={`w-6 h-6 rounded-lg flex items-center justify-center font-black text-[10px] border shrink-0 ${selectedWalletCoin.iconBg}`}>
+              {selectedWalletCoin.symbol.slice(0, 3)}
+            </span>
+            <span className="truncate">
+              {selectedWalletCoin.symbol} • {selectedWalletCoin.name}
+            </span>
+          </span>
+          <ChevronDown className={`w-4 h-4 text-purple-300 shrink-0 transition-transform ${isWalletCoinDropdownOpen ? 'rotate-180' : ''}`} />
+        </button>
+
+        {isWalletCoinDropdownOpen && (
+          <div className="absolute top-full left-0 right-0 mt-1.5 z-50 bg-[#190F38] border-2 border-[#8B5CF6] rounded-2xl p-2.5 shadow-2xl max-h-60 flex flex-col gap-2">
+            <div className="relative">
+              <Search className="w-3.5 h-3.5 text-purple-300 absolute left-2.5 top-2.5" />
+              <input
+                type="text"
+                autoFocus
+                value={walletCoinSearchTerm}
+                onChange={e => setWalletCoinSearchTerm(e.target.value)}
+                placeholder="Rechercher parmi 50 coins (USDT, BTC, SOL, MATIC...)"
+                className="w-full pl-8 pr-2.5 py-1.5 rounded-xl bg-[#100926] border border-purple-500/50 text-white text-xs focus:outline-none focus:border-[#8B5CF6]"
+              />
+            </div>
+            <div className="overflow-y-auto space-y-1 flex-1 pr-0.5">
+              {filteredWalletCoins.length === 0 ? (
+                <div className="text-center py-3 text-[11px] text-purple-400">Aucun coin trouvé</div>
+              ) : (
+                filteredWalletCoins.map(c => (
+                  <button
+                    key={c.id}
+                    type="button"
+                    onClick={() => {
+                      setSelectedWalletCoinId(c.id);
+                      setSelectedNetworkIndex(0);
+                      setCopiedDepositAddress(false);
+                      setIsWalletCoinDropdownOpen(false);
+                      setWalletCoinSearchTerm('');
+                    }}
+                    className={`w-full text-left px-2.5 py-2 rounded-xl text-xs font-bold flex items-center justify-between transition ${
+                      selectedWalletCoinId === c.id
+                        ? 'bg-[#7C3AED] text-white'
+                        : 'bg-[#150D2E] text-purple-200 hover:bg-[#23154D]'
+                    }`}
+                  >
+                    <span className="flex items-center gap-2 min-w-0">
+                      <span className="font-black text-white">{c.symbol}</span>
+                      <span className="text-[11px] opacity-80 truncate">{c.name}</span>
+                    </span>
+                    <span className="text-[10px] font-mono opacity-85 shrink-0 ml-2">
+                      {getNetworkShortLabel(c.networks[0])}
+                    </span>
+                  </button>
+                ))
+              )}
+            </div>
+          </div>
+        )}
+      </div>
+
+      {/* 2. CHAÎNE & RÉSEAU : 2 MENUS DÉROULANTS VISIBLES */}
+      <div className="grid grid-cols-2 gap-2.5">
+        <div>
+          <label className="text-[11px] font-bold text-purple-300 block mb-1">
+            2. Chaîne :
+          </label>
+          <select
+            value={activeBlockchain}
+            onChange={e => {
+              const chosenChain = e.target.value;
+              const matchIdx = selectedWalletCoin.networks.findIndex(
+                n => getBlockchainFromNetwork(n) === chosenChain
+              );
+              setSelectedNetworkIndex(matchIdx >= 0 ? matchIdx : 0);
+              setCopiedDepositAddress(false);
+            }}
+            className="w-full px-2.5 py-2.5 rounded-xl bg-[#150D2E] border-2 border-emerald-500/50 text-emerald-300 text-xs font-black focus:outline-none focus:border-emerald-400"
+          >
+            {availableBlockchains.map(chainName => (
+              <option key={chainName} value={chainName} className="bg-[#150D2E] text-white">
+                {chainName}
+              </option>
+            ))}
+          </select>
+        </div>
+
+        <div>
+          <label className="text-[11px] font-bold text-purple-300 block mb-1">
+            3. Réseau :
+          </label>
+          <select
+            value={selectedNetworkIndex < selectedWalletCoin.networks.length ? selectedNetworkIndex : 0}
+            onChange={e => {
+              setSelectedNetworkIndex(Number(e.target.value));
+              setCopiedDepositAddress(false);
+            }}
+            className="w-full px-2.5 py-2.5 rounded-xl bg-[#150D2E] border-2 border-[#8B5CF6]/60 text-white text-xs font-black focus:outline-none focus:border-[#8B5CF6]"
+          >
+            {selectedWalletCoin.networks.map((net, idx) => (
+              <option key={`${net.chain}-${idx}`} value={idx} className="bg-[#150D2E] text-white">
+                {getNetworkShortLabel(net)}
+              </option>
+            ))}
+          </select>
+        </div>
+      </div>
+    </div>
+  );
+
+  const renderCoinSearchDropdown = (
+    currentCoin: Coin,
+    isOpen: boolean,
+    setOpen: (v: boolean) => void,
+    searchVal: string,
+    setSearchVal: (v: string) => void,
+    list: Coin[],
+    onSelect: (c: Coin) => void
+  ) => (
+    <div className="relative">
+      <button
+        type="button"
+        onClick={() => {
+          setOpen(!isOpen);
+          setSearchVal('');
+        }}
+        className="w-full p-2.5 rounded-2xl bg-[#190F38] border-2 border-[#8B5CF6]/70 shadow-[0_0_16px_rgba(124,58,237,0.28)] flex items-center justify-between transition active:scale-[0.99]"
+      >
+        <div className="flex items-center gap-2.5">
+          <div className={`w-8 h-8 rounded-xl flex items-center justify-center font-bold text-[11px] border ${currentCoin.iconBg}`}>
+            {currentCoin.symbol.slice(0, 3)}
+          </div>
+          <div className="text-left">
+            <div className="flex items-center gap-1.5">
+              <span className="font-black text-sm text-white">{currentCoin.symbol}/USDT</span>
+              <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-emerald-500/20 border border-emerald-400/60 text-emerald-300 text-[9px] font-black tracking-wider">
+                <span className={`w-1.5 h-1.5 rounded-full bg-emerald-400 ${isWsLive ? 'animate-pulse' : 'opacity-60'}`} />
+                LIVE
+              </span>
+              <span className="text-[10px] text-purple-300 font-medium truncate max-w-[90px]">{currentCoin.name}</span>
+            </div>
+            <span className="text-xs font-mono font-bold text-purple-200">
+              ${formatCoinPrice(currentCoin.price)}
+            </span>
+          </div>
+        </div>
+        <div className="flex items-center gap-2">
+          <span
+            className={`text-[11px] font-mono font-bold px-2 py-0.5 rounded-md ${
+              currentCoin.change24h >= 0
+                ? 'bg-emerald-500/20 text-emerald-400'
+                : 'bg-rose-500/20 text-rose-400'
+            }`}
+          >
+            {currentCoin.change24h >= 0 ? '+' : ''}
+            {currentCoin.change24h}%
+          </span>
+          <ChevronDown className={`w-4 h-4 text-purple-300 transition-transform ${isOpen ? 'rotate-180' : ''}`} />
+        </div>
+      </button>
+
+      {isOpen && (
+        <div className="absolute top-full left-0 right-0 mt-1.5 z-50 bg-[#1D1240] border-2 border-[#8B5CF6] rounded-2xl p-2.5 shadow-2xl max-h-72 flex flex-col space-y-2">
+          <div className="relative">
+            <Search className="w-4 h-4 text-purple-400 absolute left-3 top-2.5" />
+            <input
+              type="text"
+              placeholder="Rechercher un coin (BTC, ETH, SOL, PEPE...)"
+              value={searchVal}
+              onChange={e => setSearchVal(e.target.value)}
+              autoFocus
+              className="w-full pl-9 pr-3 py-2 rounded-xl bg-[#150D2E] border border-purple-500/40 text-white text-xs placeholder-purple-400/50 focus:outline-none focus:border-[#8B5CF6]"
+            />
+          </div>
+          <div className="overflow-y-auto space-y-1 pr-1 flex-1">
+            {list.map(coin => (
+              <div
+                key={coin.id}
+                onClick={() => {
+                  onSelect(coin);
+                  setOpen(false);
+                }}
+                className={`p-2 rounded-xl flex items-center justify-between cursor-pointer transition ${
+                  currentCoin.id === coin.id
+                    ? 'bg-[#7C3AED] text-white shadow'
+                    : 'bg-[#150D2E] hover:bg-[#23154D] text-purple-200'
+                }`}
+              >
+                <div className="flex items-center gap-2">
+                  <div className={`w-7 h-7 rounded-lg flex items-center justify-center font-bold text-[10px] border ${coin.iconBg}`}>
+                    {coin.symbol.slice(0, 3)}
+                  </div>
+                  <div>
+                    <span className="font-bold text-xs block">
+                      {coin.symbol} <span className="opacity-75 font-normal">({coin.name})</span>
+                    </span>
+                    <span className="text-[10px] opacity-80 font-mono">${formatCoinPrice(coin.price)}</span>
+                  </div>
+                </div>
+                <span className={`text-[10px] font-mono font-bold ${coin.change24h >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
+                  {coin.change24h >= 0 ? '+' : ''}
+                  {coin.change24h}%
+                </span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+
+  if (bootstrapping) {
+    return (
+      <div className="min-h-screen bg-[#150D2E] text-white flex flex-col items-center justify-center p-6 gap-4">
+        <div className="w-16 h-16 rounded-2xl bg-gradient-to-tr from-[#7C3AED] to-[#8B5CF6] flex items-center justify-center font-black text-3xl shadow-[0_0_30px_rgba(124,58,237,0.7)] animate-pulse">
+          S
+        </div>
+        <span className="text-xs font-bold text-purple-300 tracking-wider">
+          Chargement sécurisé de votre session SALOMA...
+        </span>
+      </div>
+    );
+  }
 
   return (
     <div className="min-h-screen bg-[#150D2E] text-slate-100 flex flex-col justify-between selection:bg-[#7C3AED] selection:text-white relative">
@@ -796,7 +2491,7 @@ export default function App() {
 
       {/* TOAST NOTIFICATION */}
       {toastMessage && (
-        <div className="fixed top-4 left-1/2 -translate-x-1/2 z-50 bg-[#1F1042]/95 border-2 border-[#8B5CF6] shadow-[0_0_25px_rgba(139,92,246,0.6)] backdrop-blur-md px-4 py-2 rounded-2xl flex items-center gap-2 text-xs font-bold text-purple-100 animate-bounce">
+        <div className="fixed top-4 left-1/2 -translate-x-1/2 z-[70] max-w-[90vw] bg-[#1F1042]/95 border-2 border-[#8B5CF6] shadow-[0_0_25px_rgba(139,92,246,0.6)] backdrop-blur-md px-4 py-2 rounded-2xl flex items-center gap-2 text-xs font-bold text-purple-100">
           <Zap className="w-4 h-4 text-amber-400 shrink-0" />
           <span>{toastMessage}</span>
         </div>
@@ -817,20 +2512,20 @@ export default function App() {
                 SALOMA
               </span>
             </div>
-            <button
-              onClick={() => setScreen('signup')}
-              className="text-xs font-bold px-4 py-2 rounded-xl bg-[#7C3AED]/30 hover:bg-[#7C3AED]/60 text-purple-200 border-2 border-[#8B5CF6] shadow-[0_0_15px_rgba(124,58,237,0.4)] transition active:scale-95"
-            >
-              Sign Up
-            </button>
+            <span className="text-[10px] font-bold px-2.5 py-1 rounded-full bg-[#1F1042] text-purple-200 border border-[#8B5CF6]/50">
+              FR / MG
+            </span>
           </div>
 
           <div className="my-auto text-center flex flex-col items-center justify-center py-6">
-            <div onClick={handleLogoClick} className="relative cursor-pointer group active:scale-95 transition-transform" title="Cliquez 5 fois pour Admin">
+            <div
+              onClick={handleLogoClick}
+              className="relative cursor-pointer group active:scale-95 transition-transform"
+            >
               <div className="w-32 h-32 rounded-3xl bg-gradient-to-br from-[#7C3AED] via-[#8B5CF6] to-[#4C1D95] flex items-center justify-center shadow-[0_0_70px_rgba(139,92,246,0.8)] border-2 border-purple-300/60 relative animate-pulse-glow">
                 <span className="text-6xl font-black text-white tracking-widest drop-shadow-lg">S</span>
                 <div className="absolute -bottom-2.5 px-3 py-0.5 rounded-full bg-[#150D2E] border border-[#8B5CF6] text-[10px] font-black text-purple-200 tracking-wider shadow">
-                  CRYPTO
+                  CRYPTO PRO
                 </div>
               </div>
             </div>
@@ -839,14 +2534,14 @@ export default function App() {
               SALOMA
             </h1>
             <p className="mt-1 text-xs font-semibold text-purple-300/80 tracking-wide">
-              Exchange Crypto & Trading Haingana sy Azo Antoka
+              Échange Crypto & Trading Haingana sy Azo Antoka
             </p>
 
             <div className="grid grid-cols-4 gap-2 mt-8 w-full max-w-xs">
               <div className="bg-[#1F1042]/90 border border-[#8B5CF6]/50 p-2.5 rounded-2xl flex flex-col items-center">
                 <ArrowRightLeft className="w-5 h-5 text-purple-300 mb-1" />
                 <span className="text-[11px] font-bold text-white">Échange</span>
-                <span className="text-[9px] text-purple-300/70">Haingana</span>
+                <span className="text-[9px] text-purple-300/70">Pro</span>
               </div>
               <div className="bg-[#1F1042]/90 border border-[#8B5CF6]/50 p-2.5 rounded-2xl flex flex-col items-center">
                 <Wallet className="w-5 h-5 text-[#8B5CF6] mb-1" />
@@ -868,197 +2563,250 @@ export default function App() {
 
           <div className="flex flex-col gap-3 pb-4">
             <button
-              onClick={enterTestMode}
-              className="w-full py-4 rounded-2xl bg-gradient-to-r from-[#7C3AED] via-[#8B5CF6] to-[#7C3AED] text-white font-extrabold text-sm shadow-[0_0_30px_rgba(124,58,237,0.7)] border-2 border-purple-300/50 flex items-center justify-center gap-2 active:scale-98 transition"
+              onClick={() => setScreen('login')}
+              className="w-full py-4 rounded-2xl bg-gradient-to-r from-[#7C3AED] via-[#8B5CF6] to-[#7C3AED] text-white font-extrabold text-sm shadow-[0_0_30px_rgba(124,58,237,0.7)] border-2 border-purple-300/50 flex items-center justify-center gap-2 active:scale-[0.98] transition"
             >
-              <Zap className="w-5 h-5 text-amber-300" />
-              <span>Continuer en tant qu'Invité - Mode Test</span>
+              <span>Se Connecter</span>
             </button>
-            <div className="flex items-center justify-center gap-2 text-xs text-purple-200/90 my-0.5">
-              <span className="inline-block w-2 h-2 rounded-full bg-emerald-400 animate-ping"></span>
-              <span>Solde virtuel : 10 000$ + 1 000 000 Ar</span>
-            </div>
-            <div className="flex gap-2">
-              <button
-                onClick={() => setScreen('login')}
-                className="flex-1 py-3 rounded-xl bg-[#23154D] hover:bg-[#2B1B5D] text-purple-200 text-xs font-bold border border-purple-500/30 transition"
-              >
-                Se Connecter
-              </button>
-              <button
-                onClick={() => setScreen('signup')}
-                className="flex-1 py-3 rounded-xl bg-[#7C3AED]/25 hover:bg-[#7C3AED]/45 text-purple-100 text-xs font-bold border-2 border-[#8B5CF6] shadow-[0_0_15px_rgba(124,58,237,0.3)] transition"
-              >
-                Créer un compte
-              </button>
-            </div>
+            <button
+              onClick={() => setScreen('signup')}
+              className="w-full py-3.5 rounded-2xl bg-[#7C3AED]/25 hover:bg-[#7C3AED]/45 text-purple-100 text-sm font-bold border-2 border-[#8B5CF6] shadow-[0_0_15px_rgba(124,58,237,0.3)] transition"
+            >
+              Créer compte
+            </button>
             <PWAInstallButton />
           </div>
         </div>
       )}
 
       {/* ========================================================
-          SIGN UP SCREEN
+          CRÉER COMPTE (APPWRITE AUTH + USERS_SALOMA + WALLETS)
          ======================================================== */}
       {screen === 'signup' && (
         <div className="min-h-screen p-5 max-w-md mx-auto w-full z-10 flex flex-col justify-between">
           <div>
-            <div className="flex items-center justify-between mb-4">
+            <div className="flex items-center justify-between mb-5">
               <button onClick={() => setScreen('splash')} className="p-2 rounded-xl bg-[#23154D] text-purple-300">
                 <ArrowLeft className="w-5 h-5" />
               </button>
               <div className="text-center">
-                <h2 className="font-black text-xl text-white">Inscription SALOMA</h2>
+                <h2 className="font-black text-xl text-white">Créer compte SALOMA</h2>
                 <span className="text-xs text-purple-300/80">Fisoratana anarana vaovao</span>
               </div>
               <div className="w-9" />
             </div>
 
-            <div className="p-3 mb-4 rounded-2xl bg-amber-500/10 border-2 border-amber-500/40 flex items-start gap-2.5">
-              <AlertTriangle className="w-5 h-5 text-amber-400 shrink-0 mt-0.5" />
-              <div className="text-xs text-amber-200 leading-relaxed font-medium">
-                <span className="font-bold text-amber-300 block mb-0.5">Fampitandremana :</span>
-                Olona 1 = Compte 1 = Mail 1 = Tarehy 1 = CIN 1, Tsy manao retrait raha tsy vita vérification KYC.
-              </div>
-            </div>
-
             {signUpError && (
-              <div className="p-2.5 mb-3 rounded-xl bg-rose-500/20 border border-rose-500/40 text-rose-300 text-xs">
+              <div className="p-3 mb-4 rounded-xl bg-rose-500/20 border border-rose-500/40 text-rose-300 text-xs font-bold">
                 {signUpError}
               </div>
             )}
 
-            <form onSubmit={e => {
-              e.preventDefault();
-              setUser({
-                name: signUpData.nom || 'Client SALOMA',
-                email: signUpData.mail,
-                phone: signUpData.numero,
-                country: signUpData.paysOrigine,
-                kycLevel: 1,
-                referralCode: 'SALOMA-2026'
-              });
-              setIsTestMode(false);
-              setScreen('main');
-              showToast('Compte créé avec succès');
-            }} className="space-y-3 text-xs">
-              <div>
-                <label className="font-bold text-purple-300 block mb-1">1. Nom complet *</label>
-                <input
-                  type="text"
-                  required
-                  placeholder="Jean-Luc Rakoto"
-                  value={signUpData.nom}
-                  onChange={e => setSignUpData({ ...signUpData, nom: e.target.value })}
-                  className="w-full px-3 py-2 rounded-xl bg-[#1D1240] border-2 border-[#8B5CF6]/40 text-white"
-                />
+            <form onSubmit={handleSignUpSubmit} className="space-y-3 text-xs">
+              <div className="grid grid-cols-2 gap-2">
+                <div>
+                  <label className="font-bold text-purple-300 block mb-1">Nom *</label>
+                  <input
+                    type="text"
+                    required
+                    placeholder="Rakoto"
+                    value={signUpData.nom}
+                    onChange={e => setSignUpData({ ...signUpData, nom: e.target.value })}
+                    className="w-full px-3 py-2.5 rounded-xl bg-[#1D1240] border-2 border-[#8B5CF6]/40 text-white placeholder-purple-400/50 focus:outline-none focus:border-[#8B5CF6]"
+                  />
+                </div>
+                <div>
+                  <label className="font-bold text-purple-300 block mb-1">Prénom</label>
+                  <input
+                    type="text"
+                    placeholder="Nirina"
+                    value={signUpData.prenom}
+                    onChange={e => setSignUpData({ ...signUpData, prenom: e.target.value })}
+                    className="w-full px-3 py-2.5 rounded-xl bg-[#1D1240] border-2 border-[#8B5CF6]/40 text-white placeholder-purple-400/50 focus:outline-none focus:border-[#8B5CF6]"
+                  />
+                </div>
               </div>
 
               <div>
-                <label className="font-bold text-purple-300 block mb-1">2. Mail *</label>
+                <label className="font-bold text-purple-300 block mb-1">Email *</label>
                 <input
                   type="email"
                   required
-                  placeholder="jean@saloma.mg"
-                  value={signUpData.mail}
-                  onChange={e => setSignUpData({ ...signUpData, mail: e.target.value })}
-                  className="w-full px-3 py-2 rounded-xl bg-[#1D1240] border-2 border-[#8B5CF6]/40 text-white"
+                  placeholder="nirina@gmail.com"
+                  value={signUpData.email}
+                  onChange={e => setSignUpData({ ...signUpData, email: e.target.value })}
+                  className="w-full px-3 py-2.5 rounded-xl bg-[#1D1240] border-2 border-[#8B5CF6]/40 text-white placeholder-purple-400/50 focus:outline-none focus:border-[#8B5CF6]"
                 />
+                <span className="text-[10px] text-purple-300/75 block mt-1">
+                  Un code de vérification à 6 chiffres sera envoyé à cet email après l’inscription.
+                </span>
+              </div>
+
+              <div className="space-y-1.5">
+                <label className="font-bold text-purple-300 block">Mot de passe *</label>
+                <div className="relative">
+                  <input
+                    type={showSignUpPassword ? 'text' : 'password'}
+                    required
+                    placeholder="Ex: Saloma@2026"
+                    value={signUpData.password}
+                    onChange={e => setSignUpData({ ...signUpData, password: e.target.value })}
+                    className="w-full pl-3 pr-10 py-2.5 rounded-xl bg-[#1D1240] border-2 border-[#8B5CF6]/40 text-white placeholder-purple-400/50 focus:outline-none focus:border-[#8B5CF6]"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setShowSignUpPassword(prev => !prev)}
+                    className="absolute right-2.5 top-1/2 -translate-y-1/2 p-1 text-purple-300 hover:text-white"
+                  >
+                    {showSignUpPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                  </button>
+                </div>
+
+                <div className="grid grid-cols-5 gap-1 h-1.5">
+                  {[1, 2, 3, 4, 5].map(level => (
+                    <div
+                      key={level}
+                      className={`rounded-full transition-colors ${
+                        passwordChecks.score >= level
+                          ? passwordChecks.score <= 2
+                            ? 'bg-rose-500'
+                            : passwordChecks.score <= 4
+                            ? 'bg-amber-400'
+                            : 'bg-emerald-500'
+                          : 'bg-[#2A1A5E]'
+                      }`}
+                    />
+                  ))}
+                </div>
+                {signUpData.password.length > 0 && passwordChecks.missing.length > 0 && (
+                  <p className="text-[10px] font-bold text-rose-400">
+                    Manque : {passwordChecks.missing.join(', ')}
+                  </p>
+                )}
               </div>
 
               <div>
-                <label className="font-bold text-purple-300 block mb-1">3. Vérification Mail (Code 6 chiffres) *</label>
+                <label className="font-bold text-purple-300 block mb-1">Confirmer mot de passe *</label>
+                <div className="relative">
+                  <input
+                    type={showSignUpConfirmPassword ? 'text' : 'password'}
+                    required
+                    placeholder="Retapez le mot de passe"
+                    value={signUpData.confirmPassword}
+                    onChange={e => setSignUpData({ ...signUpData, confirmPassword: e.target.value })}
+                    className="w-full pl-3 pr-10 py-2.5 rounded-xl bg-[#1D1240] border-2 border-[#8B5CF6]/40 text-white placeholder-purple-400/50 focus:outline-none focus:border-[#8B5CF6]"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setShowSignUpConfirmPassword(prev => !prev)}
+                    className="absolute right-2.5 top-1/2 -translate-y-1/2 p-1 text-purple-300 hover:text-white"
+                  >
+                    {showSignUpConfirmPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                  </button>
+                </div>
+                {signUpData.confirmPassword.length > 0 && !passwordsMatch && (
+                  <p className="text-[10px] font-bold text-rose-400 mt-1">
+                    Les mots de passe ne correspondent pas
+                  </p>
+                )}
+              </div>
+
+              <div>
+                <label className="font-bold text-purple-300 block mb-1">Pays d'origine</label>
+                <select
+                  value={signUpData.paysOrigine}
+                  onChange={e => setSignUpData({ ...signUpData, paysOrigine: e.target.value })}
+                  className="w-full px-3 py-2.5 rounded-xl bg-[#1D1240] border-2 border-[#8B5CF6]/40 text-white focus:outline-none focus:border-[#8B5CF6]"
+                >
+                  {COUNTRY_OPTIONS.map(country => (
+                    <option key={country.label} value={country.label}>
+                      {country.label} ({country.dialCode})
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              <div>
+                <label className="font-bold text-purple-300 block mb-1">Téléphone *</label>
+                <div className="flex items-center rounded-xl bg-[#1D1240] border-2 border-[#8B5CF6]/40 focus-within:border-[#8B5CF6] overflow-hidden">
+                  <span className="px-3 py-2.5 bg-[#261654] text-purple-100 font-mono font-black border-r border-[#8B5CF6]/40 select-none shrink-0">
+                    {selectedCountryOption.dialCode}
+                  </span>
+                  <input
+                    type="tel"
+                    inputMode="tel"
+                    required
+                    placeholder={selectedCountryOption.placeholder}
+                    value={signUpData.numero}
+                    onChange={e => {
+                      const raw = e.target.value;
+                      const stripped = raw.startsWith(selectedCountryOption.dialCode)
+                        ? raw.slice(selectedCountryOption.dialCode.length)
+                        : raw;
+                      setSignUpData({ ...signUpData, numero: stripped.replace(/[^0-9 ]/g, '') });
+                    }}
+                    className="flex-1 min-w-0 px-3 py-2.5 bg-transparent text-white font-mono placeholder-purple-400/50 focus:outline-none"
+                  />
+                </div>
+              </div>
+
+              <div>
+                <label className="font-bold text-purple-300 block mb-1">Code parrainage (optionnel)</label>
                 <input
                   type="text"
-                  maxLength={6}
-                  required
-                  placeholder="123456"
-                  value={signUpData.verificationCode}
-                  onChange={e => setSignUpData({ ...signUpData, verificationCode: e.target.value })}
-                  className="w-full px-3 py-2 rounded-xl bg-[#1D1240] border-2 border-[#8B5CF6]/40 text-white font-mono text-center tracking-widest font-bold"
+                  placeholder="Ex: SALOMA-ABC123"
+                  value={signUpData.parrain}
+                  onChange={e => setSignUpData({ ...signUpData, parrain: e.target.value })}
+                  className="w-full px-3 py-2.5 rounded-xl bg-[#1D1240] border border-[#8B5CF6]/40 text-white placeholder-purple-400/50 focus:outline-none focus:border-[#8B5CF6]"
                 />
               </div>
 
-              <div className="grid grid-cols-2 gap-2">
-                <div>
-                  <label className="font-bold text-purple-300 block mb-1">4. Mot de passe *</label>
-                  <input
-                    type="password"
-                    required
-                    value={signUpData.password}
-                    onChange={e => setSignUpData({ ...signUpData, password: e.target.value })}
-                    className="w-full px-3 py-2 rounded-xl bg-[#1D1240] border-2 border-[#8B5CF6]/40 text-white"
-                  />
-                </div>
-                <div>
-                  <label className="font-bold text-purple-300 block mb-1">Confirmer mot de passe *</label>
-                  <input
-                    type="password"
-                    required
-                    value={signUpData.confirmPassword}
-                    onChange={e => setSignUpData({ ...signUpData, confirmPassword: e.target.value })}
-                    className="w-full px-3 py-2 rounded-xl bg-[#1D1240] border-2 border-[#8B5CF6]/40 text-white"
-                  />
-                </div>
-              </div>
-
-              <div className="grid grid-cols-2 gap-2">
-                <div>
-                  <label className="font-bold text-purple-300 block mb-1">5. Pays d'origine</label>
-                  <select
-                    value={signUpData.paysOrigine}
-                    onChange={e => setSignUpData({ ...signUpData, paysOrigine: e.target.value })}
-                    className="w-full px-2 py-2 rounded-xl bg-[#1D1240] border-2 border-[#8B5CF6]/40 text-white"
+              <label className="flex items-start gap-2.5 cursor-pointer bg-[#1D1240]/70 p-3 rounded-xl border border-[#8B5CF6]/30">
+                <input
+                  type="checkbox"
+                  checked={signUpData.accepteConditions}
+                  onChange={e => setSignUpData({ ...signUpData, accepteConditions: e.target.checked })}
+                  className="mt-0.5 rounded border-[#8B5CF6] text-[#7C3AED] shrink-0"
+                />
+                <span className="text-xs text-purple-200 leading-snug">
+                  J'accepte les{' '}
+                  <button
+                    type="button"
+                    onClick={e => {
+                      e.preventDefault();
+                      e.stopPropagation();
+                      setScreen('conditions');
+                    }}
+                    className="text-[#A78BFA] font-black underline hover:text-white"
                   >
-                    <option value="Madagascar 🇲🇬">Madagascar 🇲🇬</option>
-                    <option value="France 🇫🇷">France 🇫🇷</option>
-                    <option value="Maurice 🇲🇺">Maurice 🇲🇺</option>
-                  </select>
-                </div>
-                <div>
-                  <label className="font-bold text-purple-300 block mb-1">6. Numéro Tél *</label>
-                  <input
-                    type="tel"
-                    required
-                    placeholder="+261 34 ..."
-                    value={signUpData.numero}
-                    onChange={e => setSignUpData({ ...signUpData, numero: e.target.value })}
-                    className="w-full px-3 py-2 rounded-xl bg-[#1D1240] border-2 border-[#8B5CF6]/40 text-white"
-                  />
-                </div>
-              </div>
+                    Conditions d'utilisation
+                  </button>
+                </span>
+              </label>
 
-              <div className="space-y-1 pt-1">
-                <label className="flex items-center gap-2 cursor-pointer">
-                  <input
-                    type="checkbox"
-                    checked={signUpData.accepteConditions}
-                    onChange={e => setSignUpData({ ...signUpData, accepteConditions: e.target.checked })}
-                    className="rounded border-[#8B5CF6] text-[#7C3AED]"
-                  />
-                  <span>J'accepte les conditions (Manaiky ny fepetra)</span>
-                </label>
-                <label className="flex items-center gap-2 cursor-pointer">
-                  <input
-                    type="checkbox"
-                    checked={signUpData.plus18ans}
-                    onChange={e => setSignUpData({ ...signUpData, plus18ans: e.target.checked })}
-                    className="rounded border-[#8B5CF6] text-[#7C3AED]"
-                  />
-                  <span>Je confirme avoir +18 ans</span>
-                </label>
-              </div>
+              <TurnstileWidget
+                siteKey={turnstileSiteKey}
+                token={signUpTurnstileToken}
+                resetKey={signUpTurnstileReset}
+                onVerify={setSignUpTurnstileToken}
+                onExpire={() => setSignUpTurnstileToken('')}
+              />
 
               <button
                 type="submit"
-                className="w-full mt-2 py-3.5 rounded-xl bg-gradient-to-r from-[#7C3AED] via-[#8B5CF6] to-[#7C3AED] text-white font-black text-sm shadow-[0_0_20px_rgba(124,58,237,0.7)]"
+                disabled={!canSubmitSignUp || !signUpTurnstileToken || signUpLoading}
+                className="w-full mt-2 py-4 rounded-2xl bg-gradient-to-r from-[#7C3AED] via-[#8B5CF6] to-[#7C3AED] text-white font-black text-sm shadow-[0_0_25px_rgba(124,58,237,0.75)] disabled:opacity-45 disabled:cursor-not-allowed transition"
               >
-                S'inscrire (Hisoratra anarana)
+                {signUpLoading
+                  ? 'Création du compte...'
+                  : !signUpTurnstileToken
+                  ? "Validez Cloudflare pour S'inscrire"
+                  : "S'inscrire"}
               </button>
             </form>
           </div>
 
-          <div className="text-center pt-2">
+          <div className="text-center pt-4">
             <button onClick={() => setScreen('login')} className="text-xs text-purple-300">
               Déjà un compte ? <span className="text-[#8B5CF6] font-bold underline">Se connecter</span>
             </button>
@@ -1067,7 +2815,127 @@ export default function App() {
       )}
 
       {/* ========================================================
-          LOGIN SCREEN
+          ÉCRAN OBLIGATOIRE : VÉRIFICATION PAR CODE EMAIL APPWRITE
+         ======================================================== */}
+      {screen === 'verifyEmail' && (
+        <div className="min-h-screen p-6 max-w-md mx-auto w-full z-10 flex flex-col justify-between">
+          <div className="my-auto bg-[#1D1240] border-2 border-[#8B5CF6] rounded-3xl p-6 space-y-5 shadow-[0_0_40px_rgba(124,58,237,0.45)]">
+            <div className="flex flex-col items-center text-center space-y-2">
+              <div className="w-14 h-14 rounded-2xl bg-[#7C3AED]/30 border-2 border-[#8B5CF6] flex items-center justify-center">
+                <Mail className="w-7 h-7 text-purple-200" />
+              </div>
+              <h2 className="font-black text-xl text-white">Entrez le code reçu par email</h2>
+              <p className="text-xs text-purple-200/80 leading-relaxed">
+                Un code de sécurité à 6 chiffres a été envoyé à{' '}
+                <strong className="text-white font-mono">{userRow?.email}</strong>. Vérifiez votre boîte de réception et vos spams.
+              </p>
+            </div>
+
+            {verifyOtpError && (
+              <div className="p-3 rounded-xl bg-rose-500/20 border border-rose-500/40 text-rose-300 text-xs font-bold text-center">
+                {verifyOtpError}
+              </div>
+            )}
+
+            <form onSubmit={handleVerifyEmailCode} className="space-y-4">
+              <input
+                type="text"
+                inputMode="numeric"
+                maxLength={6}
+                required
+                placeholder="000000"
+                value={verifyOtpInput}
+                onChange={e => {
+                  setVerifyOtpInput(e.target.value.replace(/[^0-9]/g, ''));
+                  setVerifyOtpError('');
+                }}
+                className="w-full py-3.5 px-4 rounded-2xl bg-[#150D2E] border-2 border-[#8B5CF6]/60 text-white font-mono text-2xl font-black text-center tracking-[0.4em] focus:outline-none focus:border-[#8B5CF6]"
+              />
+
+              <button
+                type="submit"
+                disabled={verifyOtpLoading || verifyOtpInput.length !== 6}
+                className="w-full py-3.5 rounded-2xl bg-gradient-to-r from-[#7C3AED] to-[#8B5CF6] text-white font-black text-sm shadow-[0_0_25px_rgba(124,58,237,0.6)] disabled:opacity-50"
+              >
+                {verifyOtpLoading ? 'Vérification...' : 'Vérifier le code'}
+              </button>
+            </form>
+
+            <div className="flex items-center justify-between pt-2 border-t border-purple-500/25 text-xs">
+              <button
+                type="button"
+                disabled={resendCooldown > 0 || resendLoading}
+                onClick={handleResendEmailCode}
+                className="font-bold text-[#A78BFA] hover:text-white disabled:opacity-50 flex items-center gap-1.5"
+              >
+                <Clock className="w-3.5 h-3.5" />
+                {resendCooldown > 0
+                  ? `Renvoyer le code (${resendCooldown}s)`
+                  : resendLoading
+                  ? 'Envoi...'
+                  : 'Renvoyer le code'}
+              </button>
+
+              <button
+                type="button"
+                onClick={handleLogout}
+                className="text-rose-300 hover:text-rose-200 font-bold"
+              >
+                Se déconnecter
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ========================================================
+          CONDITIONS D'UTILISATION
+         ======================================================== */}
+      {screen === 'conditions' && (
+        <div className="min-h-screen p-5 max-w-md mx-auto w-full z-10 flex flex-col space-y-4">
+          <div className="flex items-center justify-between">
+            <button onClick={() => setScreen('signup')} className="p-2 rounded-xl bg-[#23154D] text-purple-300">
+              <ArrowLeft className="w-5 h-5" />
+            </button>
+            <div className="text-center">
+              <span className="text-[11px] font-mono font-black px-3 py-1 rounded-full bg-[#7C3AED]/30 border border-[#8B5CF6] text-purple-100">
+                condition.saloma
+              </span>
+              <h2 className="font-black text-base text-white mt-1">Conditions d'utilisation SALOMA</h2>
+            </div>
+            <div className="w-9" />
+          </div>
+
+          <div className="flex-1 p-4 rounded-3xl bg-[#1D1240] border-2 border-[#8B5CF6]/60 text-xs text-purple-100/90 leading-relaxed space-y-4 overflow-y-auto max-h-[72vh]">
+            <p className="font-bold text-white text-sm border-b border-purple-500/30 pb-2">
+              Règlement Général et Conditions d'Utilisation de la Plateforme Financière SALOMA
+            </p>
+            <p>
+              <strong>1. Unicité & Sécurité :</strong> Chaque compte SALOMA est strictement personnel et vérifié par code email à 6 chiffres. Tous les nouveaux comptes démarrent à 0 Ar.
+            </p>
+            <p>
+              <strong>2. Dépôts, Retraits & KYC :</strong> Toute demande de dépôt ou de retrait est enregistrée avec le statut initial « en_attente » pour vérification et validation sécurisée. Le niveau KYC 2 est requis avant tout retrait.
+            </p>
+            <p>
+              <strong>3. Modèle Broker Pur, Frais & Marge Isolée :</strong> Des frais transparents de 0,1% s'appliquent sur le Trading, 0,1% sur l'Échange, et 0,15% + frais réseau sur le Retrait seul. SALOMA agit uniquement comme pont d'exécution vers l'exchange actif avec marge isolée par position.
+            </p>
+          </div>
+
+          <button
+            type="button"
+            onClick={() => {
+              setSignUpData(prev => ({ ...prev, accepteConditions: true }));
+              setScreen('signup');
+            }}
+            className="w-full py-3.5 rounded-xl bg-gradient-to-r from-[#7C3AED] to-[#8B5CF6] text-white font-black text-xs"
+          >
+            Accepter et revenir à l'inscription
+          </button>
+        </div>
+      )}
+
+      {/* ========================================================
+          CONNEXION SCREEN (EMAIL + MOT DE PASSE APPWRITE)
          ======================================================== */}
       {screen === 'login' && (
         <div className="min-h-screen p-5 max-w-md mx-auto w-full z-10 flex flex-col justify-between">
@@ -1083,359 +2951,1086 @@ export default function App() {
               <div className="w-9" />
             </div>
 
-            <form onSubmit={e => {
-              e.preventDefault();
-              enterTestMode();
-            }} className="space-y-4">
+            {loginError && (
+              <div className="p-3 mb-4 rounded-xl bg-rose-500/20 border border-rose-500/40 text-rose-300 text-xs font-bold">
+                {loginError}
+              </div>
+            )}
+
+            <form onSubmit={handleRealLogin} className="space-y-4">
               <div>
                 <label className="block text-xs font-bold text-purple-300 mb-1">Email</label>
                 <input
                   type="email"
-                  defaultValue="test@saloma.mg"
+                  required
+                  placeholder="nirina@gmail.com"
+                  value={loginEmail}
+                  onChange={e => setLoginEmail(e.target.value)}
                   className="w-full px-3.5 py-2.5 rounded-xl bg-[#1D1240] border-2 border-[#8B5CF6]/40 text-white text-xs"
                 />
               </div>
               <div>
                 <label className="block text-xs font-bold text-purple-300 mb-1">Mot de passe</label>
-                <input
-                  type="password"
-                  defaultValue="12345678"
-                  className="w-full px-3.5 py-2.5 rounded-xl bg-[#1D1240] border-2 border-[#8B5CF6]/40 text-white text-xs"
-                />
+                <div className="relative">
+                  <input
+                    type={showLoginPassword ? 'text' : 'password'}
+                    required
+                    placeholder="••••••••"
+                    value={loginPassword}
+                    onChange={e => setLoginPassword(e.target.value)}
+                    className="w-full pl-3.5 pr-10 py-2.5 rounded-xl bg-[#1D1240] border-2 border-[#8B5CF6]/40 text-white text-xs"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setShowLoginPassword(p => !p)}
+                    className="absolute right-2.5 top-1/2 -translate-y-1/2 text-purple-300 hover:text-white"
+                  >
+                    {showLoginPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                  </button>
+                </div>
               </div>
+
+              <div className="flex justify-end">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setForgotError('');
+                    setForgotStep('email');
+                    setScreen('forgotPassword');
+                  }}
+                  className="text-xs font-bold text-[#A78BFA] hover:text-white underline"
+                >
+                  Mot de passe oublié ?
+                </button>
+              </div>
+
+              <TurnstileWidget
+                siteKey={turnstileSiteKey}
+                token={loginTurnstileToken}
+                resetKey={loginTurnstileReset}
+                onVerify={setLoginTurnstileToken}
+                onExpire={() => setLoginTurnstileToken('')}
+              />
 
               <button
                 type="submit"
-                className="w-full py-3.5 rounded-xl bg-gradient-to-r from-[#7C3AED] to-[#8B5CF6] text-white font-black text-sm shadow-[0_0_20px_rgba(124,58,237,0.6)]"
+                disabled={!loginTurnstileToken || loginLoading}
+                className="w-full py-3.5 rounded-xl bg-gradient-to-r from-[#7C3AED] to-[#8B5CF6] text-white font-black text-sm shadow-[0_0_20px_rgba(124,58,237,0.6)] disabled:opacity-45 disabled:cursor-not-allowed transition"
               >
-                Se Connecter
-              </button>
-
-              <button
-                type="button"
-                onClick={enterTestMode}
-                className="w-full py-3 rounded-xl bg-[#23154D] text-purple-200 text-xs font-bold border-2 border-[#8B5CF6]/40 flex items-center justify-center gap-2"
-              >
-                <Zap className="w-4 h-4 text-amber-400" />
-                Continuer en tant qu'Invité - Mode Test
+                {loginLoading
+                  ? 'Connexion...'
+                  : !loginTurnstileToken
+                  ? 'Validez Cloudflare pour Se Connecter'
+                  : 'Se Connecter'}
               </button>
             </form>
           </div>
           <div className="text-center pt-4">
             <button onClick={() => setScreen('signup')} className="text-xs text-purple-300">
-              Pas encore de compte ? <span className="text-[#8B5CF6] font-bold underline">S'inscrire</span>
+              Pas encore de compte ? <span className="text-[#8B5CF6] font-bold underline">Créer compte</span>
             </button>
           </div>
         </div>
       )}
 
       {/* ========================================================
-          MAIN APPLICATION
+          MOT DE PASSE OUBLIÉ (RECOVERY OTP APPWRITE)
+         ======================================================== */}
+      {screen === 'forgotPassword' && (
+        <div className="min-h-screen p-5 max-w-md mx-auto w-full z-10 flex flex-col justify-between">
+          <div>
+            <div className="flex items-center justify-between mb-6">
+              <button onClick={() => setScreen('login')} className="p-2 rounded-xl bg-[#23154D] text-purple-300">
+                <ArrowLeft className="w-5 h-5" />
+              </button>
+              <div className="text-center">
+                <h2 className="font-black text-xl text-white">Mot de passe oublié</h2>
+                <span className="text-xs text-purple-300/80">Récupération par code email</span>
+              </div>
+              <div className="w-9" />
+            </div>
+
+            {forgotError && (
+              <div className="p-3 mb-4 rounded-xl bg-rose-500/20 border border-rose-500/40 text-rose-300 text-xs font-bold">
+                {forgotError}
+              </div>
+            )}
+
+            {forgotStep === 'email' ? (
+              <form onSubmit={handleSendForgotCode} className="space-y-4">
+                <div>
+                  <label className="block text-xs font-bold text-purple-300 mb-1">Votre adresse e-mail</label>
+                  <input
+                    type="email"
+                    required
+                    placeholder="nirina@gmail.com"
+                    value={forgotEmail}
+                    onChange={e => setForgotEmail(e.target.value)}
+                    className="w-full px-3.5 py-2.5 rounded-xl bg-[#1D1240] border-2 border-[#8B5CF6]/40 text-white text-xs"
+                  />
+                </div>
+                <button
+                  type="submit"
+                  disabled={forgotLoading}
+                  className="w-full py-3.5 rounded-xl bg-gradient-to-r from-[#7C3AED] to-[#8B5CF6] text-white font-black text-sm disabled:opacity-60"
+                >
+                  {forgotLoading ? 'Envoi...' : 'Envoyer le code à 6 chiffres'}
+                </button>
+              </form>
+            ) : (
+              <form onSubmit={handleResetPassword} className="space-y-4">
+                <div>
+                  <label className="block text-xs font-bold text-purple-300 mb-1">Code à 6 chiffres reçu par email</label>
+                  <input
+                    type="text"
+                    inputMode="numeric"
+                    maxLength={6}
+                    required
+                    placeholder="123456"
+                    value={forgotCode}
+                    onChange={e => setForgotCode(e.target.value.replace(/[^0-9]/g, ''))}
+                    className="w-full px-3.5 py-2.5 rounded-xl bg-[#1D1240] border-2 border-[#8B5CF6]/40 text-white font-mono text-center tracking-widest text-base font-bold"
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-bold text-purple-300 mb-1">Nouveau mot de passe (min 8 caractères)</label>
+                  <div className="relative">
+                    <input
+                      type={showForgotPassword ? 'text' : 'password'}
+                      required
+                      minLength={8}
+                      placeholder="Nouveau mot de passe"
+                      value={forgotNewPassword}
+                      onChange={e => setForgotNewPassword(e.target.value)}
+                      className="w-full pl-3.5 pr-10 py-2.5 rounded-xl bg-[#1D1240] border-2 border-[#8B5CF6]/40 text-white text-xs"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => setShowForgotPassword(p => !p)}
+                      className="absolute right-2.5 top-1/2 -translate-y-1/2 text-purple-300"
+                    >
+                      {showForgotPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                    </button>
+                  </div>
+                </div>
+                <button
+                  type="submit"
+                  disabled={forgotLoading}
+                  className="w-full py-3.5 rounded-xl bg-gradient-to-r from-emerald-600 to-emerald-500 text-white font-black text-sm disabled:opacity-60"
+                >
+                  {forgotLoading ? 'Mise à jour...' : 'Réinitialiser le mot de passe'}
+                </button>
+              </form>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* ========================================================
+          MAIN APPLICATION (MENU: EARN | TRADING | ÉCHANGE | PORTEFEUILLE)
          ======================================================== */}
       {screen === 'main' && (
         <div className="flex-1 flex flex-col max-w-md mx-auto w-full pb-20 relative z-10">
           {/* TOP BAR */}
-          <header className="sticky top-0 z-30 bg-[#150D2E]/95 backdrop-blur-md border-b-2 border-[#8B5CF6]/40 px-4 py-2.5 flex items-center justify-between shadow-[0_4px_20px_rgba(21,13,46,0.8)]">
-            <div className="flex items-center gap-2.5 cursor-pointer" onClick={handleLogoClick}>
-              <div className="w-9 h-9 rounded-xl bg-gradient-to-tr from-[#7C3AED] via-[#8B5CF6] to-[#7C3AED] flex items-center justify-center text-white font-black text-base shadow-[0_0_15px_rgba(124,58,237,0.8)] border border-purple-300/50">
+          <header className="sticky top-0 z-30 bg-[#150D2E]/95 backdrop-blur-md border-b-2 border-[#8B5CF6]/40 px-3 py-2.5 flex items-center justify-between gap-2 shadow-[0_4px_20px_rgba(21,13,46,0.85)]">
+            <div className="flex items-center gap-2.5 cursor-pointer flex-1 min-w-0 select-none" onClick={handleLogoClick}>
+              <div className="w-10 h-10 shrink-0 rounded-xl bg-gradient-to-tr from-[#7C3AED] via-[#8B5CF6] to-[#7C3AED] flex items-center justify-center text-white font-black text-lg shadow-[0_0_15px_rgba(124,58,237,0.8)] border border-purple-300/50">
                 S
               </div>
-              <div>
-                <span className="font-black text-xl tracking-wider text-transparent bg-clip-text bg-gradient-to-r from-purple-100 via-white to-purple-200 drop-shadow-[0_0_12px_rgba(139,92,246,0.9)] leading-none block">
+              <div className="min-w-0 flex-1">
+                <span className="font-black text-2xl sm:text-[26px] tracking-wider text-transparent bg-clip-text bg-gradient-to-r from-purple-100 via-white to-purple-200 drop-shadow-[0_0_14px_rgba(139,92,246,0.95)] leading-none block">
                   SALOMA
                 </span>
-                <span className="text-[9px] text-[#8B5CF6] font-bold tracking-widest font-mono">
-                  EXCHANGE
+                <span className="text-[10px] leading-tight text-purple-200/90 font-semibold block mt-0.5 truncate">
+                  Notre plateforme, service financier, trade (profit)
                 </span>
               </div>
             </div>
 
-            <div
-              onClick={handleLogoClick}
-              className="cursor-pointer px-3 py-1 rounded-full bg-[#1F1042] border border-[#8B5CF6] text-[10px] font-black text-purple-200 flex items-center gap-1.5 shadow"
-              title="Cliquez 5 fois pour Admin"
-            >
-              <div className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></div>
-              <span>SALOMA</span>
-              {logoClicks > 0 && <span className="text-amber-300 font-mono">({logoClicks}/5)</span>}
-            </div>
-
-            <div className="flex items-center gap-1.5">
-              <PWAInstallButton compact />
+            <div className="flex items-center gap-1.5 shrink-0">
+              <button
+                onClick={() => setActiveModal('notifications')}
+                className="relative p-1.5 rounded-xl bg-[#23154D] text-purple-200 border border-[#8B5CF6]/40 shadow"
+                title="Notifications"
+              >
+                <Bell className="w-4 h-4" />
+                {unreadNotificationsCount > 0 && (
+                  <span className="absolute -top-1.5 -right-1.5 min-w-[16px] h-4 px-1 rounded-full bg-rose-600 text-white text-[9px] font-black flex items-center justify-center border border-[#150D2E]">
+                    {unreadNotificationsCount > 9 ? '9+' : unreadNotificationsCount}
+                  </span>
+                )}
+              </button>
               <button
                 onClick={() => setActiveModal('guide')}
                 className="p-1.5 rounded-xl bg-[#23154D] text-purple-300 border border-[#8B5CF6]/30 shadow"
+                title="Mode d'emploi"
               >
                 <HelpCircle className="w-4 h-4" />
               </button>
               <button
                 onClick={() => setActiveModal('kyc')}
                 className="p-1.5 rounded-xl bg-[#23154D] text-purple-300 border border-[#8B5CF6]/30 flex items-center gap-1 shadow"
+                title="KYC"
               >
-                <ShieldCheck className={`w-4 h-4 ${user.kycLevel === 2 ? 'text-emerald-400' : 'text-amber-400'}`} />
-                <span className="text-[10px] font-bold text-purple-200">N{user.kycLevel}</span>
+                <ShieldCheck className={`w-4 h-4 ${(userRow?.kyc_level ?? 0) >= 2 ? 'text-emerald-400' : 'text-amber-400'}`} />
+                <span className="text-[10px] font-bold text-purple-200">N{userRow?.kyc_level ?? 0}</span>
               </button>
               <button
                 onClick={() => setActiveModal('profile')}
                 className="p-1.5 rounded-xl bg-[#7C3AED]/35 text-white border-2 border-[#8B5CF6] shadow-[0_0_12px_rgba(124,58,237,0.5)]"
+                title="Profil"
               >
                 <User className="w-4 h-4" />
               </button>
             </div>
           </header>
 
-          {isTestMode && (
-            <div className="bg-gradient-to-r from-amber-500/20 via-[#7C3AED]/30 to-amber-500/20 border-b border-amber-500/40 px-3 py-1 flex items-center justify-between text-[11px] text-amber-200 font-bold">
-              <div className="flex items-center gap-1.5">
-                <span className="inline-block w-2 h-2 rounded-full bg-amber-400 animate-ping"></span>
-                <span>MODE TEST - Argent Virtuel</span>
-              </div>
-              <span className="font-mono text-amber-300">$10 000 + 1 000 000 Ar</span>
-            </div>
-          )}
-
           {/* MAIN TAB CONTENT */}
-          <main className="flex-1 px-3.5 py-3 overflow-y-auto">
-
-            {/* TAB: EARN */}
+          <main className="flex-1 px-3 py-3 overflow-y-auto">
+            {/* ========================================================
+                TAB 1: EARN RÉEL (Appwrite `earn` + `Wallets`)
+               ======================================================== */}
             {activeTab === 'earn' && (
-              <div className="space-y-4 animate-fadeIn">
-                <h2 className="text-lg font-black text-white flex items-center gap-2">
-                  <Gift className="w-5 h-5 text-amber-400" />
-                  SALOMA Earn (Harena)
-                </h2>
-
-                <div className="p-4 rounded-3xl bg-gradient-to-br from-[#2D165A] via-[#1F1042] to-[#150D2E] border-2 border-[#8B5CF6] space-y-2">
-                  <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-amber-500/20 text-amber-300 border border-amber-500/40">
-                    Cadeau Surprise
+              <div className="space-y-4">
+                <div className="flex items-center justify-between">
+                  <h2 className="text-lg font-black text-white flex items-center gap-2">
+                    <Gift className="w-5 h-5 text-amber-400" />
+                    SALOMA Earn (Harena)
+                  </h2>
+                  <span className="text-[10px] font-mono font-bold px-2.5 py-1 rounded-full bg-emerald-500/20 text-emerald-300 border border-emerald-500/40">
+                    Total gagné : +{totalEarnAr.toLocaleString('fr-FR')} Ar
                   </span>
-                  <h3 className="font-black text-white text-base">Boîte Cadeau Surprise (Fanomezana)</h3>
-                  {surpriseClaimed ? (
+                </div>
+
+                {/* COURBE D'ÉVOLUTION DU SOLDE EARN (MONTÉE / DESCENTE) + 2 BOUTONS RETRAIT */}
+                {(() => {
+                  const pts = earnBalanceCurve;
+                  const lastPt = pts[pts.length - 1] || { value: 0, delta: 0, isDown: false };
+                  const values = pts.map(p => p.value);
+                  const minVal = Math.min(...values, 0);
+                  const maxVal = Math.max(...values, 1);
+                  const span = Math.max(1, maxVal - minVal);
+                  const w = 340;
+                  const h = 112;
+                  const padX = 12;
+                  const padY = 14;
+                  const coords = pts.map((p, idx) => {
+                    const x =
+                      pts.length <= 1
+                        ? w - padX
+                        : padX + (idx / (pts.length - 1)) * (w - padX * 2);
+                    const y = padY + (1 - (p.value - minVal) / span) * (h - padY * 2);
+                    return { x, y, ...p };
+                  });
+                  const polyPoints = coords.map(c => `${c.x.toFixed(1)},${c.y.toFixed(1)}`).join(' ');
+                  const areaPoints =
+                    coords.length > 0
+                      ? `${coords[0].x.toFixed(1)},${(h - padY + 6).toFixed(1)} ${polyPoints} ${coords[
+                          coords.length - 1
+                        ].x.toFixed(1)},${(h - padY + 6).toFixed(1)}`
+                      : '';
+                  const earnSoldeActuel = lastPt.value;
+                  const lastSegmentDown = lastPt.isDown;
+
+                  return (
+                    <div className="p-4 rounded-3xl bg-[#1D1240] border-2 border-[#8B5CF6]/70 space-y-3 shadow-[0_0_24px_rgba(124,58,237,0.22)]">
+                      <div className="flex items-start justify-between gap-2">
+                        <div>
+                          <span className="text-[10px] font-bold uppercase tracking-wider text-purple-300 block">
+                            Évolution Solde Earn
+                          </span>
+                          <div className="flex items-baseline gap-2 mt-0.5">
+                            <span className="text-xl font-black font-mono text-white">
+                              {earnSoldeActuel.toLocaleString('fr-FR')} Ar
+                            </span>
+                            <span
+                              className={`text-[10px] font-black font-mono inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded ${
+                                lastSegmentDown
+                                  ? 'bg-rose-500/20 text-rose-300'
+                                  : 'bg-emerald-500/20 text-emerald-300'
+                              }`}
+                            >
+                              {lastSegmentDown ? (
+                                <TrendingDown className="w-3 h-3" />
+                              ) : (
+                                <TrendingUp className="w-3 h-3" />
+                              )}
+                              {lastPt.delta >= 0 ? '+' : ''}
+                              {lastPt.delta.toLocaleString('fr-FR')} Ar
+                            </span>
+                          </div>
+                        </div>
+                        <div className="text-right text-[10px] font-mono">
+                          <span className="text-purple-300 block">
+                            Fond actif : <strong className="text-white">{fondEpargneAr.toLocaleString('fr-FR')} Ar</strong>
+                          </span>
+                          <span className="text-emerald-300 block">
+                            Profit : <strong>+{profitEarnDisponibleAr.toLocaleString('fr-FR')} Ar</strong>
+                          </span>
+                        </div>
+                      </div>
+
+                      <div className="rounded-2xl bg-[#150D2E] border border-[#8B5CF6]/30 p-2">
+                        <svg viewBox={`0 0 ${w} ${h}`} className="w-full h-28 overflow-visible">
+                          <defs>
+                            <linearGradient id="earnAreaGrad" x1="0" y1="0" x2="0" y2="1">
+                              <stop offset="0%" stopColor="#8B5CF6" stopOpacity="0.35" />
+                              <stop offset="100%" stopColor="#150D2E" stopOpacity="0.02" />
+                            </linearGradient>
+                          </defs>
+                          <line x1={padX} y1={padY} x2={w - padX} y2={padY} stroke="#7C3AED" strokeOpacity="0.18" strokeDasharray="3 3" />
+                          <line x1={padX} y1={h / 2} x2={w - padX} y2={h / 2} stroke="#7C3AED" strokeOpacity="0.18" strokeDasharray="3 3" />
+                          <line x1={padX} y1={h - padY} x2={w - padX} y2={h - padY} stroke="#7C3AED" strokeOpacity="0.22" />
+
+                          {areaPoints && <polygon points={areaPoints} fill="url(#earnAreaGrad)" />}
+
+                          {coords.length === 1 && (
+                            <line
+                              x1={padX}
+                              y1={coords[0].y}
+                              x2={w - padX}
+                              y2={coords[0].y}
+                              stroke="#8B5CF6"
+                              strokeWidth="2.5"
+                              strokeLinecap="round"
+                            />
+                          )}
+
+                          {coords.slice(1).map((c, idx) => {
+                            const prev = coords[idx];
+                            const segDown = c.value < prev.value || c.isDown;
+                            return (
+                              <line
+                                key={`seg-${idx}`}
+                                x1={prev.x}
+                                y1={prev.y}
+                                x2={c.x}
+                                y2={c.y}
+                                stroke={segDown ? '#F43F5E' : '#10B981'}
+                                strokeWidth="2.75"
+                                strokeLinecap="round"
+                              />
+                            );
+                          })}
+
+                          {coords.map((c, idx) => (
+                            <circle
+                              key={`pt-${idx}`}
+                              cx={c.x}
+                              cy={c.y}
+                              r={idx === coords.length - 1 ? 4.2 : 2.8}
+                              fill={c.isDown ? '#F43F5E' : idx === 0 ? '#8B5CF6' : '#10B981'}
+                              stroke="#150D2E"
+                              strokeWidth="1.5"
+                            />
+                          ))}
+                        </svg>
+                        <div className="flex justify-between items-center text-[9px] font-mono text-purple-300 px-1 pt-1 border-t border-purple-500/20">
+                          <span className="flex items-center gap-1">
+                            <span className="w-2 h-2 rounded-full bg-emerald-400 inline-block" /> Montée
+                            <span className="w-2 h-2 rounded-full bg-rose-500 inline-block ml-1.5" /> Descente
+                          </span>
+                          <span>Max : {maxVal.toLocaleString('fr-FR')} Ar</span>
+                        </div>
+                      </div>
+
+                      <div className="grid grid-cols-2 gap-2.5 text-xs">
+                        <button
+                          type="button"
+                          disabled={earnWithdrawLoading !== null}
+                          onClick={handleWithdrawEarnProfit}
+                          className="py-2.5 px-3 rounded-xl bg-gradient-to-r from-emerald-600 to-emerald-500 hover:from-emerald-500 hover:to-emerald-400 text-white font-black text-[11px] shadow flex items-center justify-center gap-1.5 disabled:opacity-50 transition"
+                        >
+                          <ArrowDownLeft className="w-3.5 h-3.5 shrink-0" />
+                          <span>
+                            {earnWithdrawLoading === 'profit' ? 'Retrait...' : 'RETIRER LE PROFIT'}
+                          </span>
+                        </button>
+                        <button
+                          type="button"
+                          disabled={earnWithdrawLoading !== null}
+                          onClick={handleWithdrawEarnFund}
+                          className="py-2.5 px-3 rounded-xl bg-gradient-to-r from-[#7C3AED] to-[#8B5CF6] hover:brightness-110 text-white font-black text-[11px] shadow flex items-center justify-center gap-1.5 disabled:opacity-50 transition"
+                        >
+                          <Wallet className="w-3.5 h-3.5 shrink-0" />
+                          <span>
+                            {earnWithdrawLoading === 'fund' ? 'Retrait...' : 'RETIRER LE FOND'}
+                          </span>
+                        </button>
+                      </div>
+                    </div>
+                  );
+                })()}
+
+                {/* Cadeau de bienvenue réel */}
+                <div className="p-4 rounded-3xl bg-gradient-to-br from-[#2D165A] via-[#1F1042] to-[#150D2E] border-2 border-[#8B5CF6] space-y-2.5 shadow-[0_0_24px_rgba(124,58,237,0.35)]">
+                  <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-amber-500/20 text-amber-300 border border-amber-500/40">
+                    Bonus Nouveau Inscrit
+                  </span>
+                  <h3 className="font-black text-white text-base">Boîte Cadeau Surprise (+10 000 Ar)</h3>
+                  <p className="text-xs text-purple-200/80">
+                    Ouvrez votre récompense de bienvenue créditée instantanément dans votre Portefeuille réel.
+                  </p>
+                  {welcomeGiftClaimed ? (
                     <div className="p-3 rounded-2xl bg-emerald-500/20 border border-emerald-500/40 text-emerald-300 text-xs font-bold">
-                      ✓ Récompense de $25 créditée au Portefeuille !
+                      ✓ Bonus +10 000 Ar déjà crédité dans votre Portefeuille !
                     </div>
                   ) : (
                     <button
-                      onClick={() => {
-                        setSurpriseOpening(true);
-                        setTimeout(() => {
-                          setSurpriseOpening(false);
-                          setSurpriseClaimed(true);
-                          setWalletBalanceUsd(prev => prev + 25);
-                          showToast('🎉 $25 offerts ajoutés au portefeuille !');
-                        }, 1200);
-                      }}
-                      className="w-full py-3 rounded-2xl bg-gradient-to-r from-amber-500 via-[#8B5CF6] to-amber-500 text-white font-black text-xs shadow border border-amber-300/40 flex items-center justify-center gap-2"
+                      type="button"
+                      disabled={earnLoadingId === 'welcome-gift'}
+                      onClick={() =>
+                        claimEarnReward({
+                          type_gain: 'bonus_bienvenue',
+                          montant: 10000,
+                          description: 'Cadeau de bienvenue SALOMA',
+                          task_id: 'welcome-gift'
+                        })
+                      }
+                      className="w-full py-3 rounded-2xl bg-gradient-to-r from-amber-500 via-[#8B5CF6] to-amber-500 text-white font-black text-xs shadow border border-amber-300/40 flex items-center justify-center gap-2 disabled:opacity-60"
                     >
                       <Gift className="w-4 h-4" />
-                      <span>{surpriseOpening ? 'Ouverture...' : 'Ouvrir mon Cadeau Surprise'}</span>
+                      <span>
+                        {earnLoadingId === 'welcome-gift' ? 'Crédit en cours...' : 'Réclamer +10 000 Ar'}
+                      </span>
                     </button>
                   )}
                 </div>
 
+                {/* Affiliation réelle */}
                 <div className="p-4 rounded-3xl bg-[#1D1240] border-2 border-[#8B5CF6]/50 space-y-3">
                   <div className="flex justify-between items-center">
                     <span className="font-bold text-sm text-white">Affiliation 20% sur investissement</span>
-                    <span className="text-xs font-black text-emerald-400 bg-emerald-500/20 px-2 py-1 rounded">20% Gain</span>
+                    <span className="text-xs font-black text-emerald-400 bg-emerald-500/20 px-2 py-1 rounded">
+                      20% Gain
+                    </span>
                   </div>
-                  <div className="p-2.5 rounded-xl bg-[#150D2E] text-xs flex justify-between items-center">
-                    <span className="text-purple-300 font-mono">Code : {user.referralCode}</span>
-                    <button onClick={() => {
-                      navigator.clipboard.writeText(`https://saloma.mg/join?ref=${user.referralCode}`);
-                      showToast('Lien d\'affiliation copié !');
-                    }} className="px-3 py-1 bg-[#7C3AED] text-white rounded-lg font-bold">
+                  <div className="p-2.5 rounded-xl bg-[#150D2E] text-xs flex justify-between items-center border border-purple-500/20">
+                    <span className="text-purple-300 font-mono">Code : {userRow?.code_parrainage || '---'}</span>
+                    <button
+                      onClick={() => {
+                        navigator.clipboard?.writeText(`https://saloma.mg/join?ref=${userRow?.code_parrainage || ''}`);
+                        showToast("Lien d'affiliation copié !");
+                      }}
+                      className="px-3 py-1 bg-[#7C3AED] text-white rounded-lg font-bold"
+                    >
                       Copier lien
                     </button>
                   </div>
+
+                  {(() => {
+                    const refCode = userRow?.code_parrainage || '';
+                    const refUrl = `https://saloma.mg/join?ref=${refCode}`;
+                    const shareText = `Rejoins SALOMA Crypto & Trading avec mon code ${refCode} !`;
+                    const encodedUrl = encodeURIComponent(refUrl);
+                    const encodedMsg = encodeURIComponent(`${shareText} ${refUrl}`);
+                    return (
+                      <div className="grid grid-cols-5 gap-1.5 text-[10px] font-bold">
+                        <a
+                          href={`https://www.facebook.com/sharer/sharer.php?u=${encodedUrl}`}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="py-2 px-1 rounded-xl bg-[#1877F2]/25 border border-[#1877F2]/60 text-blue-200 flex flex-col items-center justify-center gap-0.5"
+                        >
+                          <Share2 className="w-3.5 h-3.5 text-blue-400" />
+                          <span>Facebook</span>
+                        </a>
+                        <a
+                          href={`https://twitter.com/intent/tweet?text=${encodeURIComponent(shareText)}&url=${encodedUrl}`}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="py-2 px-1 rounded-xl bg-slate-800/80 border border-slate-500/50 text-white flex flex-col items-center justify-center gap-0.5"
+                        >
+                          <span className="text-xs font-black leading-none">𝕏</span>
+                          <span>X</span>
+                        </a>
+                        <a
+                          href={`https://t.me/share/url?url=${encodedUrl}&text=${encodeURIComponent(shareText)}`}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="py-2 px-1 rounded-xl bg-[#229ED9]/25 border border-[#229ED9]/60 text-sky-200 flex flex-col items-center justify-center gap-0.5"
+                        >
+                          <Send className="w-3.5 h-3.5 text-sky-400" />
+                          <span>Telegram</span>
+                        </a>
+                        <a
+                          href={`https://wa.me/?text=${encodedMsg}`}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="py-2 px-1 rounded-xl bg-emerald-600/25 border border-emerald-500/60 text-emerald-200 flex flex-col items-center justify-center gap-0.5"
+                        >
+                          <ArrowUpRight className="w-3.5 h-3.5 text-emerald-400" />
+                          <span>WhatsApp</span>
+                        </a>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            navigator.clipboard?.writeText(`${shareText} ${refUrl}`);
+                            showToast('Message + lien copiés !');
+                          }}
+                          className="py-2 px-1 rounded-xl bg-[#7C3AED]/30 border border-[#8B5CF6]/60 text-purple-100 flex flex-col items-center justify-center gap-0.5"
+                        >
+                          <Copy className="w-3.5 h-3.5 text-purple-300" />
+                          <span>Copier</span>
+                        </button>
+                      </div>
+                    );
+                  })()}
                 </div>
 
+                {/* Tâches Vidéo réelles */}
+                {(() => {
+                  const availableTasks = VIDEO_TASKS_CATALOG.filter(t => !completedVideoIds.has(t.id));
+                  const activeTask = VIDEO_TASKS_CATALOG.find(v => v.id === watchingVideoId);
+
+                  return (
+                    <div className="p-4 rounded-3xl bg-[#1D1240] border-2 border-[#8B5CF6]/60 space-y-3">
+                      <div className="flex justify-between items-center gap-2">
+                        <div className="flex items-center gap-2">
+                          <Video className="w-5 h-5 text-amber-400" />
+                          <div>
+                            <span className="font-black text-sm text-white block">Tâche Vidéo</span>
+                            <span className="text-[10px] text-purple-300">+2 500 Ar / vidéo regardée</span>
+                          </div>
+                        </div>
+                        <span className="text-[10px] font-black px-2.5 py-1 rounded-full bg-emerald-500/20 text-emerald-300 border border-emerald-400/50">
+                          {availableTasks.length} dispo
+                        </span>
+                      </div>
+
+                      {activeTask && (
+                        <div className="p-3.5 rounded-2xl bg-[#0F0922] border-2 border-amber-400/60 space-y-1.5 text-center">
+                          <Play className="w-6 h-6 text-amber-400 animate-pulse mx-auto" />
+                          <span className="text-xs font-black text-white block">{activeTask.title}</span>
+                          <span className="text-[11px] font-mono text-emerald-300 font-bold">
+                            Crédit dans {videoCountdown}s...
+                          </span>
+                        </div>
+                      )}
+
+                      {availableTasks.length === 0 ? (
+                        <div className="p-3 rounded-2xl bg-[#150D2E] border border-purple-500/20 text-center text-xs text-purple-300">
+                          Toutes les tâches vidéo ont été complétées !
+                        </div>
+                      ) : (
+                        <div className="space-y-2">
+                          {availableTasks.map(task => (
+                            <div
+                              key={task.id}
+                              className="p-2.5 rounded-2xl bg-[#150D2E] border border-purple-500/30 flex items-center justify-between gap-2"
+                            >
+                              <div className="min-w-0">
+                                <span className="font-bold text-xs text-white block truncate">{task.title}</span>
+                                <span className="text-[10px] text-purple-300">
+                                  {task.sponsor} • +{task.rewardAr.toLocaleString('fr-FR')} Ar
+                                </span>
+                              </div>
+                              <button
+                                type="button"
+                                disabled={Boolean(watchingVideoId) || earnLoadingId === task.id}
+                                onClick={() => {
+                                  setWatchingVideoId(task.id);
+                                  setVideoCountdown(task.durationSec);
+                                }}
+                                className="px-3 py-2 rounded-xl bg-gradient-to-r from-[#7C3AED] to-[#8B5CF6] disabled:opacity-50 text-white text-[11px] font-black flex items-center gap-1 shrink-0"
+                              >
+                                <Play className="w-3.5 h-3.5" />
+                                <span>Regarder</span>
+                              </button>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+
+                      <div className="p-3 rounded-2xl bg-[#190E38] border border-dashed border-[#8B5CF6]/70 flex items-center justify-between gap-2">
+                        <div className="flex items-center gap-2">
+                          <Megaphone className="w-4 h-4 text-amber-300 shrink-0" />
+                          <span className="text-[10px] text-purple-300">Espace Publicité & Sponsors SALOMA</span>
+                        </div>
+                      </div>
+                    </div>
+                  );
+                })()}
+
+                {/* Épargne réelle */}
                 <div className="p-4 rounded-3xl bg-[#1D1240] border-2 border-[#8B5CF6]/50 space-y-3">
                   <div className="flex justify-between items-center">
                     <span className="font-bold text-sm text-white">Épargne SALOMA 8% / an</span>
-                    <span className="text-xs font-bold text-emerald-400">Tahiry</span>
+                    <span className="text-xs font-bold text-emerald-400">Tahiry azo antoka</span>
                   </div>
                   <div className="flex gap-2">
                     <input
-                      type="number"
-                      value={epargneAmount}
-                      onChange={e => setEpargneAmount(Number(e.target.value))}
+                      type="text"
+                      inputMode="decimal"
+                      value={epargneAmountInput}
+                      onChange={e => setEpargneAmountInput(e.target.value.replace(/[^0-9]/g, ''))}
+                      placeholder="Montant Ar"
                       className="flex-1 px-3 py-2 rounded-xl bg-[#150D2E] border border-purple-500/30 text-white font-mono text-xs"
                     />
                     <button
+                      type="button"
+                      disabled={earnLoadingId === 'epargne'}
                       onClick={() => {
-                        if (epargneAmount > walletBalanceUsd) {
-                          showToast('Solde insuffisant');
+                        const amt = Math.round(Number(epargneAmountInput));
+                        if (isNaN(amt) || amt <= 0) {
+                          showToast('Montant invalide.');
                           return;
                         }
-                        setWalletBalanceUsd(prev => prev - epargneAmount);
-                        setActiveEpargneList(prev => [...prev, { id: 'ep-' + Date.now(), amount: epargneAmount, apy: 8, duration: '365j', earned: 0 }]);
-                        showToast(`Souscription de $${epargneAmount} enregistrée`);
+                        claimEarnReward({
+                          type_gain: 'epargne',
+                          montant: amt,
+                          description: `Plan Épargne 365j (8%/an)`
+                        });
                       }}
-                      className="px-4 py-2 bg-emerald-600 text-white rounded-xl font-bold text-xs"
+                      className="px-4 py-2 bg-emerald-600 text-white rounded-xl font-bold text-xs disabled:opacity-50"
                     >
                       Souscrire
                     </button>
                   </div>
-                </div>
-              </div>
-            )}
-
-            {/* TAB: TRADING */}
-            {activeTab === 'trading' && (
-              <div className="space-y-3 animate-fadeIn">
-                {/* Modif 6: DROPDOWN VERTICAL DES COINS AVEC BARRE DE RECHERCHE EN HAUT */}
-                <div className="relative">
-                  <button
-                    onClick={() => {
-                      setIsCoinDropdownOpen(!isCoinDropdownOpen);
-                      setCoinSearchTerm('');
-                    }}
-                    className="w-full p-3 rounded-2xl bg-[#1D1240] border-2 border-[#8B5CF6] shadow-[0_0_20px_rgba(124,58,237,0.3)] flex items-center justify-between transition active:scale-98"
-                  >
-                    <div className="flex items-center gap-3">
-                      <div className={`w-9 h-9 rounded-xl flex items-center justify-center font-bold text-xs border ${selectedCoin.iconBg}`}>
-                        {selectedCoin.symbol.slice(0, 3)}
-                      </div>
-                      <div className="text-left">
-                        <div className="flex items-center gap-1.5">
-                          <span className="font-black text-sm text-white">{selectedCoin.symbol}</span>
-                          <span className="text-xs text-purple-300 font-medium">({selectedCoin.name})</span>
-                        </div>
-                        <span className="text-xs font-mono font-bold text-purple-200">
-                          ${selectedCoin.price < 0.01 ? selectedCoin.price.toFixed(6) : selectedCoin.price < 1 ? selectedCoin.price.toFixed(4) : selectedCoin.price.toLocaleString()}
+                  {epargnePlans.length > 0 && (
+                    <div className="space-y-1.5 pt-1">
+                      <div className="flex justify-between text-[11px] px-1 text-purple-300 font-bold">
+                        <span>Capital Épargne restant bloqué :</span>
+                        <span className="font-mono text-emerald-400">
+                          {fondEpargneAr.toLocaleString('fr-FR')} Ar
                         </span>
                       </div>
-                    </div>
-                    <div className="flex items-center gap-2">
-                      <span className={`text-xs font-mono font-bold px-2 py-0.5 rounded ${selectedCoin.change24h >= 0 ? 'bg-emerald-500/20 text-emerald-400' : 'bg-rose-500/20 text-rose-400'}`}>
-                        {selectedCoin.change24h >= 0 ? '+' : ''}{selectedCoin.change24h}%
-                      </span>
-                      <ChevronDown className={`w-5 h-5 text-purple-300 transition-transform ${isCoinDropdownOpen ? 'rotate-180' : ''}`} />
-                    </div>
-                  </button>
-
-                  {/* Vertical Dropdown Modal/List */}
-                  {isCoinDropdownOpen && (
-                    <div className="absolute top-full left-0 right-0 mt-2 z-40 bg-[#1D1240] border-2 border-[#8B5CF6] rounded-3xl p-3 shadow-2xl max-h-72 flex flex-col space-y-2">
-                      {/* Search Bar on top */}
-                      <div className="relative">
-                        <Search className="w-4 h-4 text-purple-400 absolute left-3 top-2.5" />
-                        <input
-                          type="text"
-                          placeholder="Rechercher un coin (BTC, ETH, SOL, PEPE...)"
-                          value={coinSearchTerm}
-                          onChange={e => setCoinSearchTerm(e.target.value)}
-                          autoFocus
-                          className="w-full pl-9 pr-3 py-2 rounded-xl bg-[#150D2E] border border-purple-500/40 text-white text-xs placeholder-purple-400/50 focus:outline-none focus:border-[#8B5CF6]"
-                        />
-                      </div>
-
-                      {/* Vertical Scroll List */}
-                      <div className="overflow-y-auto space-y-1.5 pr-1 flex-1">
-                        {filteredCoinsDropdown.map(coin => (
-                          <div
-                            key={coin.id}
-                            onClick={() => {
-                              setSelectedCoinId(coin.id);
-                              setIsCoinDropdownOpen(false);
-                            }}
-                            className={`p-2 rounded-xl flex items-center justify-between cursor-pointer transition ${
-                              selectedCoin.id === coin.id
-                                ? 'bg-[#7C3AED] text-white shadow'
-                                : 'bg-[#150D2E] hover:bg-[#23154D] text-purple-200'
-                            }`}
-                          >
-                            <div className="flex items-center gap-2.5">
-                              <div className={`w-7 h-7 rounded-lg flex items-center justify-center font-bold text-[10px] border ${coin.iconBg}`}>
-                                {coin.symbol.slice(0, 3)}
-                              </div>
-                              <div>
-                                <span className="font-bold text-xs block">{coin.name} ({coin.symbol})</span>
-                                <span className="text-[10px] opacity-80 font-mono">${coin.price < 1 ? coin.price.toFixed(4) : coin.price.toLocaleString()}</span>
-                              </div>
-                            </div>
-                            <span className={`text-[10px] font-mono font-bold ${coin.change24h >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
-                              {coin.change24h >= 0 ? '+' : ''}{coin.change24h}%
-                            </span>
-                          </div>
-                        ))}
-                      </div>
+                      {epargnePlans.map(ep => (
+                        <div
+                          key={ep.$id}
+                          className="p-2 rounded-xl bg-[#150D2E] flex justify-between text-xs border border-emerald-500/20"
+                        >
+                          <span className="text-purple-200 font-bold">{ep.description}</span>
+                          <span className="font-mono text-emerald-400 font-bold">
+                            {Number(ep.montant).toLocaleString('fr-FR')} Ar
+                          </span>
+                        </div>
+                      ))}
                     </div>
                   )}
                 </div>
 
-                {/* SPOT / LEVIER MODE SELECTOR */}
-                <div className="flex bg-[#190E38] p-1 rounded-xl border border-purple-500/30">
-                  <button
-                    onClick={() => setTradingModeType('SPOT')}
-                    className={`flex-1 py-2 rounded-lg text-xs font-bold transition ${
-                      tradingModeType === 'SPOT'
-                        ? 'bg-emerald-600/40 border border-emerald-500/50 text-emerald-300 shadow'
-                        : 'text-purple-300 hover:text-white'
-                    }`}
-                  >
-                    SPOT (Varotra mivantana)
-                  </button>
-                  <button
-                    onClick={() => setTradingModeType('LEVIER')}
-                    className={`flex-1 py-2 rounded-lg text-xs font-bold transition ${
-                      tradingModeType === 'LEVIER'
-                        ? 'bg-[#7C3AED] border border-purple-300 text-white shadow-[0_0_15px_rgba(124,58,237,0.5)]'
-                        : 'text-purple-300 hover:text-white'
-                    }`}
-                  >
-                    LEVIER (x1 à x500)
-                  </button>
-                </div>
-
-                {/* Modif 5: BUG LEVIER FIX + BOUTON RETOUR VERS SPOT */}
-                {tradingModeType === 'LEVIER' && (
-                  <div className="p-3.5 rounded-2xl bg-[#1D1240] border-2 border-[#8B5CF6]/50 space-y-2.5 shadow-[0_0_18px_rgba(124,58,237,0.3)]">
-                    <div className="flex justify-between items-center">
+                {/* Historique des gains Earn */}
+                <div className="p-3.5 rounded-2xl bg-[#1D1240] border border-[#8B5CF6]/40 space-y-2">
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="text-xs font-black text-white">
+                      Historique des gains ({earnList.length})
+                    </span>
+                    {earnList.length > 0 && (
                       <button
-                        onClick={() => setTradingModeType('SPOT')}
-                        className="px-2.5 py-1 rounded-lg bg-[#23154D] hover:bg-[#2B1B5D] border border-purple-500/40 text-purple-200 text-xs font-bold flex items-center gap-1 active:scale-95"
+                        type="button"
+                        onClick={() => setClearHistoryTarget('earn')}
+                        className="px-2.5 py-1 rounded-lg bg-rose-500/20 hover:bg-rose-500/30 border border-rose-500/50 text-rose-300 text-[10px] font-black inline-flex items-center gap-1 transition"
                       >
-                        <ArrowLeft className="w-3.5 h-3.5" />
-                        <span>Retour au SPOT</span>
+                        <Trash2 className="w-3 h-3" />
+                        <span>Tout supprimer</span>
                       </button>
-                      <span className="text-[10px] text-purple-300 font-mono">
-                        Liquidation : {liquidationThreshold}%
+                    )}
+                  </div>
+                  {earnList.length === 0 ? (
+                    <p className="text-[11px] text-purple-400 text-center py-2">Aucun gain enregistré</p>
+                  ) : (
+                    <div className="space-y-1.5 max-h-40 overflow-y-auto">
+                      {earnList.map(e => {
+                        const isWithdraw = e.type_gain === 'retrait_fond' || e.type_gain === 'retrait_profit';
+                        return (
+                          <div
+                            key={e.$id}
+                            className="p-2 rounded-xl bg-[#150D2E] flex justify-between items-center text-[11px] border border-purple-500/20"
+                          >
+                            <div>
+                              <span className="font-bold text-white block">{e.description}</span>
+                              <span className="text-[10px] text-purple-400">
+                                {e.date ? new Date(e.date).toLocaleString('fr-FR') : ''}
+                              </span>
+                            </div>
+                            <span
+                              className={`font-mono font-bold ${
+                                isWithdraw ? 'text-rose-400' : 'text-emerald-400'
+                              }`}
+                            >
+                              {isWithdraw ? '-' : e.type_gain === 'epargne' ? '' : '+'}
+                              {Number(e.montant).toLocaleString('fr-FR')} Ar
+                            </span>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
+                </div>
+              </div>
+            )}
+
+            {/* ========================================================
+                TAB 2: ÉCHANGE BYBIT STYLE (Order Book à gauche, Graphique au centre, Formulaire Échange simple)
+               ======================================================== */}
+            {activeTab === 'exchange' && (
+              <div className="space-y-3">
+                {renderCoinSearchDropdown(
+                  selectedCoin,
+                  isCoinDropdownOpen,
+                  setIsCoinDropdownOpen,
+                  coinSearchTerm,
+                  setCoinSearchTerm,
+                  filteredCoinsDropdown,
+                  c => {
+                    setSelectedCoinId(c.id);
+                    setSwapToSym(c.symbol.toUpperCase());
+                  }
+                )}
+
+                {/* BYBIT EXCHANGE LAYOUT: Order Book à gauche + Graphique au centre */}
+                <div className="grid grid-cols-12 gap-2 items-stretch">
+                  {/* GAUCHE : ORDER BOOK */}
+                  <div className="col-span-5 p-2.5 rounded-2xl bg-[#190F38] border border-[#8B5CF6]/50 flex flex-col justify-between space-y-1.5">
+                    <div className="flex justify-between items-center text-[10px] font-black text-white border-b border-purple-500/20 pb-1">
+                      <span className="flex items-center gap-1">
+                        <BookOpen className="w-3 h-3 text-[#8B5CF6]" />
+                        Order Book
+                      </span>
+                      <span className="text-[9px] text-purple-300 font-mono">USDT</span>
+                    </div>
+
+                    {/* ASKS (ROUGE) */}
+                    <div className="space-y-0.5 text-[9px] font-mono">
+                      {orderBook.asks.map((ask, i) => (
+                        <div key={`ex-ask-${i}`} className="relative flex justify-between items-center py-0.5 px-1 rounded overflow-hidden">
+                          <div className="absolute right-0 top-0 bottom-0 bg-rose-500/15" style={{ width: `${ask.depth}%` }} />
+                          <span className="text-rose-400 font-bold z-10">{formatCoinPrice(ask.price)}</span>
+                          <span className="text-slate-300 z-10">{ask.qty}</span>
+                        </div>
+                      ))}
+                    </div>
+
+                    {/* PRIX SALOMA CENTRAL */}
+                    <div className="py-1 px-1.5 rounded-lg bg-[#100926] border border-[#8B5CF6]/40 text-center">
+                      <span className="text-xs font-black font-mono text-white block">
+                        ${formatCoinPrice(selectedCoin.price)}
+                      </span>
+                      <span
+                        className={`text-[9px] font-mono font-bold ${
+                          selectedCoin.change24h >= 0 ? 'text-emerald-400' : 'text-rose-400'
+                        }`}
+                      >
+                        {selectedCoin.change24h >= 0 ? '+' : ''}
+                        {selectedCoin.change24h}%
                       </span>
                     </div>
 
-                    {/* Saisie libre du Levier (sans forçage à 1, effaçable librement) */}
-                    <div className="flex items-center gap-2">
-                      <div className="relative flex-1">
-                        <input
-                          type="text"
-                          inputMode="numeric"
-                          value={leverageInput}
-                          onChange={e => {
-                            // Clean input, allow empty string to backspace freely
-                            const raw = e.target.value.replace(/[^0-9]/g, '');
-                            setLeverageInput(raw);
-                          }}
-                          placeholder="Tapez le levier (ex: 50, 100)"
-                          className="w-full px-3.5 py-2 rounded-xl bg-[#150D2E] border-2 border-[#8B5CF6]/50 text-white font-mono font-bold text-sm focus:outline-none focus:border-[#8B5CF6] text-center"
-                        />
-                      </div>
-                      <span className="text-base font-black text-purple-200 font-mono">x</span>
-                      <div className="text-xs text-purple-200 font-bold px-3 py-1.5 rounded-xl bg-[#23154D] border border-purple-500/30">
-                        Levier x{numericLeverage}
-                      </div>
-                    </div>
-
-                    <div className="p-2.5 rounded-xl bg-rose-500/15 border-2 border-rose-500/40 text-[11px] text-rose-200 leading-tight">
-                      <span className="font-bold text-rose-300 block mb-0.5">⚠️ Attention (Tandremo) :</span>
-                      Avec levier <span className="font-black text-white">x{numericLeverage}</span>, si le prix bouge de{' '}
-                      <span className="font-bold text-rose-300 font-mono">{liquidationThreshold}%</span> contre vous, position liquidée (<span className="italic font-bold">vola lany</span>).
+                    {/* BIDS (VERT) */}
+                    <div className="space-y-0.5 text-[9px] font-mono">
+                      {orderBook.bids.map((bid, i) => (
+                        <div key={`ex-bid-${i}`} className="relative flex justify-between items-center py-0.5 px-1 rounded overflow-hidden">
+                          <div className="absolute right-0 top-0 bottom-0 bg-emerald-500/15" style={{ width: `${bid.depth}%` }} />
+                          <span className="text-emerald-400 font-bold z-10">{formatCoinPrice(bid.price)}</span>
+                          <span className="text-slate-300 z-10">{bid.qty}</span>
+                        </div>
+                      ))}
                     </div>
                   </div>
+
+                    {/* CENTRE : GRAPHIQUE BOUGIE LIVE */}
+                  <div className="col-span-7 p-2.5 rounded-2xl bg-[#190F38] border-2 border-[#8B5CF6]/50 flex flex-col justify-between space-y-2">
+                    <div className="flex flex-wrap justify-between items-center gap-1">
+                      <span className="font-black text-[11px] text-white flex items-center gap-1.5">
+                        <Activity className="w-3 h-3 text-[#8B5CF6]" />
+                        {selectedCoin.symbol}/USDT
+                        <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-emerald-500/20 border border-emerald-400/60 text-emerald-300 text-[8px] font-black">
+                          <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
+                          LIVE
+                        </span>
+                      </span>
+                      <div className="flex gap-0.5 text-[9px] font-mono font-bold">
+                        {(['1m', '5m', '15m', '1h', '1D'] as const).map(tf => (
+                          <button
+                            key={tf}
+                            type="button"
+                            onClick={() => setSelectedTimeframe(tf)}
+                            className={`px-1 py-0.5 rounded border transition ${
+                              selectedTimeframe === tf
+                                ? 'bg-[#7C3AED] border-purple-300 text-white'
+                                : 'bg-[#150D2E] border-purple-500/20 text-purple-300'
+                            }`}
+                          >
+                            {tf}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+
+                    <div className="flex-1 min-h-[144px] w-full bg-[#100926] rounded-xl p-1.5 relative overflow-hidden border border-purple-500/20">
+                      <svg className="w-full h-full" viewBox="0 0 260 130" preserveAspectRatio="none">
+                        {candlestickData.map((c, idx) => {
+                          const x = idx * 10 + 2;
+                          const min = selectedCoin.price * 0.96;
+                          const max = selectedCoin.price * 1.04;
+                          const scale = (val: number) => 120 - ((val - min) / (max - min)) * 110;
+                          const rectY = Math.min(scale(c.open), scale(c.close));
+                          const rectH = Math.max(2, Math.abs(scale(c.close) - scale(c.open)));
+                          const color = c.isUp ? '#10B981' : '#EF4444';
+                          return (
+                            <g key={idx}>
+                              <line x1={x + 3} y1={scale(c.high)} x2={x + 3} y2={scale(c.low)} stroke={color} strokeWidth="1" />
+                              <rect x={x} y={rectY} width="6" height={rectH} fill={color} rx="1" />
+                            </g>
+                          );
+                        })}
+                      </svg>
+                      <div className="absolute right-1.5 top-1.5 bg-[#7C3AED]/90 text-white text-[9px] font-mono font-bold px-1.5 py-0.5 rounded">
+                        ${formatCoinPrice(selectedCoin.price)}
+                      </div>
+                    </div>
+
+                    <div className="flex justify-between items-center text-[9px] font-mono text-purple-300 px-0.5">
+                      <span>24h H: ${formatCoinPrice(selectedCoin.high24h)}</span>
+                      <span>24h B: ${formatCoinPrice(selectedCoin.low24h)}</span>
+                    </div>
+                  </div>
+                </div>
+
+                {/* FORMULAIRE ÉCHANGE SIMPLE (Tu donnes / Tu reçois) — UN SEUL BOUTON ÉCHANGER */}
+                <div className="p-3.5 rounded-2xl bg-[#190F38] border-2 border-[#8B5CF6]/60 space-y-3 shadow-[0_0_20px_rgba(124,58,237,0.2)]">
+                  <div className="flex items-center justify-between">
+                    <span className="text-xs font-black text-white flex items-center gap-1.5">
+                      <ArrowRightLeft className="w-3.5 h-3.5 text-[#8B5CF6]" />
+                      Échange Instantané SALOMA
+                    </span>
+                    <span className="text-[10px] font-mono font-bold text-amber-300">Frais 0.1%</span>
+                  </div>
+
+                  {/* TU DONNES */}
+                  <div className="p-3 rounded-xl bg-[#100926] border border-purple-500/30 space-y-1.5">
+                    <div className="flex justify-between text-[11px] text-purple-300">
+                      <span className="font-bold">Tu donnes</span>
+                      <span className="font-mono text-[10px]">
+                        Dispo : {getAvailableExchangeBalance(swapFromSym).toLocaleString('fr-FR', { maximumFractionDigits: 6 })} {swapFromSym === 'AR' ? 'Ar' : swapFromSym}
+                      </span>
+                    </div>
+                    <div className="flex gap-2 items-center">
+                      <input
+                        type="text"
+                        inputMode="decimal"
+                        value={swapAmountInput}
+                        placeholder="0.00"
+                        onChange={e => setSwapAmountInput(sanitizeDecimalInput(e.target.value))}
+                        className="w-full px-3 py-2 rounded-xl bg-[#190F38] border border-purple-500/40 text-white font-mono font-black text-sm focus:border-[#8B5CF6] focus:outline-none"
+                      />
+                      <select
+                        value={swapFromSym}
+                        onChange={e => setSwapFromSym(e.target.value)}
+                        className="bg-[#23154D] text-white text-xs font-black px-3 py-2 rounded-xl border border-[#8B5CF6]"
+                      >
+                        {exchangeCurrencies.map(c => (
+                          <option key={c.symbol} value={c.symbol}>
+                            {c.symbol === 'AR' ? 'Ar' : c.symbol}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                    <div className="flex justify-between items-center gap-1.5 pt-1">
+                      {[25, 50, 75, 100].map(pct => (
+                        <button
+                          key={pct}
+                          type="button"
+                          onClick={() => {
+                            const bal = getAvailableExchangeBalance(swapFromSym);
+                            setSwapAmountInput(
+                              swapFromSym === 'AR'
+                                ? String(Math.floor((bal * pct) / 100))
+                                : ((bal * pct) / 100).toFixed(6)
+                            );
+                          }}
+                          className="flex-1 py-1 rounded-lg bg-[#190F38] hover:bg-[#7C3AED]/40 border border-purple-500/30 text-[10px] font-mono font-bold text-purple-200"
+                        >
+                          {pct === 100 ? 'MAX' : `${pct}%`}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+
+                  {/* BOUTON INVERSER */}
+                  <div className="flex justify-center -my-1.5">
+                    <button
+                      type="button"
+                      onClick={handleFlipExchangePair}
+                      title="Inverser les devises"
+                      className="p-2 rounded-xl bg-[#23154D] hover:bg-[#7C3AED] border border-[#8B5CF6] text-white transition active:scale-95"
+                    >
+                      <ArrowUpDown className="w-4 h-4" />
+                    </button>
+                  </div>
+
+                  {/* TU REÇOIS */}
+                  <div className="p-3 rounded-xl bg-[#100926] border border-purple-500/30 space-y-1.5">
+                    <div className="flex justify-between text-[11px] text-purple-300">
+                      <span className="font-bold">Tu reçois (estimé)</span>
+                      <span className="font-mono text-[10px]">
+                        Dispo : {getAvailableExchangeBalance(swapToSym).toLocaleString('fr-FR', { maximumFractionDigits: 6 })} {swapToSym === 'AR' ? 'Ar' : swapToSym}
+                      </span>
+                    </div>
+                    <div className="flex gap-2 items-center">
+                      <div className="flex-1 px-3 py-2 rounded-xl bg-[#190F38] border border-purple-500/20 text-emerald-400 font-mono font-black text-sm truncate">
+                        {(() => {
+                          const amt = parseDecimalValue(swapAmountInput);
+                          if (amt <= 0 || !fromCurrencyObj.priceUsd || !toCurrencyObj.priceUsd) return '0.0000';
+                          const outAmt = ((amt * fromCurrencyObj.priceUsd) / toCurrencyObj.priceUsd) * 0.999;
+                          return outAmt < 1 ? outAmt.toFixed(6) : outAmt.toFixed(4);
+                        })()}
+                      </div>
+                      <select
+                        value={swapToSym}
+                        onChange={e => setSwapToSym(e.target.value)}
+                        className="bg-[#23154D] text-white text-xs font-black px-3 py-2 rounded-xl border border-[#8B5CF6]"
+                      >
+                        {exchangeCurrencies.map(c => (
+                          <option key={c.symbol} value={c.symbol}>
+                            {c.symbol === 'AR' ? 'Ar' : c.symbol}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                    <div className="flex justify-between text-[10px] font-mono text-purple-300 pt-0.5">
+                      <span>
+                        1 {fromCurrencyObj.symbol === 'AR' ? 'Ar' : fromCurrencyObj.symbol} ≈{' '}
+                        {((fromCurrencyObj.priceUsd || 0) / (toCurrencyObj.priceUsd || 1)).toFixed(
+                          toCurrencyObj.symbol === 'AR' ? 2 : 6
+                        )}{' '}
+                        {toCurrencyObj.symbol === 'AR' ? 'Ar' : toCurrencyObj.symbol}
+                      </span>
+                      <span className="text-emerald-400">Net après 0.1%</span>
+                    </div>
+                  </div>
+
+                  {/* UN SEUL BOUTON : ÉCHANGER */}
+                  <button
+                    type="button"
+                    disabled={exchangeSubmitting}
+                    onClick={handleExecuteExchange}
+                    className="w-full py-3.5 rounded-xl bg-gradient-to-r from-[#7C3AED] to-[#8B5CF6] text-white font-black text-sm shadow-[0_0_20px_rgba(124,58,237,0.45)] flex items-center justify-center gap-2 active:scale-[0.98] transition disabled:opacity-50"
+                  >
+                    <Repeat className="w-4 h-4" />
+                    <span>{exchangeSubmitting ? 'ÉCHANGE EN COURS...' : 'ÉCHANGER'}</span>
+                  </button>
+                </div>
+
+                {/* TABLEAU FRAIS SALOMA 0.1% */}
+                <div className="p-3.5 rounded-2xl bg-[#1D1240] border-2 border-[#8B5CF6]/50 space-y-2">
+                  <span className="text-xs font-black text-white flex items-center gap-1.5">
+                    <Activity className="w-3.5 h-3.5 text-purple-400" />
+                    Tableau : Frais SALOMA (0.1%) & Total après frais
+                  </span>
+                  {(() => {
+                    const amt = parseFloat(swapAmountInput) || 0;
+                    const taux = fromCurrencyObj.priceUsd / (toCurrencyObj.priceUsd || 1);
+                    const brut = amt * taux;
+                    const fee = brut * 0.001;
+                    const net = brut - fee;
+                    return (
+                      <div className="overflow-hidden rounded-xl border border-purple-500/30 text-xs">
+                        <table className="w-full text-left">
+                          <tbody className="divide-y divide-purple-500/20 bg-[#150D2E]">
+                            <tr>
+                              <td className="px-3 py-2 text-purple-300">Montant envoyé</td>
+                              <td className="px-3 py-2 text-right font-mono font-bold text-white">
+                                {amt.toLocaleString('fr-FR', { maximumFractionDigits: 6 })} {fromCurrencyObj.symbol === 'AR' ? 'Ar' : fromCurrencyObj.symbol}
+                              </td>
+                            </tr>
+                            <tr>
+                              <td className="px-3 py-2 text-purple-300">Frais SALOMA (0.1%)</td>
+                              <td className="px-3 py-2 text-right font-mono font-bold text-amber-300">
+                                {fee.toFixed(6)} {toCurrencyObj.symbol === 'AR' ? 'Ar' : toCurrencyObj.symbol}
+                              </td>
+                            </tr>
+                            <tr className="bg-[#1F1042]/70 font-bold">
+                              <td className="px-3 py-2 text-white">Total reçu après frais</td>
+                              <td className="px-3 py-2 text-right font-mono text-emerald-400">
+                                {net.toFixed(6)} {toCurrencyObj.symbol === 'AR' ? 'Ar' : toCurrencyObj.symbol}
+                              </td>
+                            </tr>
+                          </tbody>
+                        </table>
+                      </div>
+                    );
+                  })()}
+                </div>
+
+                {/* HISTORIQUE DES ÉCHANGES (Appwrite `echanges`) */}
+                <div className="p-3.5 rounded-2xl bg-[#190F38] border border-[#8B5CF6]/40 space-y-2">
+                  <span className="text-xs font-black text-white flex items-center gap-1.5">
+                    <Repeat className="w-3.5 h-3.5 text-[#8B5CF6]" />
+                    Historique des Échanges ({echangesList.length})
+                  </span>
+                  {echangesList.length === 0 ? (
+                    <div className="text-center py-3 text-xs text-purple-400/70">Aucun échange effectué</div>
+                  ) : (
+                    <div className="space-y-1.5 max-h-40 overflow-y-auto">
+                      {echangesList.map(ex => (
+                        <div
+                          key={ex.$id}
+                          className="flex justify-between items-center p-2 rounded-xl bg-[#100926] text-[11px] border border-purple-500/20"
+                        >
+                          <div>
+                            <span className="font-bold text-white">
+                              {ex.montant_envoye} {ex.de_devise} → {Number(ex.montant_recu).toFixed(6)} {ex.vers_devise}
+                            </span>
+                            <span className="text-[10px] text-purple-400 block font-mono">
+                              Taux: {Number(ex.taux).toFixed(6)} • {ex.date ? new Date(ex.date).toLocaleString('fr-FR') : ''}
+                            </span>
+                          </div>
+                          <span className="text-[10px] font-bold text-emerald-400">{ex.statut}</span>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              </div>
+            )}
+
+            {/* ========================================================
+                TAB 3: TRADING RÉEL — A) MANUEL STRATÉGIE | B) AUTO STRATÉGIE (BOT)
+               ======================================================== */}
+            {activeTab === 'trading' && (
+              <div className="space-y-3">
+                {renderCoinSearchDropdown(
+                  selectedCoin,
+                  isCoinDropdownOpen,
+                  setIsCoinDropdownOpen,
+                  coinSearchTerm,
+                  setCoinSearchTerm,
+                  filteredCoinsDropdown,
+                  c => setSelectedCoinId(c.id)
                 )}
 
-                {/* 1. BOUGIE (Candlestick) */}
-                <div className="p-3.5 rounded-2xl bg-[#1D1240] border-2 border-[#8B5CF6]/50 shadow-[0_0_20px_rgba(124,58,237,0.3)] space-y-2">
+                {/* 2 CHOIX DE STRATÉGIE : MANUEL VS AUTO BOT */}
+                <div className="grid grid-cols-2 gap-1.5 bg-[#190E38] p-1 rounded-2xl border border-[#8B5CF6]/45">
+                  <button
+                    type="button"
+                    onClick={() => setTradeStrategyChoice('MANUEL')}
+                    className={`py-2 px-2 rounded-xl text-[11px] font-black transition flex items-center justify-center gap-1.5 ${
+                      tradeStrategyChoice === 'MANUEL'
+                        ? 'bg-[#7C3AED] text-white shadow-[0_0_15px_rgba(124,58,237,0.5)]'
+                        : 'text-purple-300 hover:text-white'
+                    }`}
+                  >
+                    <TrendingUp className="w-3.5 h-3.5" />
+                    <span>A) Manuel Stratégie</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setTradeStrategyChoice('BOT')}
+                    className={`py-2 px-2 rounded-xl text-[11px] font-black transition flex items-center justify-center gap-1.5 ${
+                      tradeStrategyChoice === 'BOT'
+                        ? 'bg-gradient-to-r from-emerald-600 to-[#7C3AED] text-white shadow-[0_0_15px_rgba(16,185,129,0.35)]'
+                        : 'text-purple-300 hover:text-white'
+                    }`}
+                  >
+                    <Bot className="w-3.5 h-3.5" />
+                    <span>B) Auto Stratégie (Bot)</span>
+                  </button>
+                </div>
+
+                {/* 1. BOUGIE LIVE */}
+                <div className="p-3 rounded-2xl bg-[#1D1240] border-2 border-[#8B5CF6]/50 space-y-2">
                   <div className="flex justify-between items-center">
                     <span className="font-black text-sm text-white">{selectedCoin.symbol}/USDT</span>
                     <div className="flex gap-1 text-[10px] font-mono font-bold text-purple-300">
@@ -1454,8 +4049,7 @@ export default function App() {
                       ))}
                     </div>
                   </div>
-
-                  <div className="h-44 w-full bg-[#150D2E] rounded-xl p-2 relative overflow-hidden flex flex-col justify-end border border-purple-500/25">
+                  <div className="h-36 w-full bg-[#150D2E] rounded-xl p-2 relative overflow-hidden border border-purple-500/25">
                     <svg className="w-full h-full" viewBox="0 0 260 140" preserveAspectRatio="none">
                       {candlestickData.map((c, idx) => {
                         const x = idx * 10 + 2;
@@ -1467,152 +4061,622 @@ export default function App() {
                         const color = c.isUp ? '#10B981' : '#EF4444';
                         return (
                           <g key={idx}>
-                            <line x1={x + 3} y1={scale(c.high)} x2={x + 3} y2={scale(c.low)} stroke={color} strokeWidth="1" opacity="0.85" />
-                            <rect x={x} y={rectY} width="6" height={rectH} fill={color} rx="1" opacity="0.95" />
+                            <line x1={x + 3} y1={scale(c.high)} x2={x + 3} y2={scale(c.low)} stroke={color} strokeWidth="1" />
+                            <rect x={x} y={rectY} width="6" height={rectH} fill={color} rx="1" />
                           </g>
                         );
                       })}
                     </svg>
-                    <div className="absolute right-2 top-1/2 -translate-y-1/2 bg-[#7C3AED] text-white text-[10px] font-mono font-bold px-2 py-0.5 rounded shadow">
-                      {selectedTimeframe}: ${selectedCoin.price < 1 ? selectedCoin.price.toFixed(4) : selectedCoin.price.toLocaleString()}
+                    <div className="absolute right-2 top-2 bg-[#7C3AED] text-white text-[10px] font-mono font-bold px-2 py-0.5 rounded shadow">
+                      {selectedTimeframe}: ${formatCoinPrice(selectedCoin.price)}
                     </div>
                   </div>
                 </div>
 
-                {/* 2. PRIX ACTUEL */}
-                <div className="p-3.5 rounded-2xl bg-[#1D1240] border-2 border-[#8B5CF6]/50 flex items-center justify-between">
-                  <div>
-                    <span className="text-[10px] font-bold text-purple-300 block uppercase">Prix Actuel SALOMA</span>
-                    <span className="text-2xl font-black text-white font-mono">
-                      ${selectedCoin.price < 0.01 ? selectedCoin.price.toFixed(6) : selectedCoin.price < 1 ? selectedCoin.price.toFixed(4) : selectedCoin.price.toLocaleString()}
+                {/* 2. PRIX ACTUEL + COMPTE TRADE + BROKER PUR MARGE ISOLÉE */}
+                <div className="p-3 rounded-2xl bg-[#1D1240] border-2 border-[#8B5CF6]/50 space-y-2">
+                  <div className="flex items-center justify-between">
+                    <div>
+                      <div className="flex items-center gap-1.5">
+                        <span className="text-[10px] font-bold text-purple-300 uppercase">Prix Actuel SALOMA</span>
+                        <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-emerald-500/20 border border-emerald-400/60 text-emerald-300 text-[9px] font-black">
+                          <span className={`w-1.5 h-1.5 rounded-full bg-emerald-400 ${isWsLive ? 'animate-pulse' : 'opacity-60'}`} />
+                          LIVE {activeBrokerExchange}
+                        </span>
+                      </div>
+                      <span className="text-2xl font-black text-white font-mono">
+                        ${formatCoinPrice(selectedCoin.price)}
+                      </span>
+                    </div>
+                    <div className="text-right">
+                      <span className="text-[10px] text-purple-400 block">Solde Compte Trade</span>
+                      <span className="text-sm font-mono font-black text-emerald-400">
+                        {Math.round(soldeCompteTradeAr).toLocaleString('fr-FR')} Ar
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setConvertDirection('WALLET_TO_TRADE');
+                          setActiveModal('convert');
+                        }}
+                        className="mt-0.5 text-[10px] font-bold text-[#8B5CF6] underline block ml-auto"
+                      >
+                        ⇄ Convertir Wallet → Trade
+                      </button>
+                    </div>
+                  </div>
+                  <div className="pt-1.5 border-t border-purple-500/20 flex items-center justify-between text-[10px] font-mono">
+                    <span className="text-emerald-300 font-bold">
+                      Broker Pur • Pont: {activeBrokerExchange}
+                    </span>
+                    <span className="text-purple-200">
+                      Marge Isolée Individuelle • Frais 0.1%
                     </span>
                   </div>
-                  <div className="text-right">
-                    <span className="text-[10px] text-purple-400 block">Frais SALOMA</span>
-                    <span className="text-xs font-black text-emerald-400">0.1%</span>
-                  </div>
                 </div>
 
-                {/* 3. BOUTONS BUY / SELL + MODIF 5: INVESTISSEMENT FIX */}
-                <div className="p-3.5 rounded-2xl bg-[#1D1240] border-2 border-[#8B5CF6]/50 space-y-2.5">
-                  <div className="flex items-center gap-2">
-                    <div className="relative flex-1">
-                      <span className="absolute left-3 top-2 text-xs font-bold text-purple-400">$</span>
-                      {/* Modif 5: Saisie libre de l'investissement (effaçable sans forçage à 1) */}
-                      <input
-                        type="text"
-                        inputMode="decimal"
-                        value={tradeAmountInput}
-                        onChange={e => {
-                          const raw = e.target.value.replace(/[^0-9.]/g, '');
-                          setTradeAmountInput(raw);
-                        }}
-                        placeholder="Investissement ($)"
-                        className="w-full pl-7 pr-3 py-1.5 rounded-xl bg-[#150D2E] border border-purple-500/30 text-white text-xs font-mono font-bold focus:outline-none focus:border-[#8B5CF6]"
-                      />
+                {/* ====================================================
+                    MODE A : MANUEL STRATÉGIE (SPOT + LEVIER)
+                   ==================================================== */}
+                {tradeStrategyChoice === 'MANUEL' && (
+                  <>
+                    <div className="flex items-center gap-2 bg-[#190E38] p-1 rounded-xl border border-purple-500/30">
+                      <button
+                        onClick={() => setTradingModeType('SPOT')}
+                        className={`flex-1 py-2 rounded-lg text-xs font-bold transition ${
+                          tradingModeType === 'SPOT'
+                            ? 'bg-emerald-600/40 border border-emerald-500/50 text-emerald-300 shadow'
+                            : 'text-purple-300 hover:text-white'
+                        }`}
+                      >
+                        SPOT (Varotra mivantana)
+                      </button>
+                      <button
+                        onClick={() => setTradingModeType('LEVIER')}
+                        className={`flex-1 py-2 rounded-lg text-xs font-bold transition ${
+                          tradingModeType === 'LEVIER'
+                            ? 'bg-[#7C3AED] border border-purple-300 text-white shadow-[0_0_15px_rgba(124,58,237,0.5)]'
+                            : 'text-purple-300 hover:text-white'
+                        }`}
+                      >
+                        LEVIER (x1 à x500)
+                      </button>
                     </div>
-                    <div className="flex gap-1 text-[10px] font-mono">
-                      {['10', '50', '100', '500'].map(amt => (
+
+                    {/* 3. BOUTONS BUY / SELL CÔTE À CÔTE (GAUCHE = BUY, DROITE = SELL) */}
+                    <div className="p-3.5 rounded-2xl bg-[#1D1240] border-2 border-[#8B5CF6]/60 space-y-3">
+                      <div className="space-y-2">
+                        {tradingModeType === 'LEVIER' ? (
+                          <div className="p-2.5 rounded-xl bg-[#150D2E] border border-[#8B5CF6]/50 space-y-1.5">
+                            <div className="flex justify-between items-center">
+                              <span className="text-[10px] font-black text-purple-200">LEVIER (x1–x500)</span>
+                              <button
+                                onClick={() => setTradingModeType('SPOT')}
+                                className="text-[9px] px-2 py-0.5 rounded bg-[#23154D] text-purple-200 font-bold flex items-center gap-0.5"
+                              >
+                                <ArrowLeft className="w-2.5 h-2.5" /> SPOT
+                              </button>
+                            </div>
+                            <div className="flex items-center gap-2">
+                              <input
+                                type="text"
+                                inputMode="numeric"
+                                value={leverageInput}
+                                onChange={e => setLeverageInput(e.target.value.replace(/[^0-9]/g, ''))}
+                                className="w-full px-2.5 py-1.5 rounded-lg bg-[#1F1042] border border-[#8B5CF6]/60 text-white font-mono font-black text-xs text-center"
+                              />
+                              <span className="font-mono font-black text-purple-200 text-xs">x</span>
+                            </div>
+                            <span className="text-[9px] text-rose-300 font-mono block">
+                              Liq. à {liquidationThreshold}% contre vous • Frais SALOMA 0.1%
+                            </span>
+                          </div>
+                        ) : (
+                          <div className="p-2.5 rounded-xl bg-[#150D2E] border border-emerald-500/40 flex justify-between items-center">
+                            <span className="text-[10px] font-black text-emerald-300">Mode SPOT (x1) • Frais 0.1%</span>
+                            <button
+                              onClick={() => setTradingModeType('LEVIER')}
+                              className="text-[10px] px-2.5 py-1 rounded bg-[#7C3AED] text-white font-bold"
+                            >
+                              Activer Levier
+                            </button>
+                          </div>
+                        )}
+
+                        <div className="space-y-1.5">
+                          <div className="flex items-center justify-between text-[10px] font-bold text-purple-300 px-0.5">
+                            <span>Montant ({selectedTradeCurrencyObj.shortLabel})</span>
+                            <span className="font-mono text-emerald-300">
+                              {tradeAmountCurrency === 'ARIARY'
+                                ? `≈ $${(numericAmountAr / USD_TO_MGA).toFixed(2)} USD`
+                                : `≈ ${numericAmountAr.toLocaleString('fr-FR')} Ar`}
+                            </span>
+                          </div>
+                          <div className="grid grid-cols-12 gap-1.5 items-center">
+                            <div className="col-span-5">
+                              <input
+                                type="text"
+                                inputMode="decimal"
+                                value={tradeAmountInput}
+                                onChange={e => setTradeAmountInput(sanitizeDecimalInput(e.target.value))}
+                                placeholder={`Montant (${selectedTradeCurrencyObj.shortLabel})`}
+                                className="w-full px-2.5 py-1.5 rounded-xl bg-[#150D2E] border border-purple-500/40 text-white text-xs font-mono font-bold focus:outline-none focus:border-[#8B5CF6]"
+                              />
+                            </div>
+                            <div className="col-span-3">
+                              <select
+                                aria-label="Devise du montant"
+                                value={tradeAmountCurrency}
+                                onChange={e => handleChangeTradeAmountCurrency(e.target.value)}
+                                className="w-full px-1.5 py-1.5 rounded-xl bg-[#23154D] border border-[#8B5CF6]/70 text-white text-[11px] font-black focus:outline-none"
+                              >
+                                {tradeAmountCurrencies.map(c => (
+                                  <option key={c.symbol} value={c.symbol}>
+                                    {c.symbol === 'ARIARY' ? 'ARIARY' : c.symbol}
+                                  </option>
+                                ))}
+                              </select>
+                            </div>
+                            <div className="col-span-4 flex items-center justify-end gap-1">
+                              <span className="text-[9px] font-black text-purple-200 whitespace-nowrap">AUTO %</span>
+                              <input
+                                type="text"
+                                inputMode="decimal"
+                                value={autoPercentInput}
+                                placeholder="0.1"
+                                onChange={e => {
+                                  const cleaned = sanitizeDecimalInput(e.target.value);
+                                  setAutoPercentInput(cleaned);
+                                  if (cleaned === '') {
+                                    setTradeAmountInput('');
+                                    return;
+                                  }
+                                  const num = parseDecimalValue(cleaned);
+                                  if (!isNaN(num) && num >= 0) {
+                                    const targetAr = (soldeCompteTradeAr * Math.min(100, num)) / 100;
+                                    setTradeAmountInput(
+                                      formatConvertedCurrencyAmount(
+                                        targetAr,
+                                        tradeAmountCurrency,
+                                        selectedTradeCurrencyObj.priceAr
+                                      )
+                                    );
+                                  }
+                                }}
+                                className="w-14 px-1.5 py-1 rounded-lg bg-[#150D2E] border border-[#8B5CF6]/50 text-white font-mono text-[11px] text-center font-bold focus:outline-none focus:border-[#8B5CF6]"
+                              />
+                            </div>
+                          </div>
+                        </div>
+
+                        <div className="grid grid-cols-5 gap-1">
+                          {([25, 50, 75, 100, 'MAX'] as const).map(p => (
+                            <button
+                              key={String(p)}
+                              type="button"
+                              onClick={() => applyAutoPercent(p)}
+                              className={`py-1 rounded-lg text-[10px] font-mono font-black border transition ${
+                                (p === 'MAX' && autoPercentInput === '100') || String(p) === autoPercentInput
+                                  ? 'bg-[#7C3AED] border-purple-300 text-white shadow'
+                                  : 'bg-[#150D2E] border-purple-500/30 text-purple-200'
+                              }`}
+                            >
+                              {p === 'MAX' ? 'MAX' : `${p}%`}
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+
+                      {/* GAUCHE = BUY | DROITE = SELL */}
+                      <div className="grid grid-cols-2 gap-2.5">
                         <button
-                          key={amt}
-                          onClick={() => setTradeAmountInput(amt)}
-                          className="px-2 py-1.5 rounded-lg bg-[#23154D] text-purple-300 border border-purple-500/30 font-bold"
+                          type="button"
+                          disabled={tradeSubmitting}
+                          onClick={() => handleExecuteTrade('BUY', 'Manuel')}
+                          className="py-3 px-2 rounded-2xl bg-gradient-to-br from-emerald-600 to-emerald-500 text-white font-black text-xs shadow flex flex-col items-center justify-center active:scale-95 transition disabled:opacity-50"
                         >
-                          ${amt}
+                          <span className="flex items-center gap-1 text-sm">
+                            <TrendingUp className="w-4 h-4" /> BUY
+                          </span>
+                          <span className="text-[10px] font-bold opacity-95">Mividy (Hausse)</span>
+                          <span className="text-[9px] font-mono bg-black/20 px-1.5 py-0.5 rounded mt-1">
+                            {tradingModeType === 'SPOT' ? 'SPOT x1' : `x${numericLeverage}`}
+                          </span>
                         </button>
+
+                        <button
+                          type="button"
+                          disabled={tradeSubmitting}
+                          onClick={() => handleExecuteTrade('SELL', 'Manuel')}
+                          className="py-3 px-2 rounded-2xl bg-gradient-to-br from-rose-600 to-rose-500 text-white font-black text-xs shadow flex flex-col items-center justify-center active:scale-95 transition disabled:opacity-50"
+                        >
+                          <span className="flex items-center gap-1 text-sm">
+                            <TrendingDown className="w-4 h-4" /> SELL
+                          </span>
+                          <span className="text-[10px] font-bold opacity-95">Mivarotra (Baisse)</span>
+                          <span className="text-[9px] font-mono bg-black/20 px-1.5 py-0.5 rounded mt-1">
+                            {tradingModeType === 'SPOT' ? 'SPOT x1' : `x${numericLeverage}`}
+                          </span>
+                        </button>
+                      </div>
+
+                      {/* Positions Actives (Marge Isolée Individuelle) */}
+                      {activeTrades.length > 0 && (
+                        <div className="pt-2 space-y-2 border-t border-purple-500/20">
+                          <span className="text-xs font-bold text-white block">
+                            Positions en cours — Marge Isolée ({activeTrades.length}) :
+                          </span>
+                          {activeTrades.map(tr => {
+                            const livePrice = getLivePriceForPair(tr.paire, tr.prix);
+                            const lev = Math.max(1, tr.leverage || 1);
+                            const diff =
+                              tr.type === 'achat'
+                                ? (livePrice - tr.prix) / (tr.prix || 1)
+                                : (tr.prix - livePrice) / (tr.prix || 1);
+                            const liveProfitAr = Math.max(-Math.round(tr.montant), Math.round(tr.montant * diff * lev));
+                            const isProfit = liveProfitAr >= 0;
+                            const liqPrice =
+                              lev > 1
+                                ? tr.type === 'achat'
+                                  ? tr.prix * (1 - 1 / lev)
+                                  : tr.prix * (1 + 1 / lev)
+                                : 0;
+                            return (
+                              <div
+                                key={tr.$id}
+                                className="p-2.5 rounded-xl bg-[#150D2E] border border-purple-500/30 text-xs space-y-1"
+                              >
+                                <div className="flex justify-between items-center">
+                                  <span
+                                    className={`text-[10px] font-black px-2 py-0.5 rounded ${
+                                      tr.type === 'achat'
+                                        ? 'bg-emerald-500/20 text-emerald-400'
+                                        : 'bg-rose-500/20 text-rose-400'
+                                    }`}
+                                  >
+                                    {tr.type === 'achat' ? 'BUY' : 'SELL'} x{lev} • {tr.paire}
+                                  </span>
+                                  <button
+                                    onClick={() => handleClosePosition(tr)}
+                                    className="px-2.5 py-1 rounded bg-rose-500/25 text-rose-200 font-bold text-[10px]"
+                                  >
+                                    Clôturer
+                                  </button>
+                                </div>
+                                <div className="flex justify-between text-[11px] font-mono">
+                                  <span className="text-purple-300">
+                                    Marge Isolée: {Number(tr.montant).toLocaleString('fr-FR')} Ar @ ${formatCoinPrice(tr.prix)}
+                                  </span>
+                                  <span className={`font-bold ${isProfit ? 'text-emerald-400' : 'text-rose-400'}`}>
+                                    {isProfit ? '+' : ''}
+                                    {liveProfitAr.toLocaleString('fr-FR')} Ar
+                                  </span>
+                                </div>
+                                {liqPrice > 0 && (
+                                  <div className="flex justify-between text-[9px] font-mono text-rose-300/90">
+                                    <span>Liq. Individuelle : ${formatCoinPrice(liqPrice)}</span>
+                                    <span>{tr.mode || `Pont ${activeBrokerExchange}`}</span>
+                                  </div>
+                                )}
+                              </div>
+                            );
+                          })}
+                        </div>
+                      )}
+                    </div>
+                  </>
+                )}
+
+                {/* ====================================================
+                    MODE B : AUTO STRATÉGIE (BOTS BINANCE POUR DÉBUTANT)
+                   ==================================================== */}
+                {tradeStrategyChoice === 'BOT' && (
+                  <div className="p-3.5 rounded-2xl bg-[#1D1240] border-2 border-emerald-500/50 space-y-3 shadow-[0_0_20px_rgba(16,185,129,0.18)]">
+                    <div className="flex items-center justify-between">
+                      <div className="flex items-center gap-2">
+                        <Bot className="w-4 h-4 text-emerald-400" />
+                        <span className="text-xs font-black text-white">Bots Trading Automatiques</span>
+                      </div>
+                      <span className="text-[10px] font-mono font-bold text-amber-300">Frais 0.1%</span>
+                    </div>
+
+                    {/* CHOIX DES 2 BOTS : SPOT GRID BOT & DCA BOT */}
+                    <div className="grid grid-cols-2 gap-2">
+                      <button
+                        type="button"
+                        onClick={() => setSelectedBotType('SPOT_GRID')}
+                        className={`p-3 rounded-xl border text-left transition space-y-1 ${
+                          selectedBotType === 'SPOT_GRID'
+                            ? 'bg-[#251552] border-emerald-400 shadow-[0_0_12px_rgba(16,185,129,0.25)]'
+                            : 'bg-[#150D2E] border-purple-500/30 opacity-80'
+                        }`}
+                      >
+                        <div className="flex items-center justify-between">
+                          <span className="font-black text-xs text-white">1. Spot Grid Bot</span>
+                          <span className="text-[9px] px-1.5 py-0.5 rounded bg-emerald-500/20 text-emerald-300 font-bold">Auto</span>
+                        </div>
+                        <p className="text-[10px] text-purple-200 leading-snug">
+                          Achète bas et vend haut automatiquement en grille.
+                        </p>
+                      </button>
+
+                      <button
+                        type="button"
+                        onClick={() => setSelectedBotType('DCA')}
+                        className={`p-3 rounded-xl border text-left transition space-y-1 ${
+                          selectedBotType === 'DCA'
+                            ? 'bg-[#251552] border-emerald-400 shadow-[0_0_12px_rgba(16,185,129,0.25)]'
+                            : 'bg-[#150D2E] border-purple-500/30 opacity-80'
+                        }`}
+                      >
+                        <div className="flex items-center justify-between">
+                          <span className="font-black text-xs text-white">2. DCA Bot</span>
+                          <span className="text-[9px] px-1.5 py-0.5 rounded bg-purple-500/30 text-purple-200 font-bold">Débutant</span>
+                        </div>
+                        <p className="text-[10px] text-purple-200 leading-snug">
+                          Investit par paliers réguliers pour lisser le prix d'achat.
+                        </p>
+                      </button>
+                    </div>
+
+                    {/* CONFIGURATION SIMPLE DU BOT */}
+                    <div className="p-3 rounded-xl bg-[#150D2E] border border-purple-500/30 space-y-2.5 text-xs">
+                      <div className="flex justify-between items-center text-[11px]">
+                        <span className="text-purple-300 font-bold">Paire sélectionnée :</span>
+                        <span className="font-mono font-black text-white">{selectedCoin.symbol}/USDT (${formatCoinPrice(selectedCoin.price)})</span>
+                      </div>
+
+                      <div>
+                        <div className="flex justify-between items-center text-[11px] mb-1">
+                          <label className="font-bold text-purple-300">
+                            Montant investi ({selectedBotCurrencyObj.shortLabel}) *
+                          </label>
+                          <span className="font-mono text-[10px] text-emerald-300">
+                            {botAmountCurrency === 'ARIARY'
+                              ? `≈ $${(numericBotAmountAr / USD_TO_MGA).toFixed(2)} USD`
+                              : `≈ ${numericBotAmountAr.toLocaleString('fr-FR')} Ar`}
+                          </span>
+                        </div>
+                        <div className="flex gap-1.5">
+                          <input
+                            type="text"
+                            inputMode="decimal"
+                            value={botAmountInput}
+                            onChange={e => setBotAmountInput(sanitizeDecimalInput(e.target.value))}
+                            placeholder={`Ex: ${botAmountCurrency === 'ARIARY' ? '10000' : '2.5'}`}
+                            className="flex-1 px-3 py-2 rounded-xl bg-[#100926] border border-purple-500/40 text-white font-mono font-bold text-xs focus:outline-none focus:border-[#8B5CF6]"
+                          />
+                          <select
+                            aria-label="Devise du montant Bot"
+                            value={botAmountCurrency}
+                            onChange={e => handleChangeBotAmountCurrency(e.target.value)}
+                            className="px-2.5 py-2 rounded-xl bg-[#23154D] border border-[#8B5CF6]/70 text-white text-xs font-black focus:outline-none"
+                          >
+                            {tradeAmountCurrencies.map(c => (
+                              <option key={c.symbol} value={c.symbol}>
+                                {c.symbol === 'ARIARY' ? 'ARIARY' : c.symbol}
+                              </option>
+                            ))}
+                          </select>
+                        </div>
+                        <div className="grid grid-cols-4 gap-1 mt-1.5">
+                          {[25, 50, 75, 100].map(pct => (
+                            <button
+                              key={pct}
+                              type="button"
+                              onClick={() =>
+                                setBotAmountInput(
+                                  formatConvertedCurrencyAmount(
+                                    (soldeCompteTradeAr * pct) / 100,
+                                    botAmountCurrency,
+                                    selectedBotCurrencyObj.priceAr
+                                  )
+                                )
+                              }
+                              className="py-1 rounded-lg bg-[#190F38] border border-purple-500/30 text-[10px] font-mono font-bold text-purple-200"
+                            >
+                              {pct === 100 ? 'MAX' : `${pct}%`}
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+
+                      {selectedBotType === 'SPOT_GRID' ? (
+                        <div>
+                          <label className="text-[11px] font-bold text-purple-300 block mb-1">
+                            Mode Grille (Fourchette ±5% auto) :
+                          </label>
+                          <div className="grid grid-cols-3 gap-1">
+                            {(['Prudent (5 grilles)', 'Équilibré (10 grilles)', 'Dynamique (20 grilles)'] as const).map(prof => (
+                              <button
+                                key={prof}
+                                type="button"
+                                onClick={() => setBotGridProfile(prof)}
+                                className={`py-1.5 px-1 rounded-lg text-[10px] font-bold border transition ${
+                                  botGridProfile === prof
+                                    ? 'bg-[#7C3AED] border-purple-300 text-white'
+                                    : 'bg-[#100926] border-purple-500/30 text-purple-200'
+                                }`}
+                              >
+                                {prof}
+                              </button>
+                            ))}
+                          </div>
+                          <div className="flex justify-between text-[10px] font-mono text-emerald-300 mt-1.5">
+                            <span>Bas: ${formatCoinPrice(selectedCoin.price * 0.95)}</span>
+                            <span>Haut: ${formatCoinPrice(selectedCoin.price * 1.05)}</span>
+                          </div>
+                        </div>
+                      ) : (
+                        <div className="grid grid-cols-2 gap-2">
+                          <div>
+                            <label className="text-[10px] font-bold text-purple-300 block mb-1">Fréquence DCA :</label>
+                            <select
+                              value={botDcaFreq}
+                              onChange={e => setBotDcaFreq(e.target.value as typeof botDcaFreq)}
+                              className="w-full px-2 py-1.5 rounded-lg bg-[#100926] border border-purple-500/40 text-white text-[11px] font-bold"
+                            >
+                              <option value="Toutes les 1h">Toutes les 1h</option>
+                              <option value="Toutes les 4h">Toutes les 4h</option>
+                              <option value="Quotidien">Quotidien</option>
+                            </select>
+                          </div>
+                          <div>
+                            <label className="text-[10px] font-bold text-purple-300 block mb-1">Objectif Gain (TP) :</label>
+                            <select
+                              value={botDcaTp}
+                              onChange={e => setBotDcaTp(e.target.value as typeof botDcaTp)}
+                              className="w-full px-2 py-1.5 rounded-lg bg-[#100926] border border-purple-500/40 text-white text-[11px] font-bold"
+                            >
+                              <option value="+2%">+2% Sécurisé</option>
+                              <option value="+5%">+5% Équilibré</option>
+                              <option value="+10%">+10% Objectif Haut</option>
+                            </select>
+                          </div>
+                        </div>
+                      )}
+
+                      <button
+                        type="button"
+                        disabled={botSubmitting}
+                        onClick={handleStartBot}
+                        className="w-full py-3 rounded-xl bg-gradient-to-r from-emerald-600 to-[#7C3AED] text-white font-black text-xs shadow flex items-center justify-center gap-2 active:scale-[0.98] transition disabled:opacity-50"
+                      >
+                        <Play className="w-4 h-4" />
+                        <span>
+                          {botSubmitting
+                            ? 'DÉMARRAGE...'
+                            : `START ${selectedBotType === 'SPOT_GRID' ? 'SPOT GRID BOT' : 'DCA BOT'}`}
+                        </span>
+                      </button>
+                    </div>
+
+                    {/* BOTS ACTIFS AVEC BOUTON STOP */}
+                    <div className="space-y-2 pt-1">
+                      <span className="text-xs font-black text-white block">
+                        Bots en cours d'exécution ({activeBotTrades.length})
+                      </span>
+                      {activeBotTrades.length === 0 ? (
+                        <div className="p-3 rounded-xl bg-[#150D2E] text-center text-[11px] text-purple-300 border border-purple-500/20">
+                          Aucun bot actif. Choisissez un bot et cliquez sur START.
+                        </div>
+                      ) : (
+                        activeBotTrades.map(botTr => {
+                          const livePrice = getLivePriceForPair(botTr.paire, botTr.prix);
+                          const diff = (livePrice - botTr.prix) / (botTr.prix || 1);
+                          const liveProfitAr = Math.round(botTr.montant * diff);
+                          const isProfit = liveProfitAr >= 0;
+                          return (
+                            <div
+                              key={botTr.$id}
+                              className="p-3 rounded-xl bg-[#150D2E] border border-emerald-500/40 text-xs space-y-1.5"
+                            >
+                              <div className="flex justify-between items-center gap-2">
+                                <div>
+                                  <span className="text-[10px] font-black text-emerald-300 flex items-center gap-1">
+                                    <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
+                                    {botTr.mode}
+                                  </span>
+                                  <span className="font-bold text-white text-xs block">{botTr.paire}</span>
+                                </div>
+                                <button
+                                  type="button"
+                                  onClick={() => handleClosePosition(botTr)}
+                                  className="px-3 py-1.5 rounded-lg bg-rose-600 hover:bg-rose-500 text-white font-black text-[10px] flex items-center gap-1"
+                                >
+                                  <Square className="w-3 h-3" />
+                                  STOP BOT
+                                </button>
+                              </div>
+                              <div className="flex justify-between text-[11px] font-mono pt-1 border-t border-purple-500/20">
+                                <span className="text-purple-300">
+                                  Capital: {Number(botTr.montant).toLocaleString('fr-FR')} Ar @ ${formatCoinPrice(botTr.prix)}
+                                </span>
+                                <span className={`font-black ${isProfit ? 'text-emerald-400' : 'text-rose-400'}`}>
+                                  {isProfit ? '+' : ''}
+                                  {liveProfitAr.toLocaleString('fr-FR')} Ar
+                                </span>
+                              </div>
+                            </div>
+                          );
+                        })
+                      )}
+                    </div>
+                  </div>
+                )}
+
+                {/* 4. CARNET D'ORDRES */}
+                <div className="p-3 rounded-2xl bg-[#190F38] border border-[#8B5CF6]/45 space-y-2">
+                  <div className="flex justify-between items-center text-[11px] font-black text-white">
+                    <span className="flex items-center gap-1.5">
+                      <BookOpen className="w-3.5 h-3.5 text-[#8B5CF6]" />
+                      Carnet d'ordres {selectedCoin.symbol}/USDT
+                    </span>
+                    <span className="text-[10px] font-mono text-purple-300">Écart: ${orderBook.spread}</span>
+                  </div>
+                  <div className="grid grid-cols-2 gap-2 text-[10px] font-mono">
+                    <div className="space-y-0.5">
+                      <div className="flex justify-between text-emerald-400/80 font-bold pb-0.5 border-b border-purple-500/20">
+                        <span>Achat (Prix)</span>
+                        <span>Qté</span>
+                      </div>
+                      {orderBook.bids.map((bid, i) => (
+                        <div key={i} className="relative flex justify-between items-center py-0.5 px-1 rounded overflow-hidden">
+                          <div className="absolute left-0 top-0 bottom-0 bg-emerald-500/15" style={{ width: `${bid.depth}%` }} />
+                          <span className="text-emerald-400 font-bold z-10">${formatCoinPrice(bid.price)}</span>
+                          <span className="text-slate-200 z-10">{bid.qty}</span>
+                        </div>
+                      ))}
+                    </div>
+                    <div className="space-y-0.5">
+                      <div className="flex justify-between text-rose-400/80 font-bold pb-0.5 border-b border-purple-500/20">
+                        <span>Vente (Prix)</span>
+                        <span>Qté</span>
+                      </div>
+                      {orderBook.asks.map((ask, i) => (
+                        <div key={i} className="relative flex justify-between items-center py-0.5 px-1 rounded overflow-hidden">
+                          <div className="absolute right-0 top-0 bottom-0 bg-rose-500/15" style={{ width: `${ask.depth}%` }} />
+                          <span className="text-rose-400 font-bold z-10">${formatCoinPrice(ask.price)}</span>
+                          <span className="text-slate-200 z-10">{ask.qty}</span>
+                        </div>
                       ))}
                     </div>
                   </div>
-
-                  <div className="flex justify-between text-[11px] text-purple-300 px-1">
-                    <span>Solde Trading disponible :</span>
-                    <span className="font-mono font-bold text-white">${tradingBalanceUsd.toFixed(2)}</span>
-                  </div>
-
-                  <div className="grid grid-cols-2 gap-2 pt-1">
-                    <button
-                      onClick={() => handleExecuteTrade('BUY', 'Manuel')}
-                      className="py-3.5 rounded-2xl bg-gradient-to-r from-emerald-600 to-emerald-500 text-white font-black text-sm shadow flex flex-col items-center justify-center active:scale-98 transition"
-                    >
-                      <span className="flex items-center gap-1">
-                        <TrendingUp className="w-4 h-4" /> BUY (Mividy)
-                      </span>
-                      <span className="text-[10px] font-mono opacity-90">
-                        Hausse • {tradingModeType === 'SPOT' ? 'SPOT' : `x${numericLeverage}`}
-                      </span>
-                    </button>
-
-                    <button
-                      onClick={() => handleExecuteTrade('SELL', 'Manuel')}
-                      className="py-3.5 rounded-2xl bg-gradient-to-r from-rose-600 to-rose-500 text-white font-black text-sm shadow flex flex-col items-center justify-center active:scale-98 transition"
-                    >
-                      <span className="flex items-center gap-1">
-                        <TrendingDown className="w-4 h-4" /> SELL (Mivarotra)
-                      </span>
-                      <span className="text-[10px] font-mono opacity-90">
-                        Baisse • {tradingModeType === 'SPOT' ? 'SPOT' : `x${numericLeverage}`}
-                      </span>
-                    </button>
-                  </div>
-
-                  {/* Active Positions */}
-                  {activePositions.length > 0 && (
-                    <div className="pt-2 space-y-2">
-                      <span className="text-xs font-bold text-white block">Positions Actives ({activePositions.length}) :</span>
-                      {activePositions.map(pos => {
-                        const isProfit = pos.pnlUsd >= 0;
-                        return (
-                          <div key={pos.id} className="p-2.5 rounded-xl bg-[#150D2E] border border-purple-500/30 text-xs space-y-1">
-                            <div className="flex justify-between items-center">
-                              <span className={`text-[10px] font-black px-2 py-0.5 rounded ${pos.type === 'BUY' ? 'bg-emerald-500/20 text-emerald-400' : 'bg-rose-500/20 text-rose-400'}`}>
-                                {pos.type} x{pos.leverage} • {pos.coinId.toUpperCase()} ({pos.mode})
-                              </span>
-                              <button onClick={() => handleClosePosition(pos.id)} className="px-2 py-0.5 rounded bg-rose-500/20 text-rose-300 font-bold text-[10px]">
-                                Clôturer
-                              </button>
-                            </div>
-                            <div className="flex justify-between text-xs font-mono">
-                              <span className="text-purple-300">Entrée: ${pos.entryPrice}</span>
-                              <span className={`font-bold ${isProfit ? 'text-emerald-400' : 'text-rose-400'}`}>
-                                {isProfit ? '+' : ''}{pos.pnlUsd.toFixed(2)}$ ({isProfit ? '+' : ''}{pos.pnlPercent}%)
-                              </span>
-                            </div>
-                          </div>
-                        );
-                      })}
-                    </div>
-                  )}
                 </div>
 
-                {/* 4. TABLEAU : FRAIS SALOMA + TOTAL APRÈS FRAIS */}
+                {/* 5. TABLEAU */}
                 <div className="p-3.5 rounded-2xl bg-[#1D1240] border-2 border-[#8B5CF6]/50 space-y-2">
                   <span className="text-xs font-black text-white flex items-center gap-1.5">
                     <Activity className="w-3.5 h-3.5 text-purple-400" />
-                    Tableau : Frais SALOMA & Total après frais
+                    Tableau : Position, Frais & Levier
                   </span>
                   {(() => {
-                    const fee = numericAmount * 0.001;
-                    const totalApres = numericAmount + fee;
-                    const posValue = numericAmount * (tradingModeType === 'SPOT' ? 1 : numericLeverage);
+                    const activeAmt = tradeStrategyChoice === 'BOT' ? numericBotAmountAr : numericAmountAr;
+                    const activeLev = tradeStrategyChoice === 'BOT' ? 1 : tradingModeType === 'SPOT' ? 1 : numericLeverage;
+                    const feeAr = Math.round(activeAmt * 0.001);
                     return (
                       <div className="overflow-hidden rounded-xl border border-purple-500/30 text-xs">
                         <table className="w-full text-left">
                           <tbody className="divide-y divide-purple-500/20 bg-[#150D2E]">
                             <tr>
-                              <td className="px-3 py-2 text-purple-300">Montant investi</td>
-                              <td className="px-3 py-2 text-right font-mono font-bold text-white">${numericAmount.toFixed(2)}</td>
+                              <td className="px-3 py-2 text-purple-300">Montant engagé</td>
+                              <td className="px-3 py-2 text-right font-mono font-bold text-white">
+                                {activeAmt.toLocaleString('fr-FR')} Ar
+                              </td>
                             </tr>
                             <tr>
                               <td className="px-3 py-2 text-purple-300">Frais SALOMA (0.1%)</td>
-                              <td className="px-3 py-2 text-right font-mono font-bold text-amber-300">${fee.toFixed(3)}</td>
+                              <td className="px-3 py-2 text-right font-mono font-bold text-amber-300">
+                                {feeAr.toLocaleString('fr-FR')} Ar
+                              </td>
                             </tr>
                             <tr className="bg-[#1F1042]/70 font-bold">
-                              <td className="px-3 py-2 text-white">Total après frais</td>
-                              <td className="px-3 py-2 text-right font-mono text-emerald-400">${totalApres.toFixed(3)}</td>
-                            </tr>
-                            <tr>
-                              <td className="px-3 py-2 text-purple-400 text-[11px]">Valeur position avec Levier x{tradingModeType === 'SPOT' ? 1 : numericLeverage}</td>
-                              <td className="px-3 py-2 text-right font-mono font-bold text-purple-200">${posValue.toLocaleString()}</td>
+                              <td className="px-3 py-2 text-white">
+                                Valeur position (x{activeLev})
+                              </td>
+                              <td className="px-3 py-2 text-right font-mono text-emerald-400">
+                                {((activeAmt - feeAr) * activeLev).toLocaleString('fr-FR')} Ar
+                              </td>
                             </tr>
                           </tbody>
                         </table>
@@ -1621,37 +4685,50 @@ export default function App() {
                   })()}
                 </div>
 
-                {/* 5. HISTORIQUE TRADING */}
+                {/* 6. HISTORIQUE TRADING (Appwrite `trades` terminés) */}
                 <div className="p-3.5 rounded-2xl bg-[#1D1240] border-2 border-[#8B5CF6]/50 space-y-2">
-                  <div className="flex justify-between items-center">
+                  <div className="flex items-center justify-between gap-2">
                     <span className="text-xs font-black text-white flex items-center gap-1.5">
                       <BarChart2 className="w-3.5 h-3.5 text-purple-400" />
-                      5. Historique des Ordres
+                      Historique des Ordres ({closedTrades.length})
                     </span>
-                    {tradeHistory.length > 0 && (
-                      <button onClick={() => setTradeHistory([])} className="text-[10px] text-rose-400 hover:text-rose-300 font-bold flex items-center gap-1">
-                        <Trash2 className="w-3 h-3" /> Tout supprimer
+                    {closedTrades.length > 0 && (
+                      <button
+                        type="button"
+                        onClick={() => setClearHistoryTarget('trade')}
+                        className="px-2.5 py-1 rounded-lg bg-rose-500/20 hover:bg-rose-500/30 border border-rose-500/50 text-rose-300 text-[10px] font-black inline-flex items-center gap-1 transition"
+                      >
+                        <Trash2 className="w-3 h-3" />
+                        <span>Tout supprimer</span>
                       </button>
                     )}
                   </div>
-                  {tradeHistory.length === 0 ? (
-                    <div className="text-center py-3 text-xs text-purple-400/70">Aucun ordre</div>
+                  {closedTrades.length === 0 ? (
+                    <div className="text-center py-3 text-xs text-purple-400/70">Aucun trade clôturé</div>
                   ) : (
                     <div className="space-y-1.5 max-h-40 overflow-y-auto">
-                      {tradeHistory.map(item => (
-                        <div key={item.id} className="flex justify-between items-center p-2 rounded-xl bg-[#150D2E] text-xs">
+                      {closedTrades.map(item => (
+                        <div
+                          key={item.$id}
+                          className="flex justify-between items-center p-2 rounded-xl bg-[#150D2E] text-xs"
+                        >
                           <div>
-                            <span className="font-bold text-white">{item.type} {item.coinSymbol} x{item.leverage} ({item.mode})</span>
-                            <span className="text-[10px] text-purple-400 block">${item.entryPrice} → ${item.closePrice}</span>
-                          </div>
-                          <div className="flex items-center gap-2">
-                            <span className={`font-mono font-bold ${item.pnlUsd >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
-                              {item.pnlUsd >= 0 ? '+' : ''}${item.pnlUsd.toFixed(2)}
+                            <span className="font-bold text-white">
+                              {item.type === 'achat' ? 'BUY' : 'SELL'} {item.paire} x{item.leverage || 1}
+                              {item.mode && item.mode !== 'Manuel' ? ` • ${item.mode}` : ''}
                             </span>
-                            <button onClick={() => setTradeHistory(prev => prev.filter(h => h.id !== item.id))} className="text-purple-400 hover:text-rose-400">
-                              <X className="w-3.5 h-3.5" />
-                            </button>
+                            <span className="text-[10px] text-purple-400 block">
+                              ${formatCoinPrice(item.prix)} → ${formatCoinPrice(item.close_price || item.prix)}
+                            </span>
                           </div>
+                          <span
+                            className={`font-mono font-bold ${
+                              (Number(item.profit) || 0) >= 0 ? 'text-emerald-400' : 'text-rose-400'
+                            }`}
+                          >
+                            {(Number(item.profit) || 0) >= 0 ? '+' : ''}
+                            {Number(item.profit || 0).toLocaleString('fr-FR')} Ar
+                          </span>
                         </div>
                       ))}
                     </div>
@@ -1660,149 +4737,220 @@ export default function App() {
               </div>
             )}
 
-            {/* TAB: ÉCHANGE */}
-            {activeTab === 'exchange' && (
-              <div className="space-y-4 animate-fadeIn">
-                <h2 className="text-lg font-black text-white flex items-center gap-2">
-                  <Repeat className="w-5 h-5 text-[#8B5CF6]" />
-                  Échange Rapide (Fifanakalozana)
-                </h2>
-                <div className="p-4 rounded-3xl bg-[#1D1240] border-2 border-[#8B5CF6]/50 space-y-3">
-                  <div className="p-3 rounded-2xl bg-[#150D2E] space-y-1">
-                    <span className="text-xs text-purple-300">De :</span>
-                    <div className="flex items-center gap-2">
-                      <input
-                        type="number"
-                        value={swapAmount}
-                        onChange={e => setSwapAmount(Number(e.target.value))}
-                        className="flex-1 bg-transparent text-white font-mono font-black text-xl focus:outline-none"
-                      />
-                      <select value={swapFromCoin} onChange={e => setSwapFromCoin(e.target.value)} className="bg-[#23154D] text-white text-xs font-bold p-2 rounded-xl border border-[#8B5CF6]">
-                        {coins.map(c => <option key={c.id} value={c.id}>{c.symbol}</option>)}
-                      </select>
-                    </div>
-                  </div>
-
-                  <div className="p-3 rounded-2xl bg-[#150D2E] space-y-1">
-                    <span className="text-xs text-purple-300">Vers :</span>
-                    <div className="flex items-center gap-2">
-                      {(() => {
-                        const f = coins.find(c => c.id === swapFromCoin);
-                        const t = coins.find(c => c.id === swapToCoin);
-                        if (!f || !t) return null;
-                        const outAmt = (swapAmount * f.price * 0.999) / t.price;
-                        return <span className="flex-1 text-emerald-400 font-mono font-black text-xl truncate">{outAmt.toFixed(4)}</span>;
-                      })()}
-                      <select value={swapToCoin} onChange={e => setSwapToCoin(e.target.value)} className="bg-[#23154D] text-white text-xs font-bold p-2 rounded-xl border border-[#8B5CF6]">
-                        {coins.map(c => <option key={c.id} value={c.id}>{c.symbol}</option>)}
-                      </select>
-                    </div>
-                  </div>
-
-                  <button
-                    onClick={() => {
-                      showToast('Échange effectué avec succès');
-                    }}
-                    className="w-full py-3.5 rounded-xl bg-gradient-to-r from-[#7C3AED] to-[#8B5CF6] text-white font-extrabold text-sm shadow"
-                  >
-                    Échanger (Hanova)
-                  </button>
-                </div>
-              </div>
-            )}
-
-            {/* TAB: PORTEFEUILLE */}
+            {/* ========================================================
+                TAB 4: PORTEFEUILLE RÉEL (Appwrite `Wallets` + `depots_retraits`)
+               ======================================================== */}
             {activeTab === 'wallet' && (
-              <div className="space-y-4 animate-fadeIn">
+              <div className="space-y-4">
                 <div className="p-4 rounded-3xl bg-gradient-to-br from-[#2D165A] via-[#1F1042] to-[#150D2E] border-2 border-[#8B5CF6] shadow-[0_0_25px_rgba(124,58,237,0.5)]">
                   <div className="flex justify-between items-start mb-2">
-                    <span className="text-xs font-bold text-purple-300">Solde Total</span>
-                    <button onClick={() => setDisplayCurrency(displayCurrency === 'USD' ? 'MGA' : 'USD')} className="px-2 py-0.5 rounded-full bg-purple-900/60 text-[10px] text-purple-200 border border-purple-400/40 font-bold">
-                      {displayCurrency === 'USD' ? 'En Ariary' : 'En USD'}
+                    <span className="text-xs font-bold text-purple-300">Solde Total Portefeuille</span>
+                    <button
+                      onClick={() => setDisplayCurrency(displayCurrency === 'MGA' ? 'USD' : 'MGA')}
+                      className="px-2.5 py-0.5 rounded-full bg-purple-900/60 text-[10px] text-purple-200 border border-purple-400/40 font-bold"
+                    >
+                      {displayCurrency === 'MGA' ? 'Afficher en USD' : 'Afficher en Ariary'}
                     </button>
                   </div>
                   <h1 className="text-3xl font-black text-white font-mono">
-                    {formatMoney(walletBalanceUsd + tradingBalanceUsd, 'USD')}
+                    {formatMoney(soldeTotalAr)}
                   </h1>
-                  <p className="text-sm font-bold text-purple-300 font-mono">
-                    ≈ {formatMoney(walletBalanceUsd + tradingBalanceUsd, 'MGA')}
+                  <p className="text-xs font-bold text-purple-300 font-mono mt-0.5">
+                    ≈ {formatMoney(soldeTotalAr, displayCurrency === 'MGA' ? 'USD' : 'MGA')}
                   </p>
 
+                  {/* 2 SOLDES SÉPARÉS : WALLET & COMPTE TRADE */}
                   <div className="grid grid-cols-2 gap-2 mt-4 pt-3 border-t border-purple-500/20 text-xs">
-                    <div className="bg-[#150D2E]/80 p-2.5 rounded-2xl border border-purple-500/20">
-                      <span className="text-[10px] text-purple-300 block font-bold">Compte Wallet :</span>
-                      <span className="font-black text-white font-mono text-sm">${walletBalanceUsd.toFixed(2)}</span>
+                    <div className="bg-[#150D2E]/90 p-3 rounded-2xl border border-emerald-500/35 space-y-0.5">
+                      <span className="text-[10px] text-emerald-300 block font-black uppercase">
+                        1. WALLET (Dépôt/Retrait)
+                      </span>
+                      <span className="font-black text-emerald-400 font-mono text-sm block">
+                        {formatMoney(soldeDisponibleAr)}
+                      </span>
+                      <span className="text-[9px] text-purple-300 block">Argent déposé & retirable</span>
                     </div>
-                    <div className="bg-[#150D2E]/80 p-2.5 rounded-2xl border border-purple-500/20">
-                      <span className="text-[10px] text-purple-300 block font-bold">Compte Trading :</span>
-                      <span className="font-black text-emerald-400 font-mono text-sm">${tradingBalanceUsd.toFixed(2)}</span>
+                    <div className="bg-[#150D2E]/90 p-3 rounded-2xl border border-[#8B5CF6]/50 space-y-0.5">
+                      <span className="text-[10px] text-purple-200 block font-black uppercase">
+                        2. COMPTE TRADE
+                      </span>
+                      <span className="font-black text-white font-mono text-sm block">
+                        {formatMoney(soldeCompteTradeAr)}
+                      </span>
+                      <span className="text-[9px] text-amber-300 font-mono block">
+                        {soldeBloqueAr > 0
+                          ? `Marge isolée: ${formatMoney(soldeBloqueAr)}`
+                          : 'Prêt pour Manuel & Bots'}
+                      </span>
                     </div>
                   </div>
 
+                  {/* 3 BOUTONS : DÉPÔT | CONVERTIR | RETRAIT */}
                   <div className="grid grid-cols-3 gap-2 mt-3">
-                    <button onClick={() => setActiveModal('deposit')} className="py-2.5 rounded-2xl bg-emerald-600 text-white font-bold text-xs flex flex-col items-center">
+                    <button
+                      type="button"
+                      onClick={handleOpenDeposit}
+                      className="py-2.5 rounded-2xl bg-emerald-600 text-white font-bold text-xs flex items-center justify-center gap-1"
+                    >
                       <ArrowDownLeft className="w-4 h-4" /> Dépôt
                     </button>
-                    <button onClick={() => setActiveModal('withdraw')} className="py-2.5 rounded-2xl bg-[#7C3AED] text-white font-bold text-xs flex flex-col items-center">
-                      <ArrowUpRight className="w-4 h-4" /> Retrait
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setConvertDirection('WALLET_TO_TRADE');
+                        setConvertAmountInput('');
+                        setActiveModal('convert');
+                      }}
+                      className="py-2.5 rounded-2xl bg-amber-500 text-slate-950 font-black text-xs flex items-center justify-center gap-1 shadow"
+                    >
+                      <ArrowRightLeft className="w-4 h-4" /> Convertir
                     </button>
-                    <button onClick={() => setActiveModal('transfer')} className="py-2.5 rounded-2xl bg-amber-600 text-white font-bold text-xs flex flex-col items-center">
-                      <ArrowRightLeft className="w-4 h-4" /> Transfert
+                    <button
+                      type="button"
+                      onClick={handleOpenWithdraw}
+                      className="py-2.5 rounded-2xl bg-[#7C3AED] text-white font-bold text-xs flex items-center justify-center gap-1"
+                    >
+                      <ArrowUpRight className="w-4 h-4" /> Retrait
                     </button>
                   </div>
                 </div>
 
-                {/* Coins & Networks list */}
+                {/* Soldes Cryptos réels depuis coins_json (50 COINS) */}
                 <div className="p-3.5 rounded-2xl bg-[#1D1240] border-2 border-[#8B5CF6]/50 space-y-2">
                   <div className="flex justify-between items-center text-xs">
-                    <span className="font-bold text-white flex items-center gap-1.5"><Layers className="w-3.5 h-3.5 text-purple-400" /> Tous les Actifs</span>
-                    <span className="text-[10px] text-purple-300">{coins.length} Coins</span>
+                    <span className="font-bold text-white flex items-center gap-1.5">
+                      <Layers className="w-3.5 h-3.5 text-purple-400" /> Actifs Crypto Portefeuille
+                    </span>
+                    <span className="text-[10px] text-purple-300 font-bold">{coins.length} Coins</span>
                   </div>
-                  <div className="space-y-1.5">
+                  <div className="space-y-1.5 max-h-56 overflow-y-auto">
                     {coins.map(coin => (
                       <div
                         key={coin.id}
                         onClick={() => {
-                          setSelectedWalletCoin(coin);
-                          setActiveModal('deposit');
+                          setSelectedWalletCoinId(coin.id);
+                          setSelectedNetworkIndex(0);
+                          setCopiedDepositAddress(false);
                         }}
-                        className="flex items-center justify-between p-2.5 rounded-xl bg-[#150D2E] border border-purple-500/20 cursor-pointer"
+                        className={`flex items-center justify-between p-2.5 rounded-xl cursor-pointer transition border ${
+                          selectedWalletCoinId === coin.id
+                            ? 'bg-[#251552] border-[#8B5CF6]'
+                            : 'bg-[#150D2E] border-purple-500/20 hover:border-purple-400/40'
+                        }`}
                       >
-                        <div className="flex items-center gap-2">
-                          <div className={`w-8 h-8 rounded-lg flex items-center justify-center font-bold text-xs border ${coin.iconBg}`}>
+                        <div className="flex items-center gap-2 min-w-0">
+                          <div className={`w-8 h-8 rounded-lg flex items-center justify-center font-bold text-xs border shrink-0 ${coin.iconBg}`}>
                             {coin.symbol.slice(0, 3)}
                           </div>
-                          <div>
-                            <span className="font-bold text-xs text-white">{coin.name}</span>
-                            <span className="text-[10px] text-purple-400 block">{coin.networks.length} réseaux dispo</span>
+                          <div className="min-w-0">
+                            <span className="font-bold text-xs text-white block truncate">
+                              {coin.name} ({coin.symbol})
+                            </span>
+                            <span className="text-[10px] text-purple-400 block font-mono truncate">
+                              ${formatCoinPrice(coin.price)} • {coin.networks[0]?.chain || coin.symbol}
+                            </span>
                           </div>
                         </div>
-                        <span className="font-mono text-xs text-white font-bold">
-                          {(userCoins[coin.symbol] || 0).toFixed(4)} {coin.symbol}
+                        <span className="font-mono text-xs text-white font-bold shrink-0">
+                          {(coinsJson[coin.symbol.toUpperCase()] || 0).toFixed(6)}
                         </span>
                       </div>
                     ))}
                   </div>
+                </div>
+
+                {/* Historique réel des dépôts et retraits (depots_retraits) */}
+                <div className="p-3.5 rounded-2xl bg-[#1D1240] border border-[#8B5CF6]/40 space-y-2.5">
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="text-xs font-black text-white">
+                      Historique Dépôts &amp; Retraits ({depotsRetraitsList.length})
+                    </span>
+                    {depotsRetraitsList.length > 0 && (
+                      <button
+                        type="button"
+                        onClick={() => setClearHistoryTarget('wallet')}
+                        className="px-2.5 py-1 rounded-lg bg-rose-500/20 hover:bg-rose-500/30 border border-rose-500/50 text-rose-300 text-[10px] font-black inline-flex items-center gap-1 transition"
+                      >
+                        <Trash2 className="w-3 h-3" />
+                        <span>Tout supprimer</span>
+                      </button>
+                    )}
+                  </div>
+
+                  {depotsRetraitsList.length === 0 ? (
+                    <div className="p-3 rounded-xl bg-[#150D2E] text-center text-[11px] text-purple-400 border border-purple-500/20">
+                      Aucune transaction enregistrée
+                    </div>
+                  ) : (
+                    <div className="space-y-1.5 max-h-56 overflow-y-auto">
+                      {depotsRetraitsList.map(tx => (
+                        <div
+                          key={tx.$id}
+                          className="p-2.5 rounded-xl bg-[#150D2E] flex justify-between items-center text-[11px] border border-purple-500/20"
+                        >
+                          <div>
+                            <span className="font-bold text-white uppercase block">
+                              {tx.type} • {Number(tx.montant).toLocaleString('fr-FR')} {tx.devise}
+                            </span>
+                            <span className="text-[10px] text-purple-400 block">
+                              {tx.methode} ({tx.numero_compte}) • {tx.date ? new Date(tx.date).toLocaleString('fr-FR') : ''}
+                            </span>
+                          </div>
+                          <span
+                            className={`font-mono font-bold px-2 py-0.5 rounded text-[10px] ${
+                              tx.statut === 'valide'
+                                ? 'bg-emerald-500/20 text-emerald-400'
+                                : tx.statut === 'refuse'
+                                ? 'bg-rose-500/20 text-rose-400'
+                                : 'bg-amber-500/20 text-amber-300'
+                            }`}
+                          >
+                            {tx.statut}
+                          </span>
+                        </div>
+                      ))}
+                    </div>
+                  )}
                 </div>
               </div>
             )}
           </main>
 
           {/* BOTTOM NAVIGATION */}
-          <nav className="fixed bottom-0 left-1/2 -translate-x-1/2 w-full max-w-md bg-[#150D2E]/95 backdrop-blur-lg border-t-2 border-[#8B5CF6]/50 px-2 py-2 flex items-center justify-around z-30 shadow">
-            <button onClick={() => setActiveTab('earn')} className={`flex-1 flex flex-col items-center ${activeTab === 'earn' ? 'text-[#8B5CF6] font-black' : 'text-purple-300/60'}`}>
+          <nav className="fixed bottom-0 left-1/2 -translate-x-1/2 w-full max-w-md bg-[#150D2E]/95 backdrop-blur-lg border-t-2 border-[#8B5CF6]/50 px-2 py-2 flex items-center justify-around z-30 shadow-[0_-4px_25px_rgba(21,13,46,0.9)]">
+            <button
+              onClick={() => setActiveTab('earn')}
+              className={`flex-1 flex flex-col items-center gap-0.5 transition ${
+                activeTab === 'earn' ? 'text-[#8B5CF6] font-black' : 'text-purple-300/60'
+              }`}
+            >
               <Gift className="w-5 h-5" />
               <span className="text-[10px]">Earn</span>
             </button>
-            <button onClick={() => setActiveTab('trading')} className={`flex-1 flex flex-col items-center ${activeTab === 'trading' ? 'text-[#8B5CF6] font-black' : 'text-purple-300/60'}`}>
+            <button
+              onClick={() => setActiveTab('trading')}
+              className={`flex-1 flex flex-col items-center gap-0.5 transition ${
+                activeTab === 'trading' ? 'text-[#8B5CF6] font-black' : 'text-purple-300/60'
+              }`}
+            >
               <BarChart2 className="w-5 h-5" />
               <span className="text-[10px]">Trading</span>
             </button>
-            <button onClick={() => setActiveTab('exchange')} className={`flex-1 flex flex-col items-center ${activeTab === 'exchange' ? 'text-[#8B5CF6] font-black' : 'text-purple-300/60'}`}>
+            <button
+              onClick={() => setActiveTab('exchange')}
+              className={`flex-1 flex flex-col items-center gap-0.5 transition ${
+                activeTab === 'exchange' ? 'text-[#8B5CF6] font-black' : 'text-purple-300/60'
+              }`}
+            >
               <Repeat className="w-5 h-5" />
               <span className="text-[10px]">Échange</span>
             </button>
-            <button onClick={() => setActiveTab('wallet')} className={`flex-1 flex flex-col items-center ${activeTab === 'wallet' ? 'text-[#8B5CF6] font-black' : 'text-purple-300/60'}`}>
+            <button
+              onClick={() => setActiveTab('wallet')}
+              className={`flex-1 flex flex-col items-center gap-0.5 transition ${
+                activeTab === 'wallet' ? 'text-[#8B5CF6] font-black' : 'text-purple-300/60'
+              }`}
+            >
               <Wallet className="w-5 h-5" />
               <span className="text-[10px]">Portefeuille</span>
             </button>
@@ -1811,164 +4959,401 @@ export default function App() {
       )}
 
       {/* ========================================================
-          MODALS: DÉPÔT / RETRAIT / TRANSFERT / KYC / GUIDE / PROFIL
+          MODAL: NOTIFICATIONS APPWRITE REALTIME
          ======================================================== */}
-      {/* DÉPÔT WITH DROPDOWN NETWORKS + SEARCH */}
+      {activeModal === 'notifications' && (
+        <div className="fixed inset-0 z-50 bg-black/85 backdrop-blur-sm flex items-end sm:items-center justify-center p-0 sm:p-4">
+          <div className="bg-[#1D1240] border-2 border-[#8B5CF6] w-full max-w-md rounded-t-3xl sm:rounded-3xl p-5 space-y-3 max-h-[85vh] flex flex-col">
+            <div className="flex justify-between items-center">
+              <div className="flex items-center gap-2">
+                <Bell className="w-5 h-5 text-[#8B5CF6]" />
+                <h3 className="font-black text-white text-base">
+                  Notifications ({unreadNotificationsCount} non lues)
+                </h3>
+              </div>
+              <div className="flex items-center gap-2">
+                {unreadNotificationsCount > 0 && (
+                  <button
+                    onClick={handleMarkAllNotificationsRead}
+                    className="text-[10px] font-bold px-2.5 py-1 rounded-lg bg-[#7C3AED]/40 text-purple-100 border border-[#8B5CF6]/50"
+                  >
+                    Tout lire
+                  </button>
+                )}
+                <button onClick={() => setActiveModal(null)} className="text-purple-300">
+                  <X className="w-5 h-5" />
+                </button>
+              </div>
+            </div>
+
+            <div className="overflow-y-auto space-y-2 flex-1 pr-1">
+              {notificationsList.length === 0 ? (
+                <div className="p-6 text-center text-xs text-purple-300">Aucune notification pour le moment.</div>
+              ) : (
+                notificationsList.map(notif => (
+                  <div
+                    key={notif.$id}
+                    onClick={() => handleMarkNotificationRead(notif)}
+                    className={`p-3 rounded-2xl border cursor-pointer transition space-y-1 ${
+                      notif.lu
+                        ? 'bg-[#150D2E]/80 border-purple-500/20 opacity-80'
+                        : 'bg-[#251552] border-[#8B5CF6] shadow-[0_0_12px_rgba(124,58,237,0.35)]'
+                    }`}
+                  >
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="font-black text-xs text-white flex items-center gap-1.5">
+                        {!notif.lu && <span className="w-2 h-2 rounded-full bg-rose-500 inline-block" />}
+                        {notif.titre}
+                      </span>
+                      <span className="text-[9px] font-mono text-purple-300">
+                        {notif.date ? new Date(notif.date).toLocaleString('fr-FR') : ''}
+                      </span>
+                    </div>
+                    <p className="text-xs text-purple-100">{notif.message}</p>
+                  </div>
+                ))
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ========================================================
+          MODAL: DÉPÔT CRYPTO UNIQUEMENT (50 COINS + CHAÎNE & RÉSEAU)
+         ======================================================== */}
       {activeModal === 'deposit' && (
-        <div className="fixed inset-0 z-50 bg-black/85 backdrop-blur-sm flex items-end sm:items-center justify-center p-0 sm:p-4 animate-fadeIn">
+        <div className="fixed inset-0 z-50 bg-black/85 backdrop-blur-sm flex items-end sm:items-center justify-center p-0 sm:p-4">
           <div className="bg-[#1D1240] border-2 border-[#8B5CF6] w-full max-w-md rounded-t-3xl sm:rounded-3xl p-5 space-y-4 max-h-[92vh] overflow-y-auto">
             <div className="flex justify-between items-center">
               <button onClick={() => setActiveModal(null)} className="p-1.5 rounded-lg bg-[#23154D] text-purple-300">
                 <ArrowLeft className="w-5 h-5" />
               </button>
-              <h3 className="font-black text-white text-base">Dépôt {selectedWalletCoin.symbol}</h3>
+              <h3 className="font-black text-white text-base">Dépôt Crypto SALOMA</h3>
               <button onClick={() => setActiveModal(null)} className="p-1.5 rounded-lg bg-[#23154D] text-purple-300">
                 <X className="w-5 h-5" />
               </button>
             </div>
 
-            {/* Modif 6: RÉSEAUX EN DROPDOWN VERTICAL AVEC RECHERCHE */}
-            <div>
-              <label className="text-xs font-bold text-purple-300 block mb-1">Choisir le Réseau / Chaîne :</label>
-              <div className="relative">
-                <button
-                  onClick={() => setIsNetworkDropdownOpen(!isNetworkDropdownOpen)}
-                  className="w-full p-2.5 rounded-xl bg-[#150D2E] border-2 border-[#8B5CF6]/50 flex items-center justify-between text-xs font-bold text-white"
-                >
-                  <span>{selectedWalletCoin.networks[selectedNetworkIndex]?.name}</span>
-                  <ChevronDown className="w-4 h-4 text-purple-300" />
-                </button>
+            {renderWalletCoinChainNetworkSelector()}
 
-                {isNetworkDropdownOpen && (
-                  <div className="absolute top-full left-0 right-0 mt-1 z-50 bg-[#1D1240] border-2 border-[#8B5CF6] rounded-2xl p-2.5 shadow-2xl max-h-56 flex flex-col space-y-2">
-                    <input
-                      type="text"
-                      placeholder="Rechercher un réseau (TRC20, BEP20...)"
-                      value={networkSearchTerm}
-                      onChange={e => setNetworkSearchTerm(e.target.value)}
-                      className="w-full px-2.5 py-1.5 rounded-lg bg-[#150D2E] border border-purple-500/40 text-white text-xs"
-                    />
-                    <div className="overflow-y-auto space-y-1">
-                      {filteredNetworks.map((net, i) => (
-                        <div
-                          key={net.chain}
-                          onClick={() => {
-                            setSelectedNetworkIndex(i);
-                            setIsNetworkDropdownOpen(false);
-                          }}
-                          className={`p-2 rounded-lg text-xs cursor-pointer flex justify-between ${
-                            selectedNetworkIndex === i ? 'bg-[#7C3AED] text-white font-bold' : 'hover:bg-[#23154D] text-purple-200'
-                          }`}
-                        >
-                          <span>{net.name}</span>
-                          <span className="font-mono text-emerald-400">{net.depositFee === 0 ? 'Gratuit' : `${net.depositFee} ${net.feeSymbol}`}</span>
-                        </div>
-                      ))}
-                    </div>
-                  </div>
-                )}
+            <div className="p-3.5 rounded-2xl bg-[#150D2E] border border-[#8B5CF6]/50 space-y-2 text-center">
+              <div className="flex items-center justify-between text-[10px] font-bold bg-[#190F38] px-2.5 py-1.5 rounded-xl border border-purple-500/30">
+                <span className="text-purple-300">
+                  Chaîne : <strong className="text-emerald-300">{activeBlockchain}</strong>
+                </span>
+                <span className="text-purple-300">
+                  Réseau : <strong className="text-white">{activeNetworkLabel}</strong>
+                </span>
+              </div>
+              <span className="text-[10px] font-bold text-purple-300 block uppercase">
+                Adresse de dépôt {selectedWalletCoin.symbol} ({activeNetwork.name})
+              </span>
+              <span className="font-mono text-xs text-white break-all block bg-[#100926] p-2.5 rounded-xl border border-purple-500/20">
+                {activeNetwork.addressExample}
+              </span>
+              <div className="flex flex-wrap items-center justify-between gap-2 text-[10px] text-purple-300 pt-1">
+                <div className="text-left font-mono space-y-0.5">
+                  <span className="block">Min Dépôt : {activeNetwork.minDeposit} {selectedWalletCoin.symbol}</span>
+                  <span className="block text-purple-400">Frais réseau : {activeNetwork.withdrawFee} {selectedWalletCoin.symbol}</span>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => {
+                    navigator.clipboard?.writeText(activeNetwork.addressExample);
+                    setCopiedDepositAddress(true);
+                    showToast(`✓ Adresse ${selectedWalletCoin.symbol} (${activeNetworkLabel}) copiée !`);
+                    setTimeout(() => setCopiedDepositAddress(false), 2000);
+                  }}
+                  className="px-3 py-1.5 rounded-lg bg-[#7C3AED] text-white text-[11px] font-bold inline-flex items-center gap-1"
+                >
+                  {copiedDepositAddress ? <Check className="w-3.5 h-3.5" /> : <Copy className="w-3.5 h-3.5" />}
+                  <span>{copiedDepositAddress ? 'Adresse copiée ✓' : 'Copier adresse'}</span>
+                </button>
               </div>
             </div>
 
-            {/* Address */}
-            <div className="p-4 rounded-2xl bg-[#150D2E] border border-purple-500/30 flex flex-col items-center space-y-3">
-              <span className="font-mono text-xs text-white bg-[#1E1145] px-3 py-2 rounded-xl block border border-purple-500/30 break-all select-all font-bold">
-                {selectedWalletCoin.networks[selectedNetworkIndex]?.addressExample}
-              </span>
-              <button
-                onClick={() => {
-                  navigator.clipboard.writeText(selectedWalletCoin.networks[selectedNetworkIndex]?.addressExample || '');
-                  setCopiedAddress(true);
-                  setTimeout(() => setCopiedAddress(false), 2000);
-                  showToast('Copié ! (Voakopia !)');
-                }}
-                className="w-full py-2.5 rounded-xl bg-gradient-to-r from-[#7C3AED] to-[#8B5CF6] text-white font-bold text-xs"
-              >
-                {copiedAddress ? '✓ Copié !' : 'Copier l\'adresse'}
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
+            <div className="space-y-3 text-xs">
+              <div>
+                <label className="font-bold text-purple-300 block mb-1">
+                  Montant envoyé ({selectedWalletCoin.symbol}) *
+                </label>
+                <input
+                  type="text"
+                  inputMode="decimal"
+                  value={depositAmountInput}
+                  onChange={e => setDepositAmountInput(e.target.value.replace(/[^0-9.]/g, ''))}
+                  placeholder={`Min: ${activeNetwork.minDeposit} ${selectedWalletCoin.symbol}`}
+                  className="w-full px-3 py-2.5 rounded-xl bg-[#150D2E] border-2 border-[#8B5CF6]/40 text-white font-mono font-bold"
+                />
+              </div>
 
-      {/* RETRAIT */}
-      {activeModal === 'withdraw' && (
-        <div className="fixed inset-0 z-50 bg-black/85 backdrop-blur-sm flex items-end sm:items-center justify-center p-0 sm:p-4 animate-fadeIn">
-          <div className="bg-[#1D1240] border-2 border-[#8B5CF6] w-full max-w-md rounded-t-3xl sm:rounded-3xl p-5 space-y-3 max-h-[92vh] overflow-y-auto">
-            <div className="flex justify-between items-center">
-              <button onClick={() => setActiveModal(null)} className="p-1.5 rounded-lg bg-[#23154D] text-purple-300"><ArrowLeft className="w-5 h-5" /></button>
-              <h3 className="font-black text-white text-base">Retrait Crypto</h3>
-              <button onClick={() => setActiveModal(null)} className="p-1.5 rounded-lg bg-[#23154D] text-purple-300"><X className="w-5 h-5" /></button>
+              <div>
+                <label className="font-bold text-purple-300 block mb-1">
+                  TX Hash (Identifiant Transaction Blockchain) *
+                </label>
+                <input
+                  type="text"
+                  value={depositAccountInput}
+                  onChange={e => setDepositAccountInput(e.target.value)}
+                  placeholder="Collez votre TX Hash ici (ex: 0x9f8a... ou hash TRON)"
+                  className="w-full px-3 py-2.5 rounded-xl bg-[#150D2E] border-2 border-[#8B5CF6]/40 text-white font-mono"
+                />
+              </div>
+
+              <div>
+                <label className="font-bold text-purple-300 block mb-1">Note / Adresse expéditrice (optionnel)</label>
+                <input
+                  type="text"
+                  value={depositPreuveInput}
+                  onChange={e => setDepositPreuveInput(e.target.value)}
+                  placeholder="Optionnel"
+                  className="w-full px-3 py-2.5 rounded-xl bg-[#150D2E] border border-[#8B5CF6]/40 text-white"
+                />
+              </div>
             </div>
-            <div>
-              <label className="text-xs font-bold text-purple-300 block mb-1">Adresse (SANS préfixe) :</label>
-              <input
-                type="text"
-                value={withdrawAddress}
-                onChange={e => setWithdrawAddress(sanitizeAddress(e.target.value))}
-                placeholder="Ex: 0x..., bc1q..."
-                className="w-full px-3 py-2 rounded-xl bg-[#150D2E] border-2 border-[#8B5CF6]/40 text-white font-mono text-xs"
-              />
-            </div>
-            <div>
-              <label className="text-xs font-bold text-purple-300 block mb-1">Montant :</label>
-              <input
-                type="number"
-                value={withdrawAmount}
-                onChange={e => setWithdrawAmount(Number(e.target.value))}
-                className="w-full px-3 py-2 rounded-xl bg-[#150D2E] border-2 border-[#8B5CF6]/40 text-white font-mono text-xs"
-              />
-            </div>
+
             <button
-              onClick={() => {
-                setActiveModal(null);
-                showToast('Demande de retrait enregistrée avec succès');
-              }}
-              className="w-full py-3 rounded-xl bg-gradient-to-r from-[#7C3AED] to-[#8B5CF6] text-white font-bold text-xs"
+              type="button"
+              disabled={depositSubmitting}
+              onClick={handleConfirmDepositRequest}
+              className="w-full py-3.5 rounded-xl bg-gradient-to-r from-emerald-600 to-emerald-500 text-white text-xs font-black shadow disabled:opacity-60"
             >
-              Confirmer Retrait
+              {depositSubmitting ? 'Envoi en cours...' : 'Envoyer la demande de dépôt Crypto'}
             </button>
           </div>
         </div>
       )}
 
-      {/* TRANSFERT */}
-      {activeModal === 'transfer' && (
-        <div className="fixed inset-0 z-50 bg-black/85 backdrop-blur-sm flex items-end sm:items-center justify-center p-0 sm:p-4 animate-fadeIn">
+      {/* ========================================================
+          MODAL: CONVERTIR WALLET ⇄ COMPTE TRADE (0% FRAIS)
+         ======================================================== */}
+      {activeModal === 'convert' && (
+        <div className="fixed inset-0 z-50 bg-black/85 backdrop-blur-sm flex items-end sm:items-center justify-center p-0 sm:p-4">
           <div className="bg-[#1D1240] border-2 border-[#8B5CF6] w-full max-w-md rounded-t-3xl sm:rounded-3xl p-5 space-y-4">
             <div className="flex justify-between items-center">
-              <h3 className="font-black text-white text-base">Transfert Interne (0 Frais)</h3>
-              <button onClick={() => setActiveModal(null)} className="text-purple-300"><X className="w-5 h-5" /></button>
-            </div>
-            <div className="flex justify-between items-center p-3 rounded-2xl bg-[#150D2E] text-xs">
-              <span className="font-bold text-white">
-                {transferDirection === 'walletToTrading' ? 'Wallet → Trading' : 'Trading → Wallet'}
-              </span>
-              <button onClick={() => setTransferDirection(transferDirection === 'walletToTrading' ? 'tradingToWallet' : 'walletToTrading')} className="p-1.5 bg-[#7C3AED] text-white rounded-lg">
-                <ArrowRightLeft className="w-4 h-4" />
+              <button onClick={() => setActiveModal(null)} className="p-1.5 rounded-lg bg-[#23154D] text-purple-300">
+                <ArrowLeft className="w-5 h-5" />
+              </button>
+              <h3 className="font-black text-white text-base">Convertir Wallet ⇄ Compte Trade</h3>
+              <button onClick={() => setActiveModal(null)} className="p-1.5 rounded-lg bg-[#23154D] text-purple-300">
+                <X className="w-5 h-5" />
               </button>
             </div>
-            <input
-              type="number"
-              value={transferAmount}
-              onChange={e => setTransferAmount(Number(e.target.value))}
-              className="w-full px-3 py-2 rounded-xl bg-[#150D2E] border border-[#8B5CF6] text-white font-mono text-xs"
-            />
+
+            <div className="grid grid-cols-2 gap-2 text-xs">
+              <button
+                type="button"
+                onClick={() => setConvertDirection('WALLET_TO_TRADE')}
+                className={`p-3 rounded-2xl border-2 text-left transition ${
+                  convertDirection === 'WALLET_TO_TRADE'
+                    ? 'bg-[#251552] border-emerald-400 text-white'
+                    : 'bg-[#150D2E] border-purple-500/30 text-purple-300'
+                }`}
+              >
+                <span className="font-black block">Wallet → Trade</span>
+                <span className="text-[10px] opacity-85">Pour trader (Manuel/Bot)</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => setConvertDirection('TRADE_TO_WALLET')}
+                className={`p-3 rounded-2xl border-2 text-left transition ${
+                  convertDirection === 'TRADE_TO_WALLET'
+                    ? 'bg-[#251552] border-amber-400 text-white'
+                    : 'bg-[#150D2E] border-purple-500/30 text-purple-300'
+                }`}
+              >
+                <span className="font-black block">Trade → Wallet</span>
+                <span className="text-[10px] opacity-85">Pour retirer (Crypto)</span>
+              </button>
+            </div>
+
+            <div className="p-3 rounded-2xl bg-[#150D2E] border border-purple-500/30 space-y-1.5 text-xs">
+              <div className="flex justify-between">
+                <span className="text-purple-300">De ({convertDirection === 'WALLET_TO_TRADE' ? 'WALLET' : 'COMPTE TRADE'}) :</span>
+                <span className="font-mono font-black text-emerald-400">
+                  {Math.round(convertDirection === 'WALLET_TO_TRADE' ? soldeDisponibleAr : soldeCompteTradeAr).toLocaleString('fr-FR')} Ar
+                </span>
+              </div>
+              <div className="flex justify-between">
+                <span className="text-purple-300">Vers ({convertDirection === 'WALLET_TO_TRADE' ? 'COMPTE TRADE' : 'WALLET'}) :</span>
+                <span className="font-mono font-bold text-white">
+                  {Math.round(convertDirection === 'WALLET_TO_TRADE' ? soldeCompteTradeAr : soldeDisponibleAr).toLocaleString('fr-FR')} Ar
+                </span>
+              </div>
+            </div>
+
+            <div className="space-y-2 text-xs">
+              <label className="font-bold text-purple-300 block">Montant à transférer (Ar) *</label>
+              <input
+                type="text"
+                inputMode="numeric"
+                value={convertAmountInput}
+                onChange={e => setConvertAmountInput(e.target.value.replace(/[^0-9]/g, ''))}
+                placeholder="Ex: 10000"
+                className="w-full px-3 py-2.5 rounded-xl bg-[#150D2E] border-2 border-[#8B5CF6]/50 text-white font-mono font-black text-sm"
+              />
+              <div className="grid grid-cols-4 gap-1.5">
+                {[25, 50, 75, 100].map(pct => (
+                  <button
+                    key={pct}
+                    type="button"
+                    onClick={() => {
+                      const maxAvail = convertDirection === 'WALLET_TO_TRADE' ? soldeDisponibleAr : soldeCompteTradeAr;
+                      setConvertAmountInput(String(Math.floor((maxAvail * pct) / 100)));
+                    }}
+                    className="py-1.5 rounded-lg bg-[#150D2E] border border-purple-500/30 text-[10px] font-mono font-bold text-purple-200"
+                  >
+                    {pct === 100 ? 'MAX' : `${pct}%`}
+                  </button>
+                ))}
+              </div>
+              <div className="flex justify-between text-[11px] font-mono text-emerald-400 pt-1">
+                <span>Frais de transfert interne :</span>
+                <span className="font-black">0 Ar (Gratuit)</span>
+              </div>
+            </div>
+
             <button
-              onClick={() => {
-                if (transferDirection === 'walletToTrading') {
-                  setWalletBalanceUsd(prev => prev - transferAmount);
-                  setTradingBalanceUsd(prev => prev + transferAmount);
-                } else {
-                  setTradingBalanceUsd(prev => prev - transferAmount);
-                  setWalletBalanceUsd(prev => prev + transferAmount);
-                }
-                setActiveModal(null);
-                showToast('Transfert interne réalisé avec succès');
-              }}
-              className="w-full py-3 rounded-xl bg-amber-600 text-white font-bold text-xs"
+              type="button"
+              disabled={convertSubmitting}
+              onClick={handleConfirmConvertWalletTrade}
+              className="w-full py-3.5 rounded-xl bg-gradient-to-r from-[#7C3AED] to-[#8B5CF6] text-white font-black text-xs shadow disabled:opacity-60"
             >
-              Transférer
+              {convertSubmitting ? 'Transfert en cours...' : 'Confirmer la Conversion'}
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* ========================================================
+          MODAL: RETRAIT CRYPTO UNIQUEMENT (50 COINS + 0.15% + FRAIS RÉSEAU)
+         ======================================================== */}
+      {activeModal === 'withdraw' && (
+        <div className="fixed inset-0 z-50 bg-black/85 backdrop-blur-sm flex items-end sm:items-center justify-center p-0 sm:p-4">
+          <div className="bg-[#1D1240] border-2 border-[#8B5CF6] w-full max-w-md rounded-t-3xl sm:rounded-3xl p-5 space-y-4 max-h-[92vh] overflow-y-auto">
+            <div className="flex justify-between items-center">
+              <button onClick={() => setActiveModal(null)} className="p-1.5 rounded-lg bg-[#23154D] text-purple-300">
+                <ArrowLeft className="w-5 h-5" />
+              </button>
+              <h3 className="font-black text-white text-base">Retrait Crypto SALOMA (WALLET)</h3>
+              <button onClick={() => setActiveModal(null)} className="p-1.5 rounded-lg bg-[#23154D] text-purple-300">
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <div className="p-3 rounded-xl bg-[#150D2E] border border-purple-500/30 flex justify-between text-xs">
+              <span className="text-purple-300">Solde WALLET retirable :</span>
+              <span className="font-mono font-black text-emerald-400">
+                {(coinsJson[selectedWalletCoin.symbol.toUpperCase()] || 0).toFixed(6)} {selectedWalletCoin.symbol} ({Math.round(soldeDisponibleAr).toLocaleString('fr-FR')} Ar)
+              </span>
+            </div>
+
+            {renderWalletCoinChainNetworkSelector()}
+
+            <div className="space-y-3 text-xs">
+              <div>
+                <label className="font-bold text-purple-300 block mb-1">
+                  Montant à retirer ({selectedWalletCoin.symbol}) *
+                </label>
+                <div className="relative">
+                  <input
+                    type="text"
+                    inputMode="decimal"
+                    value={withdrawAmountInput}
+                    onChange={e => setWithdrawAmountInput(e.target.value.replace(/[^0-9.]/g, ''))}
+                    placeholder={`Min: ${activeNetwork.minWithdraw} ${selectedWalletCoin.symbol}`}
+                    className="w-full px-3 py-2.5 pr-16 rounded-xl bg-[#150D2E] border-2 border-[#8B5CF6]/40 text-white font-mono font-bold"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const coinSym = selectedWalletCoin.symbol.toUpperCase();
+                      const coinBal = coinsJson[coinSym] || 0;
+                      if (coinBal > 0) {
+                        setWithdrawAmountInput(String(coinBal));
+                      } else {
+                        const cPrice = selectedWalletCoin.price || 1;
+                        const maxEquiv = soldeDisponibleAr / (cPrice * USD_TO_MGA);
+                        setWithdrawAmountInput(maxEquiv > 0 ? maxEquiv.toFixed(6) : '0');
+                      }
+                    }}
+                    className="absolute right-1.5 top-1.5 px-2.5 py-1 rounded-lg bg-[#7C3AED] text-white text-[10px] font-black"
+                  >
+                    MAX
+                  </button>
+                </div>
+              </div>
+
+              <div>
+                <label className="font-bold text-purple-300 block mb-1">
+                  Adresse de réception {selectedWalletCoin.symbol} ({activeBlockchain} • {activeNetworkLabel}) *
+                </label>
+                <input
+                  type="text"
+                  value={withdrawAccountInput}
+                  onChange={e => setWithdrawAccountInput(e.target.value)}
+                  placeholder={`Entrez votre adresse ${activeBlockchain} (${activeNetworkLabel})...`}
+                  className="w-full px-3 py-2.5 rounded-xl bg-[#150D2E] border-2 border-[#8B5CF6]/40 text-white font-mono"
+                />
+              </div>
+
+              {/* RETRAIT SEUL = 0.15% SALOMA + FRAIS RÉSEAU AFFICHÉS CLAIREMENT */}
+              {(() => {
+                const amt = parseFloat(withdrawAmountInput) || 0;
+                const salomaFee = amt * 0.0015;
+                const netFee = activeNetwork.withdrawFee;
+                const totalFrais = salomaFee + netFee;
+                const netRec = Math.max(0, amt - totalFrais);
+                return (
+                  <div className="p-3 rounded-xl bg-[#100926] border border-amber-500/40 space-y-1.5 text-[11px]">
+                    <div className="flex justify-between text-purple-300">
+                      <span>Chaîne / Réseau sélectionné :</span>
+                      <span className="font-bold text-emerald-300">
+                        {activeBlockchain} • {activeNetworkLabel}
+                      </span>
+                    </div>
+                    <div className="flex justify-between text-purple-300">
+                      <span>Frais SALOMA Retrait (0.15%) :</span>
+                      <span className="font-mono font-bold text-amber-300">
+                        {salomaFee.toFixed(6)} {selectedWalletCoin.symbol}
+                      </span>
+                    </div>
+                    <div className="flex justify-between text-purple-300">
+                      <span>Frais réseau ({activeNetworkLabel}) :</span>
+                      <span className="font-mono font-black text-amber-300">
+                        {netFee} {selectedWalletCoin.symbol}
+                      </span>
+                    </div>
+                    <div className="flex justify-between pt-1 border-t border-purple-500/20 font-bold">
+                      <span className="text-white">Montant net reçu :</span>
+                      <span className="font-mono text-emerald-400">
+                        {netRec.toFixed(6)} {selectedWalletCoin.symbol}
+                      </span>
+                    </div>
+                  </div>
+                );
+              })()}
+            </div>
+
+            <TurnstileWidget
+              siteKey={turnstileSiteKey}
+              token={withdrawTurnstileToken}
+              resetKey={withdrawTurnstileReset}
+              onVerify={setWithdrawTurnstileToken}
+              onExpire={() => setWithdrawTurnstileToken('')}
+            />
+
+            <button
+              type="button"
+              disabled={withdrawSubmitting || !withdrawTurnstileToken}
+              onClick={handleConfirmWithdraw}
+              className="w-full py-3.5 rounded-xl bg-gradient-to-r from-[#7C3AED] to-[#8B5CF6] text-white font-black text-xs shadow disabled:opacity-45 disabled:cursor-not-allowed transition"
+            >
+              {withdrawSubmitting
+                ? 'Traitement...'
+                : !withdrawTurnstileToken
+                ? 'Validez Cloudflare pour Retirer'
+                : 'Confirmer et Envoyer le Retrait Crypto'}
             </button>
           </div>
         </div>
@@ -1976,144 +5361,317 @@ export default function App() {
 
       {/* KYC */}
       {activeModal === 'kyc' && (
-        <div className="fixed inset-0 z-50 bg-black/85 backdrop-blur-sm flex items-end sm:items-center justify-center p-0 sm:p-4 animate-fadeIn">
-          <div className="bg-[#1D1240] border-2 border-[#8B5CF6] w-full max-w-md rounded-t-3xl sm:rounded-3xl p-5 space-y-3">
+        <div className="fixed inset-0 z-50 bg-black/85 backdrop-blur-sm flex items-end sm:items-center justify-center p-0 sm:p-4">
+          <div className="bg-[#1D1240] border-2 border-[#8B5CF6] w-full max-w-md rounded-t-3xl sm:rounded-3xl p-5 space-y-3 max-h-[90vh] overflow-y-auto">
             <div className="flex justify-between items-center">
               <h3 className="font-black text-white text-base">Vérification KYC</h3>
-              <button onClick={() => setActiveModal(null)} className="text-purple-300"><X className="w-5 h-5" /></button>
+              <button onClick={() => setActiveModal(null)} className="text-purple-300">
+                <X className="w-5 h-5" />
+              </button>
             </div>
-            <div className="p-3 rounded-xl bg-[#150D2E] text-xs space-y-1">
-              <div className="flex justify-between font-bold text-white">
-                <span>Niveau 1: Selfie</span>
-                <span className="text-emerald-400">✓ Validé</span>
-              </div>
+            <div className="p-3 rounded-xl bg-[#150D2E] text-xs flex justify-between font-bold text-white">
+              <span>KYC Niveau 1 : Email vérifié</span>
+              <span className="text-emerald-400">✓ Auto-validé</span>
             </div>
-            <div className="p-3 rounded-xl bg-[#150D2E] text-xs space-y-2">
-              <div className="flex justify-between font-bold text-white">
-                <span>Niveau 2: CIN + Adresse</span>
-                <span className={user.kycLevel === 2 ? 'text-emerald-400' : 'text-amber-400'}>
-                  {user.kycLevel === 2 ? '✓ Validé' : 'À compléter'}
+
+            <div className="p-3.5 rounded-xl bg-[#150D2E] text-xs space-y-3 border border-[#8B5CF6]/30">
+              <div className="flex justify-between items-center font-bold text-white">
+                <span>KYC Niveau 2 : Pièces d&apos;identité</span>
+                <span
+                  className={
+                    (userRow?.kyc_level ?? 0) >= 2 || userRow?.kyc_statut === 'valide'
+                      ? 'text-emerald-400'
+                      : userRow?.kyc_statut === 'en_attente'
+                      ? 'text-amber-400'
+                      : userRow?.kyc_statut === 'refuse'
+                      ? 'text-rose-400'
+                      : 'text-purple-300'
+                  }
+                >
+                  {(userRow?.kyc_level ?? 0) >= 2 || userRow?.kyc_statut === 'valide'
+                    ? '✓ Validé'
+                    : userRow?.kyc_statut === 'en_attente'
+                    ? '⏳ En attente Admin'
+                    : userRow?.kyc_statut === 'refuse'
+                    ? '✕ Refusé'
+                    : 'À compléter'}
                 </span>
               </div>
-              {user.kycLevel !== 2 && (
-                <button onClick={() => {
-                  setUser({ ...user, kycLevel: 2 });
-                  showToast('KYC Niveau 2 Validé !');
-                }} className="w-full py-2 bg-[#7C3AED] text-white rounded-lg font-bold">
-                  Valider Niveau 2
-                </button>
+
+              {(userRow?.kyc_level ?? 0) >= 2 || userRow?.kyc_statut === 'valide' ? (
+                <div className="space-y-1.5 text-[11px] bg-[#1D1240] p-3 rounded-xl border border-emerald-500/30">
+                  <div className="flex justify-between text-purple-300">
+                    <span>CIN :</span>
+                    <span className="font-mono font-bold text-white">{userRow?.kyc_cin || '---'}</span>
+                  </div>
+                  <div className="flex justify-between text-purple-300">
+                    <span>Adresse :</span>
+                    <span className="font-bold text-white text-right max-w-[65%]">{userRow?.kyc_adresse || '---'}</span>
+                  </div>
+                  <div className="flex justify-between text-purple-300">
+                    <span>Code Postal :</span>
+                    <span className="font-mono font-bold text-white">{userRow?.kyc_code_postal || '---'}</span>
+                  </div>
+                </div>
+              ) : (
+                <form onSubmit={handleValidateKyc} className="space-y-2.5">
+                  <div>
+                    <label className="text-[10px] font-bold text-purple-300 block mb-1">Numéro CIN</label>
+                    <input
+                      type="text"
+                      required
+                      value={kycCinInput}
+                      onChange={e => setKycCinInput(e.target.value)}
+                      placeholder="Ex: 101 241 058 920"
+                      className="w-full px-3 py-2 rounded-xl bg-[#1D1240] border border-[#8B5CF6]/50 text-white font-mono text-xs focus:outline-none focus:border-[#8B5CF6]"
+                    />
+                  </div>
+                  <div>
+                    <label className="text-[10px] font-bold text-purple-300 block mb-1">Adresse complète</label>
+                    <input
+                      type="text"
+                      required
+                      value={kycAdresseInput}
+                      onChange={e => setKycAdresseInput(e.target.value)}
+                      placeholder="Ex: Lot II M 45 Antananarivo"
+                      className="w-full px-3 py-2 rounded-xl bg-[#1D1240] border border-[#8B5CF6]/50 text-white text-xs focus:outline-none focus:border-[#8B5CF6]"
+                    />
+                  </div>
+                  <div>
+                    <label className="text-[10px] font-bold text-purple-300 block mb-1">Code Postal</label>
+                    <input
+                      type="text"
+                      required
+                      value={kycCodePostalInput}
+                      onChange={e => setKycCodePostalInput(e.target.value)}
+                      placeholder="Ex: 101"
+                      className="w-full px-3 py-2 rounded-xl bg-[#1D1240] border border-[#8B5CF6]/50 text-white font-mono text-xs focus:outline-none focus:border-[#8B5CF6]"
+                    />
+                  </div>
+                  <button
+                    type="submit"
+                    disabled={kycSubmitting}
+                    className="w-full py-2.5 bg-gradient-to-r from-[#7C3AED] to-[#8B5CF6] text-white rounded-xl font-black text-xs disabled:opacity-50"
+                  >
+                    {kycSubmitting
+                      ? 'Envoi en cours...'
+                      : userRow?.kyc_statut === 'en_attente'
+                      ? 'Mettre à jour & Renvoyer KYC'
+                      : 'Envoyer KYC Niveau 2'}
+                  </button>
+                </form>
               )}
             </div>
+
+            <button
+              onClick={() => setActiveModal('reportProblem')}
+              className="w-full py-2.5 rounded-xl bg-amber-500/20 border border-amber-400/50 text-amber-200 font-bold text-xs flex items-center justify-center gap-1.5"
+            >
+              <AlertTriangle className="w-4 h-4 text-amber-400" />
+              <span>Signaler problème</span>
+            </button>
           </div>
         </div>
       )}
 
       {/* GUIDE */}
       {activeModal === 'guide' && (
-        <div className="fixed inset-0 z-50 bg-black/85 backdrop-blur-sm flex items-end sm:items-center justify-center p-0 sm:p-4 animate-fadeIn">
+        <div className="fixed inset-0 z-50 bg-black/85 backdrop-blur-sm flex items-end sm:items-center justify-center p-0 sm:p-4">
           <div className="bg-[#1D1240] border-2 border-[#8B5CF6] w-full max-w-md rounded-t-3xl sm:rounded-3xl p-5 space-y-3">
             <div className="flex justify-between items-center">
               <h3 className="font-black text-white text-base">Mode d'emploi (Torolalana)</h3>
-              <button onClick={() => setActiveModal(null)} className="text-purple-300"><X className="w-5 h-5" /></button>
+              <button onClick={() => setActiveModal(null)} className="text-purple-300">
+                <X className="w-5 h-5" />
+              </button>
             </div>
-            <div className="text-xs text-purple-200 space-y-2">
-              <p>• <strong>Spot vs Levier</strong> : Ao amin'ny SPOT dia varotra mahazatra. Ao amin'ny Levier (x1 hatramin'ny x500) dia ampitomboina ny tombony sy ny risika.</p>
-              <p>• <strong>Dépôt</strong> : Fidio ny réseau mifanaraka aminy.</p>
+            <div className="text-xs text-purple-200 space-y-2 leading-relaxed">
+              <p>• <strong>Portefeuille & Convertir</strong> : Gérez votre <strong>WALLET</strong> (dépôt/retrait Crypto uniquement) et votre <strong>COMPTE TRADE</strong>. Utilisez <strong>Convertir</strong> (0 Ar) pour transférer entre Wallet et Compte Trade.</p>
+              <p>• <strong>Trading (Broker Pur)</strong> : Manuel (Spot / Levier) ou Auto Stratégie (Spot Grid Bot / DCA Bot) en Marge Isolée individuelle. Frais SALOMA 0,1%.</p>
+              <p>• <strong>Échange</strong> : Convertissez Ar ⇄ Crypto ou Crypto ⇄ Crypto au taux SALOMA (frais 0,1%).</p>
+              <p>• <strong>Retrait Crypto</strong> : Frais SALOMA 0,15% + frais réseau affichés (USDT TRC20, BTC, ETH).</p>
             </div>
           </div>
         </div>
       )}
 
-      {/* PROFIL CLIENT (SANS CODE ADMIN) */}
+      {/* PROFIL CLIENT */}
       {activeModal === 'profile' && (
-        <div className="fixed inset-0 z-50 bg-black/85 backdrop-blur-sm flex items-end sm:items-center justify-center p-0 sm:p-4 animate-fadeIn">
+        <div className="fixed inset-0 z-50 bg-black/85 backdrop-blur-sm flex items-end sm:items-center justify-center p-0 sm:p-4">
           <div className="bg-[#1D1240] border-2 border-[#8B5CF6] w-full max-w-md rounded-t-3xl sm:rounded-3xl p-5 space-y-4">
             <div className="flex justify-between items-center">
               <h3 className="font-black text-white text-base">Profil Client</h3>
-              <button onClick={() => setActiveModal(null)} className="text-purple-300"><X className="w-5 h-5" /></button>
+              <button onClick={() => setActiveModal(null)} className="text-purple-300">
+                <X className="w-5 h-5" />
+              </button>
             </div>
             <div className="p-3.5 rounded-2xl bg-[#150D2E] text-xs space-y-2">
               <div className="flex justify-between text-purple-300">
-                <span>Nom client :</span>
-                <span className="font-bold text-white">{user.name}</span>
+                <span>Nom complet :</span>
+                <span className="font-bold text-white">
+                  {[userRow?.prenom, userRow?.nom].filter(Boolean).join(' ') || userRow?.name}
+                </span>
+              </div>
+              <div className="flex justify-between text-purple-300">
+                <span>Téléphone :</span>
+                <span className="font-mono text-white">{userRow?.telephone}</span>
               </div>
               <div className="flex justify-between text-purple-300">
                 <span>Email :</span>
-                <span className="font-mono text-purple-200">{user.email}</span>
+                <span className="font-mono text-purple-200">{userRow?.email}</span>
               </div>
               <div className="flex justify-between text-purple-300">
-                <span>Pays :</span>
-                <span className="text-white">{user.country}</span>
+                <span>Code parrainage :</span>
+                <span className="font-mono font-bold text-emerald-400">{userRow?.code_parrainage}</span>
               </div>
             </div>
             <div className="grid grid-cols-2 gap-2 text-xs">
-              <button onClick={() => setActiveModal('kyc')} className="p-2.5 rounded-xl bg-[#23154D] text-white font-bold flex items-center justify-center gap-1">
-                <ShieldCheck className="w-4 h-4 text-emerald-400" /> KYC
+              <button
+                onClick={() => setActiveModal('kyc')}
+                className="p-2.5 rounded-xl bg-[#23154D] text-white font-bold flex items-center justify-center gap-1"
+              >
+                <ShieldCheck className="w-4 h-4 text-emerald-400" /> KYC (N{userRow?.kyc_level ?? 0})
               </button>
-              <button onClick={() => setActiveModal('guide')} className="p-2.5 rounded-xl bg-[#23154D] text-white font-bold flex items-center justify-center gap-1">
+              <button
+                onClick={() => setActiveModal('guide')}
+                className="p-2.5 rounded-xl bg-[#23154D] text-white font-bold flex items-center justify-center gap-1"
+              >
                 <HelpCircle className="w-4 h-4 text-[#8B5CF6]" /> Mode d'emploi
               </button>
             </div>
+            <button
+              onClick={() => setActiveModal('reportProblem')}
+              className="w-full py-2.5 rounded-xl bg-amber-500/20 border border-amber-400/50 text-amber-200 text-xs font-black flex items-center justify-center gap-1.5"
+            >
+              <AlertTriangle className="w-4 h-4 text-amber-400" />
+              <span>Signaler problème</span>
+            </button>
             <PWAInstallButton />
             <button
-              onClick={() => {
-                setActiveModal(null);
-                setScreen('splash');
-                showToast('Déconnecté');
-              }}
-              className="w-full py-2.5 rounded-xl bg-rose-500/20 text-rose-300 text-xs font-bold"
+              onClick={handleLogout}
+              className="w-full py-2.5 rounded-xl bg-rose-500/20 text-rose-300 text-xs font-bold flex items-center justify-center gap-1.5"
             >
-              Se Déconnecter
+              <LogOut className="w-4 h-4" />
+              <span>Se Déconnecter</span>
             </button>
           </div>
         </div>
       )}
 
-      {/* MODAL: ADMIN UNLOCK (8 CHIFFRES) */}
+      {/* MODAL: SIGNALER PROBLÈME */}
+      {activeModal === 'reportProblem' && (
+        <div className="fixed inset-0 z-50 bg-black/85 backdrop-blur-sm flex items-end sm:items-center justify-center p-0 sm:p-4">
+          <div className="bg-[#1D1240] border-2 border-[#8B5CF6] w-full max-w-md rounded-t-3xl sm:rounded-3xl p-5 space-y-4 max-h-[90vh] overflow-y-auto">
+            <div className="flex justify-between items-center">
+              <div className="flex items-center gap-2">
+                <AlertTriangle className="w-5 h-5 text-amber-400" />
+                <h3 className="font-black text-white text-base">Signaler problème</h3>
+              </div>
+              <button onClick={() => setActiveModal(null)} className="text-purple-300">
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <div className="space-y-2">
+              <label className="text-xs font-bold text-purple-200 block">
+                Décrivez votre problème (Soraty eto ny olana) :
+              </label>
+              <textarea
+                rows={4}
+                value={problemInput}
+                onChange={e => setProblemInput(e.target.value)}
+                placeholder="Écrivez votre problème ici (dépôt, retrait, KYC, trading...)"
+                className="w-full p-3 rounded-xl bg-[#150D2E] border-2 border-[#8B5CF6]/50 text-white text-xs focus:outline-none focus:border-[#8B5CF6] resize-none"
+              />
+              <button
+                type="button"
+                disabled={problemSubmitting}
+                onClick={handleSubmitProblem}
+                className="w-full py-3 rounded-xl bg-gradient-to-r from-[#7C3AED] to-[#8B5CF6] text-white font-black text-xs flex items-center justify-center gap-1.5 disabled:opacity-50"
+              >
+                <Send className="w-4 h-4" />
+                <span>{problemSubmitting ? 'Envoi...' : 'Envoyer le problème'}</span>
+              </button>
+            </div>
+
+            <div className="p-3.5 rounded-2xl bg-emerald-950/30 border border-emerald-500/40 space-y-2.5">
+              <div className="flex items-center gap-2 text-xs font-bold text-emerald-300">
+                <MessageSquare className="w-4 h-4 shrink-0" />
+                <span>Vous pouvez nous parler directement</span>
+              </div>
+              <div className="flex items-center justify-between gap-2 bg-[#150D2E] p-2.5 rounded-xl border border-emerald-500/30">
+                <div className="flex items-center gap-2">
+                  <Phone className="w-4 h-4 text-emerald-400 shrink-0" />
+                  <div>
+                    <span className="text-[10px] text-purple-300 block">WhatsApp SALOMA</span>
+                    <span className="text-sm font-mono font-black text-white">0386340354</span>
+                  </div>
+                </div>
+                <div className="flex items-center gap-1.5">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      navigator.clipboard?.writeText('0386340354');
+                      setWhatsappCopied(true);
+                      setTimeout(() => setWhatsappCopied(false), 2000);
+                    }}
+                    className="px-2.5 py-1.5 rounded-lg bg-[#23154D] text-purple-200 text-[10px] font-bold flex items-center gap-1"
+                  >
+                    {whatsappCopied ? <Check className="w-3 h-3 text-emerald-400" /> : <Copy className="w-3 h-3" />}
+                    <span>{whatsappCopied ? 'Copied' : 'Copie'}</span>
+                  </button>
+                  <a
+                    href="https://wa.me/261386340354"
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="px-3 py-1.5 rounded-lg bg-emerald-600 text-white text-[10px] font-black"
+                  >
+                    WhatsApp
+                  </a>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* MODAL: ADMIN UNLOCK */}
       {activeModal === 'adminUnlock' && (
-        <div className="fixed inset-0 z-50 bg-black/90 backdrop-blur-md flex items-center justify-center p-4 animate-fadeIn">
+        <div className="fixed inset-0 z-50 bg-black/90 backdrop-blur-md flex items-center justify-center p-4">
           <div className="bg-[#1D1240] border-2 border-[#8B5CF6] shadow-[0_0_40px_rgba(139,92,246,0.8)] w-full max-w-sm rounded-3xl p-5 space-y-4">
             <div className="flex justify-between items-center">
               <div className="flex items-center gap-2">
                 <Lock className="w-5 h-5 text-amber-400" />
                 <h3 className="font-black text-white text-base">Entrée Administrateur</h3>
               </div>
-              <button onClick={() => setActiveModal(null)} className="text-purple-300"><X className="w-5 h-5" /></button>
+              <button onClick={() => setActiveModal(null)} className="text-purple-300">
+                <X className="w-5 h-5" />
+              </button>
             </div>
-
             {adminUnlockError && (
               <div className="p-2.5 rounded-xl bg-rose-500/20 border border-rose-500/40 text-rose-300 text-xs font-bold">
                 {adminUnlockError}
               </div>
             )}
-
             <div className="space-y-3">
-              <div>
-                <label className="text-xs font-bold text-purple-300 block mb-1">Nouveau code 8 chiffres :</label>
-                <input
-                  type="password"
-                  maxLength={8}
-                  placeholder="88888888"
-                  value={adminUnlockInput1}
-                  onChange={e => setAdminUnlockInput1(e.target.value)}
-                  className="w-full px-3 py-2 rounded-xl bg-[#150D2E] border-2 border-[#8B5CF6]/50 text-white font-mono text-center tracking-widest text-lg font-bold"
-                />
-              </div>
-              <div>
-                <label className="text-xs font-bold text-purple-300 block mb-1">Confirmer code 8 chiffres :</label>
-                <input
-                  type="password"
-                  maxLength={8}
-                  placeholder="88888888"
-                  value={adminUnlockInput2}
-                  onChange={e => setAdminUnlockInput2(e.target.value)}
-                  className="w-full px-3 py-2 rounded-xl bg-[#150D2E] border-2 border-[#8B5CF6]/50 text-white font-mono text-center tracking-widest text-lg font-bold"
-                />
-              </div>
-
+              <input
+                type="password"
+                maxLength={8}
+                placeholder="Code 8 chiffres"
+                value={adminUnlockInput1}
+                onChange={e => setAdminUnlockInput1(e.target.value)}
+                className="w-full px-3 py-2 rounded-xl bg-[#150D2E] border-2 border-[#8B5CF6]/50 text-white font-mono text-center tracking-widest text-lg font-bold"
+              />
+              <input
+                type="password"
+                maxLength={8}
+                placeholder="Confirmer 8 chiffres"
+                value={adminUnlockInput2}
+                onChange={e => setAdminUnlockInput2(e.target.value)}
+                className="w-full px-3 py-2 rounded-xl bg-[#150D2E] border-2 border-[#8B5CF6]/50 text-white font-mono text-center tracking-widest text-lg font-bold"
+              />
               <button
                 onClick={handleAdminUnlock}
-                className="w-full py-3.5 rounded-xl bg-gradient-to-r from-[#7C3AED] to-[#8B5CF6] text-white font-black text-xs shadow"
+                className="w-full py-3.5 rounded-xl bg-gradient-to-r from-[#7C3AED] to-[#8B5CF6] text-white font-black text-xs"
               >
                 Déverrouiller l'Administration
               </button>
@@ -2123,354 +5681,955 @@ export default function App() {
       )}
 
       {/* ========================================================
-          MODIFS 1, 2, 3, 4: APP ADMIN AVEC MENUS SÉPARÉS
+          MODAL: CONFIRMATION SUPPRESSION COMPLÈTE HISTORIQUE
+         ======================================================== */}
+      {clearHistoryTarget && (
+        <div className="fixed inset-0 z-50 bg-black/85 backdrop-blur-sm flex items-center justify-center p-4">
+          <div className="bg-[#1D1240] border-2 border-rose-500/70 w-full max-w-sm rounded-3xl p-5 space-y-4 shadow-2xl">
+            <div className="flex justify-between items-center">
+              <div className="flex items-center gap-2">
+                <div className="w-8 h-8 rounded-xl bg-rose-500/20 border border-rose-500/40 flex items-center justify-center text-rose-400">
+                  <Trash2 className="w-4 h-4" />
+                </div>
+                <h3 className="font-black text-white text-sm">
+                  {clearHistoryTarget === 'trade'
+                    ? 'Tout supprimer — Historique Trade'
+                    : clearHistoryTarget === 'wallet'
+                    ? 'Tout supprimer — Historique Portefeuille'
+                    : 'Tout supprimer — Historique Earn'}
+                </h3>
+              </div>
+              <button
+                type="button"
+                disabled={clearHistorySubmitting}
+                onClick={() => setClearHistoryTarget(null)}
+                className="p-1.5 rounded-lg bg-[#23154D] text-purple-300 disabled:opacity-50"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <div className="p-3 rounded-2xl bg-[#150D2E] border border-rose-500/30 text-xs text-purple-200 leading-relaxed space-y-1.5">
+              <p>
+                Voulez-vous vraiment supprimer définitivement{' '}
+                <strong className="text-white">
+                  {clearHistoryTarget === 'trade'
+                    ? `tout l'historique des ordres (${closedTrades.length})`
+                    : clearHistoryTarget === 'wallet'
+                    ? `tout l'historique Portefeuille (${depotsRetraitsList.length})`
+                    : `tout l'historique Earn (${earnList.length})`}
+                </strong>{' '}
+                ?
+              </p>
+              <p className="text-[11px] text-purple-400">
+                Cette action est irréversible. Vos soldes actuels ne seront pas modifiés.
+              </p>
+              {clearHistoryTarget === 'wallet' && depotsRetraitsList.some(tx => tx.statut === 'en_attente') && (
+                <p className="text-[11px] text-amber-300 font-bold">
+                  Note : les demandes encore en attente de validation restent conservées.
+                </p>
+              )}
+              {clearHistoryTarget === 'trade' && activeTrades.length > 0 && (
+                <p className="text-[11px] text-amber-300 font-bold">
+                  Note : vos positions actuellement ouvertes restent actives.
+                </p>
+              )}
+            </div>
+
+            <div className="grid grid-cols-2 gap-2.5 text-xs">
+              <button
+                type="button"
+                disabled={clearHistorySubmitting}
+                onClick={() => setClearHistoryTarget(null)}
+                className="py-3 rounded-xl bg-[#150D2E] border border-purple-500/40 text-purple-200 font-bold disabled:opacity-50"
+              >
+                Annuler
+              </button>
+              <button
+                type="button"
+                disabled={clearHistorySubmitting}
+                onClick={handleConfirmClearHistory}
+                className="py-3 rounded-xl bg-gradient-to-r from-rose-600 to-rose-500 text-white font-black shadow disabled:opacity-60"
+              >
+                {clearHistorySubmitting ? 'Suppression...' : 'Oui, tout supprimer'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ========================================================
+          APP ADMIN (DONNÉES RÉELLES APPWRITE)
          ======================================================== */}
       {screen === 'admin' && (
-        <div className="min-h-screen p-4 max-w-md mx-auto w-full z-10 flex flex-col space-y-4 animate-fadeIn pb-12">
-          {/* Admin Header */}
-          <div className="flex justify-between items-center bg-[#1D1240] p-3 rounded-2xl border-2 border-[#8B5CF6]/50 shadow-[0_0_20px_rgba(124,58,237,0.3)]">
+        <div className="min-h-screen p-4 max-w-md mx-auto w-full z-10 flex flex-col space-y-4 pb-12">
+          <div className="flex justify-between items-center bg-[#1D1240] p-3 rounded-2xl border-2 border-[#8B5CF6]/50">
             <div className="flex items-center gap-2">
               <div className="w-8 h-8 rounded-xl bg-[#7C3AED] flex items-center justify-center text-white font-black text-xs">
                 ADM
               </div>
               <div>
                 <h2 className="font-black text-white text-sm">Panneau Admin SALOMA</h2>
-                <span className="text-[10px] text-emerald-400 font-mono">● Connecté</span>
+                <span className="text-[10px] text-emerald-400 font-mono">
+                  {adminUsers.length} clients inscrits • {adminRealStats.pendingDeposits} en attente
+                </span>
               </div>
             </div>
-            <button onClick={() => setScreen('main')} className="px-3 py-1.5 rounded-xl bg-[#150D2E] text-purple-200 border border-purple-500/30 text-xs font-bold">
-              Retour Client
-            </button>
+            <div className="flex items-center gap-1.5">
+              <button
+                onClick={() =>
+                  fetchAdminOverview(adminPin)
+                    .then(() => showToast('Données Admin actualisées'))
+                    .catch(err => showToast(err instanceof Error ? err.message : 'Erreur chargement Admin.'))
+                }
+                className="p-1.5 rounded-xl bg-[#23154D] text-emerald-300 border border-emerald-500/30"
+              >
+                <RefreshCw className={`w-4 h-4 ${adminLoading ? 'animate-spin' : ''}`} />
+              </button>
+              <button
+                onClick={() => setScreen(sessionToken ? 'main' : 'splash')}
+                className="px-3 py-1.5 rounded-xl bg-[#150D2E] text-purple-200 border border-purple-500/30 text-xs font-bold"
+              >
+                Retour
+              </button>
+            </div>
           </div>
 
-          {/* Modif 1: MENUS SÉPARÉS DANS L'APP ADMIN */}
-          <div className="grid grid-cols-4 gap-1 bg-[#190E38] p-1 rounded-2xl border border-purple-500/30 text-center text-xs">
-            <button
-              onClick={() => setAdminTab('overview')}
-              className={`py-2 rounded-xl font-bold transition text-[11px] ${
-                adminTab === 'overview' ? 'bg-[#7C3AED] text-white shadow' : 'text-purple-300 hover:text-white'
-              }`}
-            >
-              Clients
-            </button>
-            <button
-              onClick={() => setAdminTab('trading')}
-              className={`py-2 rounded-xl font-bold transition text-[11px] ${
-                adminTab === 'trading' ? 'bg-[#7C3AED] text-white shadow' : 'text-purple-300 hover:text-white'
-              }`}
-            >
-              Trading
-            </button>
-            <button
-              onClick={() => setAdminTab('wallet')}
-              className={`py-2 rounded-xl font-bold transition text-[11px] ${
-                adminTab === 'wallet' ? 'bg-[#7C3AED] text-white shadow' : 'text-purple-300 hover:text-white'
-              }`}
-            >
-              Portefeuille
-            </button>
-            <button
-              onClick={() => setAdminTab('security')}
-              className={`py-2 rounded-xl font-bold transition text-[11px] ${
-                adminTab === 'security' ? 'bg-[#7C3AED] text-white shadow' : 'text-purple-300 hover:text-white'
-              }`}
-            >
-              Code PIN
-            </button>
+          <div className="p-3.5 rounded-2xl bg-[#190F38] border-2 border-[#8B5CF6]/70 space-y-2">
+            <div className="flex justify-between items-center text-xs">
+              <span className="font-black text-white">Activité Réelle Trades ({adminTrades.length})</span>
+              <span className="font-mono font-bold text-emerald-300 text-[11px]">
+                <Users className="w-3.5 h-3.5 inline mr-1" />
+                {adminUsers.length} Clients
+              </span>
+            </div>
+            <div className="flex justify-between items-center text-sm font-black font-mono">
+              <span className="text-emerald-400">BUY {realBuyPercent}%</span>
+              <span className="text-rose-400">SELL {100 - realBuyPercent}%</span>
+            </div>
+            <div className="h-3 w-full rounded-full overflow-hidden flex bg-[#100926]">
+              <div className="bg-emerald-500" style={{ width: `${realBuyPercent}%` }} />
+              <div className="bg-rose-500" style={{ width: `${100 - realBuyPercent}%` }} />
+            </div>
           </div>
 
-          {/* ADMIN TAB 1: OVERVIEW & CLIENTS (Modif 2: Filtre "Clients avec problème") */}
-          {adminTab === 'overview' && (
-            <div className="space-y-4">
-              {/* Profit Table */}
-              <div className="p-4 rounded-3xl bg-gradient-to-br from-[#2D165A] via-[#1D1240] to-[#150D2E] border-2 border-emerald-500/50 shadow space-y-2">
-                <div className="flex justify-between items-center text-xs">
-                  <span className="font-black text-white flex items-center gap-1.5"><TrendingUp className="w-4 h-4 text-emerald-400" /> Total Profit des Frais</span>
-                  <span className="text-base font-black text-emerald-400 font-mono">${adminProfits.totalProfit.toLocaleString()}</span>
-                </div>
-                <div className="grid grid-cols-3 gap-1 text-[11px] font-mono text-center">
-                  <div className="bg-[#150D2E] p-1.5 rounded-lg">Trade: ${adminProfits.tradingFees.toFixed(0)}</div>
-                  <div className="bg-[#150D2E] p-1.5 rounded-lg">Swap: ${adminProfits.exchangeFees.toFixed(0)}</div>
-                  <div className="bg-[#150D2E] p-1.5 rounded-lg">Retrait: ${adminProfits.withdrawalFees.toFixed(0)}</div>
-                </div>
-              </div>
+          <div className="grid grid-cols-4 gap-1 bg-[#190E38] p-1 rounded-2xl border border-purple-500/30 text-center text-[10px]">
+            {(
+              [
+                ['overview', 'Clients'],
+                ['kyc', 'KYC Client'],
+                ['profit', 'Profit'],
+                ['trading', 'Trades'],
+                ['wallet', 'Dépôts'],
+                ['apis', 'APIs'],
+                ['security', 'Sécu']
+              ] as const
+            ).map(([id, label]) => {
+              const pendingKycCount =
+                id === 'kyc'
+                  ? adminUsers.filter(u => u.kyc_statut === 'en_attente').length
+                  : 0;
+              return (
+                <button
+                  key={id}
+                  onClick={() => setAdminTab(id)}
+                  className={`py-2 px-1 rounded-xl font-bold transition relative flex items-center justify-center gap-1 ${
+                    adminTab === id ? 'bg-[#7C3AED] text-white shadow' : 'text-purple-300'
+                  }`}
+                >
+                  <span>{label}</span>
+                  {pendingKycCount > 0 && (
+                    <span className="px-1.5 py-0.2 rounded-full bg-amber-500 text-black text-[9px] font-black leading-tight">
+                      {pendingKycCount}
+                    </span>
+                  )}
+                </button>
+              );
+            })}
+          </div>
 
-              {/* Modif 2: LISTE CLIENTS AVEC FILTRE "CLIENTS AVEC PROBLÈME" */}
-              <div className="p-3.5 rounded-2xl bg-[#1D1240] border-2 border-[#8B5CF6]/50 space-y-2.5">
-                <div className="flex justify-between items-center">
-                  <span className="text-xs font-black text-white">Liste des Clients ({filteredClients.length})</span>
-                  {/* Modif 2: Bouton Filtre en haut */}
-                  <button
-                    onClick={() => setFilterOnlyProblems(!filterOnlyProblems)}
-                    className={`px-2.5 py-1 rounded-xl text-xs font-bold border transition ${
-                      filterOnlyProblems
-                        ? 'bg-rose-500 text-white border-rose-300 shadow'
-                        : 'bg-[#23154D] text-amber-300 border-amber-500/40'
-                    }`}
-                  >
-                    {filterOnlyProblems ? 'Afficher Tous' : '⚠️ Filtrer: Problèmes'}
-                  </button>
-                </div>
+          {adminTab === 'kyc' && (() => {
+            const kycClients = [...adminUsers]
+              .filter(
+                u =>
+                  Boolean(u.kyc_cin) ||
+                  Boolean(u.kyc_adresse) ||
+                  Boolean(u.kyc_code_postal) ||
+                  Boolean(u.kyc_statut) ||
+                  (u.kyc_level ?? 0) >= 1
+              )
+              .sort((a, b) => {
+                const rank = (u: AppwriteUserRow) =>
+                  u.kyc_statut === 'en_attente' ? 0 : u.kyc_statut === 'refuse' ? 1 : 2;
+                return rank(a) - rank(b);
+              });
 
-                <div className="space-y-2 max-h-64 overflow-y-auto">
-                  {filteredClients.map(cli => (
-                    <div key={cli.id} className={`p-2.5 rounded-xl border text-xs space-y-1 ${
-                      cli.hasProblem ? 'bg-rose-950/25 border-rose-500/40' : 'bg-[#150D2E] border-purple-500/20'
-                    }`}>
-                      <div className="flex justify-between items-center">
-                        <span className="font-bold text-white">{cli.name}</span>
-                        <span className="font-mono text-emerald-400 font-black">${cli.investmentUsd.toLocaleString()}</span>
-                      </div>
-                      <div className="flex justify-between text-[11px] text-purple-300">
-                        <span>Pays : {cli.country}</span>
-                        <span>KYC : N{cli.kycLevel}</span>
-                      </div>
-                      <div className={`text-[10px] font-semibold ${cli.hasProblem ? 'text-rose-300' : 'text-purple-400'}`}>
-                        Problème : {cli.problems}
+            const pendingCount = kycClients.filter(u => u.kyc_statut === 'en_attente').length;
+            const validatedCount = kycClients.filter(
+              u => (u.kyc_level ?? 0) >= 2 || u.kyc_statut === 'valide'
+            ).length;
+
+            return (
+              <div className="space-y-3">
+                <div className="p-3.5 rounded-2xl bg-[#1D1240] border-2 border-[#8B5CF6]/60 space-y-2.5">
+                  <div className="flex items-center justify-between gap-2">
+                    <div className="flex items-center gap-2">
+                      <ShieldCheck className="w-5 h-5 text-emerald-400" />
+                      <div>
+                        <h3 className="font-black text-white text-sm">KYC CLIENT ({kycClients.length})</h3>
+                        <span className="text-[10px] text-purple-300 block">
+                          Niveau 1 : Auto-validé • Niveau 2 : Validation Admin
+                        </span>
                       </div>
                     </div>
-                  ))}
-                </div>
-              </div>
-            </div>
-          )}
-
-          {/* ADMIN TAB 2: TRADING ADMIN (Modif 1: Séparé, Auto à côté BUY/SELL, Semi-Auto, voir chaque client) */}
-          {adminTab === 'trading' && (
-            <div className="space-y-4">
-              <div className="p-4 rounded-3xl bg-[#1D1240] border-2 border-[#8B5CF6] space-y-3">
-                <div className="flex justify-between items-center">
-                  <h3 className="font-black text-white text-xs">Mode Trading Administrateur</h3>
-                  {/* Modif 1: Mode SEMI-AUTO / AUTO / MANUEL */}
-                  <div className="flex gap-1 text-[10px] font-bold">
-                    {(['MANUEL', 'SEMI-AUTO', 'AUTO'] as const).map(m => (
-                      <button
-                        key={m}
-                        onClick={() => setAdminTradingMode(m)}
-                        className={`px-2 py-0.5 rounded-lg border ${
-                          adminTradingMode === m
-                            ? 'bg-[#7C3AED] text-white border-purple-300 shadow'
-                            : 'bg-[#150D2E] text-purple-300 border-purple-500/20'
-                        }`}
-                      >
-                        {m}
-                      </button>
-                    ))}
+                    <div className="text-right text-[10px] font-mono">
+                      <span className="text-amber-300 block font-bold">{pendingCount} en attente</span>
+                      <span className="text-emerald-400 block font-bold">{validatedCount} validés</span>
+                    </div>
                   </div>
-                </div>
 
-                <div className="p-3 rounded-2xl bg-[#150D2E] border border-purple-500/30 text-xs flex justify-between items-center">
-                  <span>Coin Actuel : <strong className="text-white">{selectedCoin.symbol} (${selectedCoin.price})</strong></span>
-                  <span className="font-mono text-emerald-400 font-bold">Mode: {adminTradingMode}</span>
-                </div>
-
-                {/* Modif 1: Bouton AUTO à côté de BUY / SELL */}
-                <div className="grid grid-cols-3 gap-2 pt-1">
-                  <button
-                    onClick={() => {
-                      handleExecuteTrade('BUY', 'Manuel');
-                      showToast('Ordre BUY manuel exécuté par Admin');
-                    }}
-                    className="py-3 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white font-black text-xs flex items-center justify-center gap-1 shadow"
-                  >
-                    <TrendingUp className="w-3.5 h-3.5" />
-                    <span>BUY</span>
-                  </button>
-
-                  <button
-                    onClick={() => {
-                      handleExecuteTrade('BUY', 'Auto');
-                      showToast('Ordre AUTO exécuté par Admin');
-                    }}
-                    className="py-3 rounded-xl bg-gradient-to-r from-purple-600 via-amber-500 to-purple-600 text-white font-black text-xs flex items-center justify-center gap-1 shadow-[0_0_15px_rgba(245,158,11,0.5)] border border-amber-300/40"
-                  >
-                    <Bot className="w-3.5 h-3.5" />
-                    <span>AUTO</span>
-                  </button>
-
-                  <button
-                    onClick={() => {
-                      handleExecuteTrade('SELL', 'Manuel');
-                      showToast('Ordre SELL manuel exécuté par Admin');
-                    }}
-                    className="py-3 rounded-xl bg-rose-600 hover:bg-rose-500 text-white font-black text-xs flex items-center justify-center gap-1 shadow"
-                  >
-                    <TrendingDown className="w-3.5 h-3.5" />
-                    <span>SELL</span>
-                  </button>
-                </div>
-              </div>
-
-              {/* Modif 1: Admin voit le trading de chaque client */}
-              <div className="p-3.5 rounded-2xl bg-[#1D1240] border-2 border-[#8B5CF6]/50 space-y-2.5">
-                <div className="flex justify-between items-center text-xs">
-                  <span className="font-bold text-white flex items-center gap-1.5">
-                    <Activity className="w-3.5 h-3.5 text-purple-400" />
-                    Trading de Chaque Client en Direct
-                  </span>
-                  <select
-                    value={adminSelectedClientFilter}
-                    onChange={e => setAdminSelectedClientFilter(e.target.value)}
-                    className="bg-[#150D2E] text-white text-[10px] font-bold p-1 rounded-lg border border-purple-500/30"
-                  >
-                    <option value="ALL">Tous les Clients</option>
-                    <option value="Invité SALOMA">Invité SALOMA</option>
-                    <option value="Jean-Luc Rakoto">Jean-Luc Rakoto</option>
-                    <option value="Sonia Solo">Sonia Solo</option>
-                  </select>
-                </div>
-
-                <div className="space-y-1.5 max-h-56 overflow-y-auto">
-                  {activePositions.length === 0 ? (
-                    <div className="text-center py-4 text-xs text-purple-400">Aucune position active en cours</div>
+                  {kycClients.length === 0 ? (
+                    <div className="p-4 rounded-xl bg-[#150D2E] border border-purple-500/20 text-center text-xs text-purple-300">
+                      Aucun client n&apos;a encore soumis de demande KYC.
+                    </div>
                   ) : (
-                    activePositions
-                      .filter(p => adminSelectedClientFilter === 'ALL' || (p.clientName && p.clientName.includes(adminSelectedClientFilter)))
-                      .map(pos => (
-                        <div key={pos.id} className="p-2.5 rounded-xl bg-[#150D2E] text-xs border border-purple-500/20 space-y-1">
-                          <div className="flex justify-between items-center font-bold">
-                            <span className="text-purple-200">{pos.clientName || 'Client'} • {pos.coinId.toUpperCase()}</span>
-                            <span className={`px-2 py-0.5 rounded text-[10px] ${pos.type === 'BUY' ? 'bg-emerald-500/20 text-emerald-400' : 'bg-rose-500/20 text-rose-400'}`}>
-                              {pos.type} x{pos.leverage} ({pos.mode})
-                            </span>
+                    <div className="space-y-2.5 max-h-[65vh] overflow-y-auto">
+                      {kycClients.map(cli => {
+                        const isValidated = (cli.kyc_level ?? 0) >= 2 || cli.kyc_statut === 'valide';
+                        const isPending = cli.kyc_statut === 'en_attente';
+                        const isRejected = cli.kyc_statut === 'refuse';
+                        const isValidatingThis = adminKycActionId === `validate-${cli.$id}`;
+                        const isRejectingThis = adminKycActionId === `reject-${cli.$id}`;
+
+                        return (
+                          <div
+                            key={cli.$id}
+                            className={`p-3 rounded-2xl bg-[#150D2E] border-2 space-y-2.5 text-xs ${
+                              isPending
+                                ? 'border-amber-500/60'
+                                : isValidated
+                                ? 'border-emerald-500/40'
+                                : isRejected
+                                ? 'border-rose-500/40'
+                                : 'border-purple-500/30'
+                            }`}
+                          >
+                            <div className="flex items-start justify-between gap-2">
+                              <div className="min-w-0">
+                                <span className="font-black text-white block truncate">
+                                  {[cli.prenom, cli.nom].filter(Boolean).join(' ') || cli.name || 'Client'}
+                                </span>
+                                <span className="text-[10px] text-purple-300 block truncate">
+                                  {cli.email} • {cli.telephone || '---'}
+                                </span>
+                              </div>
+                              <span
+                                className={`text-[10px] font-black px-2 py-0.5 rounded-lg shrink-0 ${
+                                  isValidated
+                                    ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/40'
+                                    : isPending
+                                    ? 'bg-amber-500/20 text-amber-300 border border-amber-500/40'
+                                    : isRejected
+                                    ? 'bg-rose-500/20 text-rose-300 border border-rose-500/40'
+                                    : 'bg-purple-500/20 text-purple-200 border border-purple-500/30'
+                                }`}
+                              >
+                                {isValidated
+                                  ? '✓ Validé (N2)'
+                                  : isPending
+                                  ? '⏳ En attente'
+                                  : isRejected
+                                  ? '✕ Refusé'
+                                  : `Niveau ${cli.kyc_level ?? 1}`}
+                              </span>
+                            </div>
+
+                            <div className="p-2.5 rounded-xl bg-[#1D1240] border border-purple-500/25 space-y-1 text-[11px]">
+                              <div className="flex justify-between gap-2">
+                                <span className="text-purple-300 font-bold">CIN :</span>
+                                <span className="font-mono font-black text-white text-right">
+                                  {cli.kyc_cin || 'Non renseigné'}
+                                </span>
+                              </div>
+                              <div className="flex justify-between gap-2">
+                                <span className="text-purple-300 font-bold">ADRESSE :</span>
+                                <span className="font-bold text-white text-right">
+                                  {cli.kyc_adresse || 'Non renseignée'}
+                                </span>
+                              </div>
+                              <div className="flex justify-between gap-2">
+                                <span className="text-purple-300 font-bold">CODE POSTAL :</span>
+                                <span className="font-mono font-black text-white text-right">
+                                  {cli.kyc_code_postal || 'Non renseigné'}
+                                </span>
+                              </div>
+                            </div>
+
+                            <div className="grid grid-cols-2 gap-2">
+                              <button
+                                type="button"
+                                disabled={adminKycActionId !== null}
+                                onClick={() => handleAdminKycAction(cli.$id, 'validate')}
+                                className="py-2 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white font-black text-[11px] flex items-center justify-center gap-1 disabled:opacity-50 transition"
+                              >
+                                <Check className="w-3.5 h-3.5" />
+                                <span>{isValidatingThis ? 'Validation...' : 'VALIDER'}</span>
+                              </button>
+                              <button
+                                type="button"
+                                disabled={adminKycActionId !== null}
+                                onClick={() => handleAdminKycAction(cli.$id, 'reject')}
+                                className="py-2 rounded-xl bg-rose-600 hover:bg-rose-500 text-white font-black text-[11px] flex items-center justify-center gap-1 disabled:opacity-50 transition"
+                              >
+                                <X className="w-3.5 h-3.5" />
+                                <span>{isRejectingThis ? 'Refus...' : 'REFUSER'}</span>
+                              </button>
+                            </div>
                           </div>
-                          <div className="flex justify-between text-[11px] font-mono">
-                            <span className="text-purple-400">Investi: ${pos.amountUsd}</span>
-                            <span className={pos.pnlUsd >= 0 ? 'text-emerald-400 font-bold' : 'text-rose-400 font-bold'}>
-                              PnL: {pos.pnlUsd >= 0 ? '+' : ''}${pos.pnlUsd.toFixed(2)} ({pos.pnlPercent}%)
-                            </span>
-                          </div>
-                        </div>
-                      ))
+                        );
+                      })}
+                    </div>
                   )}
                 </div>
               </div>
-            </div>
-          )}
+            );
+          })()}
 
-          {/* ADMIN TAB 3: PORTEFEUILLE ADMIN 100% IDENTIQUE (Modif 4) */}
-          {adminTab === 'wallet' && (
+          {adminTab === 'overview' && (
             <div className="space-y-4">
-              <div className="p-4 rounded-3xl bg-gradient-to-br from-[#2D165A] via-[#1F1042] to-[#150D2E] border-2 border-[#8B5CF6] shadow-[0_0_25px_rgba(124,58,237,0.5)]">
-                <div className="flex justify-between items-start mb-2">
-                  <span className="text-xs font-bold text-purple-300">Solde Portefeuille ADMIN (100% Identique)</span>
-                  <span className="px-2 py-0.5 rounded-full bg-purple-900/60 text-[10px] text-purple-200 border border-purple-400/40 font-bold">
-                    Mêmes Soldes & Réseaux
-                  </span>
-                </div>
-                <h1 className="text-3xl font-black text-white font-mono">
-                  {formatMoney(walletBalanceUsd + tradingBalanceUsd, 'USD')}
-                </h1>
-                <p className="text-sm font-bold text-purple-300 font-mono">
-                  ≈ {formatMoney(walletBalanceUsd + tradingBalanceUsd, 'MGA')}
-                </p>
-
-                <div className="grid grid-cols-2 gap-2 mt-4 pt-3 border-t border-purple-500/20 text-xs">
-                  <div className="bg-[#150D2E]/80 p-2.5 rounded-2xl border border-purple-500/20">
-                    <span className="text-[10px] text-purple-300 block font-bold">Compte Wallet :</span>
-                    <span className="font-black text-white font-mono text-sm">${walletBalanceUsd.toFixed(2)}</span>
-                  </div>
-                  <div className="bg-[#150D2E]/80 p-2.5 rounded-2xl border border-purple-500/20">
-                    <span className="text-[10px] text-purple-300 block font-bold">Compte Trading :</span>
-                    <span className="font-black text-emerald-400 font-mono text-sm">${tradingBalanceUsd.toFixed(2)}</span>
-                  </div>
-                </div>
-
-                <div className="grid grid-cols-3 gap-2 mt-3">
-                  <button onClick={() => setActiveModal('deposit')} className="py-2.5 rounded-2xl bg-emerald-600 text-white font-bold text-xs flex flex-col items-center">
-                    <ArrowDownLeft className="w-4 h-4" /> Dépôt
-                  </button>
-                  <button onClick={() => setActiveModal('withdraw')} className="py-2.5 rounded-2xl bg-[#7C3AED] text-white font-bold text-xs flex flex-col items-center">
-                    <ArrowUpRight className="w-4 h-4" /> Retrait
-                  </button>
-                  <button onClick={() => setActiveModal('transfer')} className="py-2.5 rounded-2xl bg-amber-600 text-white font-bold text-xs flex flex-col items-center">
-                    <ArrowRightLeft className="w-4 h-4" /> Transfert
-                  </button>
-                </div>
-              </div>
-
-              {/* All coins & networks view */}
-              <div className="p-3.5 rounded-2xl bg-[#1D1240] border-2 border-[#8B5CF6]/50 space-y-2">
-                <span className="text-xs font-bold text-white block">Actifs & Réseaux Portefeuille</span>
-                <div className="space-y-1.5 max-h-56 overflow-y-auto">
-                  {coins.map(coin => (
-                    <div key={coin.id} className="flex justify-between items-center p-2 rounded-xl bg-[#150D2E] text-xs">
-                      <span className="font-bold text-white">{coin.name} ({coin.symbol})</span>
-                      <span className="font-mono text-purple-200">{(userCoins[coin.symbol] || 0).toFixed(4)} {coin.symbol}</span>
+              <div className="p-3.5 rounded-2xl bg-[#1D1240] border-2 border-[#8B5CF6]/50 space-y-2.5">
+                <span className="text-xs font-black text-white block">
+                  Clients Appwrite ({adminUsers.length})
+                </span>
+                <div className="space-y-2 max-h-60 overflow-y-auto">
+                  {adminUsers.map(cli => (
+                    <div key={cli.$id} className="p-2.5 rounded-xl bg-[#150D2E] border border-purple-500/20 text-xs space-y-1">
+                      <div className="flex justify-between items-center">
+                        <span className="font-bold text-white">{cli.name || cli.nom}</span>
+                        <span className="font-mono text-emerald-400 font-black">
+                          {Number(cli.solde || 0).toLocaleString('fr-FR')} Ar
+                        </span>
+                      </div>
+                      <div className="flex justify-between text-[10px] text-purple-300">
+                        <span>{cli.email}</span>
+                        <span>{cli.email_verifie ? '✓ Email vérifié' : 'Non vérifié'}</span>
+                      </div>
                     </div>
                   ))}
                 </div>
               </div>
+
+              <div className="p-3.5 rounded-2xl bg-[#1D1240] border-2 border-amber-500/50 space-y-2.5">
+                <div className="flex justify-between items-center">
+                  <span className="text-xs font-black text-white">
+                    Problèmes Clients ({adminProblems.length})
+                  </span>
+                  <button
+                    onClick={() => setFilterOnlyProblems(!filterOnlyProblems)}
+                    className="px-2 py-1 rounded-lg bg-[#23154D] text-[10px] text-amber-300 font-bold"
+                  >
+                    {filterOnlyProblems ? 'Tous' : 'Non résolus'}
+                  </button>
+                </div>
+                <div className="space-y-2 max-h-60 overflow-y-auto">
+                  {adminProblems
+                    .filter(p => !filterOnlyProblems || p.statut !== 'resolu')
+                    .map(rep => (
+                      <div key={rep.$id} className="p-2.5 rounded-xl bg-[#150D2E] border border-purple-500/30 text-xs space-y-1">
+                        <div className="flex justify-between">
+                          <span className="font-bold text-white">{rep.nom}</span>
+                          <span className="text-[10px] text-purple-400">{rep.telephone}</span>
+                        </div>
+                        <p className="text-purple-100">{rep.message}</p>
+                        <div className="flex justify-end">
+                          <button
+                            onClick={() => handleToggleProblemResolved(rep)}
+                            className={`px-2 py-0.5 rounded text-[10px] font-bold ${
+                              rep.statut === 'resolu'
+                                ? 'bg-emerald-500/20 text-emerald-300'
+                                : 'bg-amber-500/20 text-amber-200'
+                            }`}
+                          >
+                            {rep.statut === 'resolu' ? '✓ Résolu' : 'Marquer Résolu'}
+                          </button>
+                        </div>
+                      </div>
+                    ))}
+                </div>
+              </div>
             </div>
           )}
 
-          {/* ADMIN TAB 4: CODE ADMIN MODIFIABLE (Modif 3: Ancien + Nouveau 8 chiffres + Confirmer) */}
-          {adminTab === 'security' && (
-            <div className="p-4 rounded-3xl bg-[#1D1240] border-2 border-[#8B5CF6] space-y-4">
-              <div className="flex items-center gap-2">
-                <Lock className="w-5 h-5 text-amber-400" />
-                <h3 className="font-black text-white text-sm">Modification Code Administrateur</h3>
+          {/* ========================================================
+              NOUVELLE PAGE ADMIN PROFIT (Jour/Semaine/Mois + Bybit VS SALOMA)
+             ======================================================== */}
+          {adminTab === 'profit' && (
+            <div className="space-y-4">
+              {/* CARTES PROFIT TOTAL : JOUR / SEMAINE / MOIS */}
+              <div className="grid grid-cols-3 gap-2">
+                {(
+                  [
+                    ['jour', 'Profit Jour'],
+                    ['semaine', 'Profit Semaine'],
+                    ['mois', 'Profit Mois']
+                  ] as const
+                ).map(([periodKey, label]) => {
+                  const val = adminProfits?.[periodKey]?.totalAr || 0;
+                  const active = adminProfitPeriod === periodKey;
+                  return (
+                    <button
+                      key={periodKey}
+                      type="button"
+                      onClick={() => setAdminProfitPeriod(periodKey)}
+                      className={`p-3 rounded-2xl border-2 text-left transition ${
+                        active
+                          ? 'bg-[#251552] border-emerald-400 shadow-[0_0_15px_rgba(16,185,129,0.25)]'
+                          : 'bg-[#1D1240] border-[#8B5CF6]/40'
+                      }`}
+                    >
+                      <span className="text-[10px] font-bold text-purple-300 block">{label}</span>
+                      <span className="text-sm font-black font-mono text-emerald-400 block mt-0.5">
+                        {Math.round(val).toLocaleString('fr-FR')} Ar
+                      </span>
+                    </button>
+                  );
+                })}
               </div>
 
-              <p className="text-xs text-purple-200">
-                Modifiable uniquement ici dans l'Application Admin. Le code doit comporter 8 chiffres.
-              </p>
+              {/* SÉPARATION : TRADE 0.1%, ÉCHANGE 0.1%, RETRAIT 0.15% + FRAIS RÉSEAU */}
+              <div className="p-3.5 rounded-2xl bg-[#1D1240] border-2 border-[#8B5CF6]/60 space-y-3">
+                <div className="flex justify-between items-center">
+                  <span className="text-xs font-black text-white">
+                    Détail Revenus SALOMA ({adminProfitPeriod === 'jour' ? '24h' : adminProfitPeriod === 'semaine' ? '7 jours' : adminProfitPeriod === 'mois' ? '30 jours' : 'Total'})
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => setAdminProfitPeriod('total')}
+                    className={`px-2 py-0.5 rounded text-[10px] font-bold ${
+                      adminProfitPeriod === 'total' ? 'bg-[#7C3AED] text-white' : 'bg-[#150D2E] text-purple-300'
+                    }`}
+                  >
+                    Tout voir
+                  </button>
+                </div>
 
-              {codeChangeMsg && (
-                <div className={`p-2.5 rounded-xl border text-xs font-bold ${
-                  codeChangeMsg.isError ? 'bg-rose-500/20 border-rose-500/50 text-rose-300' : 'bg-emerald-500/20 border-emerald-500/50 text-emerald-300'
-                }`}>
-                  {codeChangeMsg.text}
+                {(() => {
+                  const bucket = adminProfits?.[adminProfitPeriod] || {
+                    tradeAr: 0,
+                    echangeAr: 0,
+                    retraitAr: 0,
+                    totalAr: 0
+                  };
+                  return (
+                    <div className="space-y-2 text-xs">
+                      <div className="p-2.5 rounded-xl bg-[#150D2E] border border-emerald-500/30 flex justify-between items-center">
+                        <div>
+                          <span className="font-bold text-white block">1. Trade (0.1%)</span>
+                          <span className="text-[10px] text-purple-300">Commission sur ordres Manuel & Bots</span>
+                        </div>
+                        <span className="font-mono font-black text-emerald-400">
+                          +{Math.round(bucket.tradeAr).toLocaleString('fr-FR')} Ar
+                        </span>
+                      </div>
+
+                      <div className="p-2.5 rounded-xl bg-[#150D2E] border border-purple-500/30 flex justify-between items-center">
+                        <div>
+                          <span className="font-bold text-white block">2. Échange (0.1%)</span>
+                          <span className="text-[10px] text-purple-300">Commission sur conversions Ar/Crypto</span>
+                        </div>
+                        <span className="font-mono font-black text-purple-300">
+                          +{Math.round(bucket.echangeAr).toLocaleString('fr-FR')} Ar
+                        </span>
+                      </div>
+
+                      <div className="p-2.5 rounded-xl bg-[#150D2E] border border-amber-500/30 flex justify-between items-center">
+                        <div>
+                          <span className="font-bold text-white block">3. Retrait (0.15% + Frais réseau)</span>
+                          <span className="text-[10px] text-purple-300">USDT TRC20 / BTC / ETH</span>
+                        </div>
+                        <span className="font-mono font-black text-amber-300">
+                          +{Math.round(bucket.retraitAr).toLocaleString('fr-FR')} Ar
+                        </span>
+                      </div>
+
+                      <div className="p-3 rounded-xl bg-gradient-to-r from-[#251552] to-[#190F38] border border-emerald-400/50 flex justify-between items-center">
+                        <span className="font-black text-white">TOTAL PROFIT</span>
+                        <span className="font-mono font-black text-base text-emerald-400">
+                          +{Math.round(bucket.totalAr).toLocaleString('fr-FR')} Ar
+                        </span>
+                      </div>
+                    </div>
+                  );
+                })()}
+              </div>
+
+              {/* PRIX EXCHANGE RÉEL VS PRIX SALOMA EN TEMPS RÉEL (1:1 WEBSOCKET) */}
+              <div className="p-3.5 rounded-2xl bg-[#1D1240] border-2 border-[#8B5CF6]/50 space-y-2.5">
+                <div className="flex justify-between items-center">
+                  <div>
+                    <span className="text-xs font-black text-white block">
+                      Prix {adminBybitStatus?.primaryExchange || activeBrokerExchange} = Prix SALOMA (1:1 LIVE WebSocket)
+                    </span>
+                    <span className="text-[10px] text-purple-300 block">
+                      0.1% frais Exchange récupéré en interne (analana frais), strictement masqué côté client
+                    </span>
+                  </div>
+                  <span
+                    className={`text-[10px] font-mono font-bold px-2 py-0.5 rounded inline-flex items-center gap-1 ${
+                      adminBybitStatus?.online ? 'bg-emerald-500/20 text-emerald-300' : 'bg-amber-500/20 text-amber-300'
+                    }`}
+                  >
+                    {adminBybitStatus?.online && <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />}
+                    {adminBybitStatus?.online
+                      ? `${adminBybitStatus.primaryExchange || 'BYBIT'} LIVE`
+                      : 'Cache'}
+                  </span>
+                </div>
+
+                <div className="overflow-y-auto max-h-72 rounded-xl border border-purple-500/30 text-[11px]">
+                  <table className="w-full text-left font-mono">
+                    <thead className="bg-[#100926] text-purple-300 text-[10px] sticky top-0">
+                      <tr>
+                        <th className="px-2.5 py-2">Paire</th>
+                        <th className="px-2.5 py-2 text-right">
+                          {adminBybitStatus?.primaryExchange || activeBrokerExchange} Réel
+                        </th>
+                        <th className="px-2.5 py-2 text-right">SALOMA</th>
+                        <th className="px-2.5 py-2 text-right">Align.</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-purple-500/20 bg-[#150D2E]">
+                      {adminMarketComparison.map(row => (
+                        <tr key={row.symbol}>
+                          <td className="px-2.5 py-1.5 font-bold text-white">{row.symbol}</td>
+                          <td className="px-2.5 py-1.5 text-right text-sky-300">
+                            ${formatCoinPrice(row.bybitPrice)}
+                          </td>
+                          <td className="px-2.5 py-1.5 text-right text-emerald-400 font-bold">
+                            ${formatCoinPrice(row.salomaPrice)}
+                          </td>
+                          <td className="px-2.5 py-1.5 text-right text-emerald-300">
+                            {row.spreadPct === 0 ? '1:1 (0%)' : `${row.spreadPct}%`}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {adminTab === 'trading' && (
+            <div className="p-3.5 rounded-2xl bg-[#1D1240] border-2 border-[#8B5CF6]/50 space-y-2">
+              <span className="text-xs font-black text-white block">
+                Trades Réels ({adminTrades.length})
+              </span>
+              <div className="space-y-1.5 max-h-96 overflow-y-auto">
+                {adminTrades.map(tr => (
+                  <div key={tr.$id} className="p-2.5 rounded-xl bg-[#150D2E] text-xs border border-purple-500/20 space-y-1">
+                    <div className="flex justify-between font-bold">
+                      <span className="text-white">
+                        {tr.paire} ({tr.type}) {tr.mode ? `• ${tr.mode}` : ''}
+                      </span>
+                      <span className="text-purple-300 font-mono">{tr.statut}</span>
+                    </div>
+                    <div className="flex justify-between text-[11px] font-mono">
+                      <span className="text-purple-400">{Number(tr.montant).toLocaleString('fr-FR')} Ar</span>
+                      <span className={Number(tr.profit) >= 0 ? 'text-emerald-400' : 'text-rose-400'}>
+                        Profit: {Number(tr.profit).toLocaleString('fr-FR')} Ar
+                      </span>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {adminTab === 'wallet' && (
+            <div className="p-3.5 rounded-2xl bg-[#1D1240] border-2 border-[#8B5CF6]/50 space-y-2">
+              <span className="text-xs font-bold text-white block">
+                Dépôts & Retraits Appwrite ({adminTransactions.length})
+              </span>
+              {adminTransactions.length === 0 ? (
+                <p className="text-xs text-purple-400 text-center py-4">Aucune transaction</p>
+              ) : (
+                <div className="space-y-2 max-h-96 overflow-y-auto">
+                  {adminTransactions.map(tx => (
+                    <div
+                      key={tx.$id}
+                      className="flex justify-between items-center p-2.5 rounded-xl bg-[#150D2E] text-xs border border-purple-500/20 gap-2"
+                    >
+                      <div className="min-w-0">
+                        <span className="font-bold text-white uppercase block truncate">
+                          {tx.type} • {Number(tx.montant).toLocaleString('fr-FR')} {tx.devise}
+                        </span>
+                        <span className="text-[10px] text-purple-300 block truncate">
+                          {tx.methode} • {tx.numero_compte}
+                        </span>
+                        {Number(tx.frais) > 0 && (
+                          <span className="text-[9px] text-amber-300 font-mono block">
+                            Frais réseau: {tx.frais} {tx.devise}
+                          </span>
+                        )}
+                        <span className="text-[9px] text-purple-400 font-mono block">
+                          User: {tx.user_id.slice(0, 8)} • {tx.date ? new Date(tx.date).toLocaleString('fr-FR') : ''}
+                        </span>
+                      </div>
+                      <div className="flex items-center gap-1 shrink-0">
+                        {tx.statut === 'en_attente' ? (
+                          <>
+                            <button
+                              type="button"
+                              onClick={() => handleAdminValidateTx(tx)}
+                              className="px-2 py-1 rounded bg-emerald-600 text-white text-[10px] font-bold"
+                            >
+                              Valider
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => handleAdminRejectTx(tx)}
+                              className="px-2 py-1 rounded bg-rose-600 text-white text-[10px] font-bold"
+                            >
+                              Refuser
+                            </button>
+                          </>
+                        ) : (
+                          <span
+                            className={`px-2 py-0.5 rounded font-mono text-[10px] font-bold ${
+                              tx.statut === 'valide'
+                                ? 'bg-emerald-500/20 text-emerald-400'
+                                : 'bg-rose-500/20 text-rose-400'
+                            }`}
+                          >
+                            {tx.statut}
+                          </span>
+                        )}
+                      </div>
+                    </div>
+                  ))}
                 </div>
               )}
+            </div>
+          )}
 
-              <form onSubmit={handleChangeAdminCode} className="space-y-3 text-xs">
-                <div>
-                  <label className="text-purple-300 font-bold block mb-1">Ancien code 8 chiffres :</label>
+          {/* ========================================================
+              ADMIN - 3 APIS SÉPARÉES : BYBIT / OKX / BINANCE (SECRETS ****)
+             ======================================================== */}
+          {adminTab === 'apis' && (
+            <div className="space-y-4">
+              {/* CHOIX DE L'API PRINCIPALE POUR ENVOI DES ORDRES */}
+              <div className="p-4 rounded-3xl bg-[#1D1240] border-2 border-[#8B5CF6] space-y-3">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-2">
+                    <Server className="w-5 h-5 text-emerald-400" />
+                    <div>
+                      <h3 className="font-black text-white text-sm">API Principale (Broker Pur)</h3>
+                      <span className="text-[10px] text-purple-300">
+                        Sélectionnez l’API qui reçoit et liquide les ordres clients
+                      </span>
+                    </div>
+                  </div>
+                </div>
+                <div className="grid grid-cols-3 gap-2">
+                  {(['bybit', 'okx', 'binance'] as const).map(id => {
+                    const isPrimary = (adminApisConfig?.primaryApi || 'bybit') === id;
+                    return (
+                      <button
+                        key={id}
+                        type="button"
+                        disabled={apiActionLoading === `primary-${id}`}
+                        onClick={() => handleAdminSetPrimaryApi(id)}
+                        className={`py-2.5 px-2 rounded-2xl border-2 text-xs font-black transition ${
+                          isPrimary
+                            ? 'bg-gradient-to-r from-emerald-600 to-[#7C3AED] border-emerald-300 text-white shadow'
+                            : 'bg-[#150D2E] border-purple-500/30 text-purple-200 hover:border-[#8B5CF6]'
+                        }`}
+                      >
+                        <span className="block">{id.toUpperCase()}</span>
+                        <span className="text-[9px] font-mono opacity-90">
+                          {isPrimary ? '★ Principale' : 'Sélectionner'}
+                        </span>
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+
+              {/* 3 BLOCS SÉPARÉS : BYBIT | OKX | BINANCE */}
+              {(['bybit', 'okx', 'binance'] as const).map(id => {
+                const cfg = adminApisConfig?.providers.find(p => p.id === id) || {
+                  id,
+                  label: id.toUpperCase(),
+                  enabled: id === 'bybit',
+                  isPrimary: id === 'bybit',
+                  hasApiKey: false,
+                  apiKeyMasked: '',
+                  hasSecret: false,
+                  secretMasked: '',
+                  hasPassphrase: false,
+                  passphraseMasked: ''
+                };
+                const inputs = apiFormInputs[id];
+                return (
+                  <div
+                    key={id}
+                    className={`p-4 rounded-3xl bg-[#1D1240] border-2 space-y-3 ${
+                      cfg.isPrimary
+                        ? 'border-emerald-400 shadow-[0_0_20px_rgba(16,185,129,0.2)]'
+                        : 'border-[#8B5CF6]/50'
+                    }`}
+                  >
+                    <div className="flex items-center justify-between gap-2">
+                      <div>
+                        <div className="flex items-center gap-2">
+                          <h4 className="font-black text-white text-sm">{cfg.label} API</h4>
+                          {cfg.isPrimary && (
+                            <span className="text-[9px] font-black px-2 py-0.5 rounded bg-emerald-500/20 text-emerald-300 border border-emerald-400/50">
+                              ★ PRINCIPALE
+                            </span>
+                          )}
+                        </div>
+                        <span className="text-[10px] font-mono text-purple-300">
+                          {cfg.hasSecret ? 'Secret configuré : ****' : 'Aucune clé secrète enregistrée'}
+                        </span>
+                      </div>
+
+                      <button
+                        type="button"
+                        disabled={apiActionLoading === `toggle-${id}`}
+                        onClick={() => handleAdminToggleApi(id, !cfg.enabled)}
+                        className={`px-3 py-1.5 rounded-xl text-[11px] font-black transition ${
+                          cfg.enabled
+                            ? 'bg-emerald-600/25 border border-emerald-400 text-emerald-300'
+                            : 'bg-rose-600/20 border border-rose-500/50 text-rose-300'
+                        }`}
+                      >
+                        {cfg.enabled ? '● Activée (Désactiver)' : '○ Désactivée (Activer)'}
+                      </button>
+                    </div>
+
+                    <div className="space-y-2.5 text-xs">
+                      <div>
+                        <label className="text-[10px] font-bold text-purple-300 block mb-1">
+                          {cfg.label} API Key {cfg.hasApiKey ? `(${cfg.apiKeyMasked})` : ''}
+                        </label>
+                        <input
+                          type="text"
+                          value={inputs.apiKey}
+                          onChange={e =>
+                            setApiFormInputs(prev => ({
+                              ...prev,
+                              [id]: { ...prev[id], apiKey: e.target.value }
+                            }))
+                          }
+                          placeholder={cfg.hasApiKey ? `Clé actuelle : ${cfg.apiKeyMasked}` : `Entrez votre ${cfg.label} API Key`}
+                          className="w-full px-3 py-2 rounded-xl bg-[#150D2E] border border-[#8B5CF6]/50 text-white font-mono text-xs"
+                        />
+                      </div>
+
+                      <div>
+                        <label className="text-[10px] font-bold text-purple-300 block mb-1">
+                          {cfg.label} Secret {cfg.hasSecret ? '(**** Masqué)' : ''}
+                        </label>
+                        <input
+                          type="password"
+                          autoComplete="new-password"
+                          value={inputs.secret}
+                          onChange={e =>
+                            setApiFormInputs(prev => ({
+                              ...prev,
+                              [id]: { ...prev[id], secret: e.target.value }
+                            }))
+                          }
+                          placeholder={cfg.hasSecret ? '**************** (laisser vide pour conserver)' : `Entrez votre ${cfg.label} Secret`}
+                          className="w-full px-3 py-2 rounded-xl bg-[#150D2E] border border-[#8B5CF6]/50 text-white font-mono text-xs"
+                        />
+                      </div>
+
+                      {id === 'okx' && (
+                        <div>
+                          <label className="text-[10px] font-bold text-purple-300 block mb-1">
+                            OKX Passphrase {cfg.hasPassphrase ? '(**** Masqué)' : ''}
+                          </label>
+                          <input
+                            type="password"
+                            autoComplete="new-password"
+                            value={inputs.passphrase}
+                            onChange={e =>
+                              setApiFormInputs(prev => ({
+                                ...prev,
+                                okx: { ...prev.okx, passphrase: e.target.value }
+                              }))
+                            }
+                            placeholder={cfg.hasPassphrase ? '************ (laisser vide pour conserver)' : 'Entrez votre OKX Passphrase'}
+                            className="w-full px-3 py-2 rounded-xl bg-[#150D2E] border border-[#8B5CF6]/50 text-white font-mono text-xs"
+                          />
+                        </div>
+                      )}
+
+                      <button
+                        type="button"
+                        disabled={apiActionLoading === `save-${id}`}
+                        onClick={() => handleAdminSaveApiKeys(id)}
+                        className="w-full py-2.5 rounded-xl bg-gradient-to-r from-[#7C3AED] to-[#8B5CF6] text-white font-black text-xs shadow disabled:opacity-50"
+                      >
+                        {apiActionLoading === `save-${id}`
+                          ? 'Enregistrement...'
+                          : `Enregistrer clés ${cfg.label}`}
+                      </button>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+
+          {adminTab === 'security' && (
+            <div className="space-y-4">
+              {/* CLOUDFLARE TURNSTILE : SITE KEY + SECRET KEY */}
+              <div className="p-4 rounded-3xl bg-[#1D1240] border-2 border-[#8B5CF6] space-y-4">
+                <div className="flex items-center justify-between gap-2">
+                  <div className="flex items-center gap-2">
+                    <ShieldCheck className="w-5 h-5 text-emerald-400" />
+                    <div>
+                      <h3 className="font-black text-white text-sm">Cloudflare Turnstile (Anti-Bot)</h3>
+                      <span className="text-[10px] text-purple-300 block">
+                        Protège Inscription, Connexion et Retrait Crypto
+                      </span>
+                    </div>
+                  </div>
+                  <span
+                    className={`text-[9px] font-black px-2 py-0.5 rounded border ${
+                      adminTurnstileConfig?.isCustomConfigured
+                        ? 'bg-emerald-500/20 border-emerald-400/50 text-emerald-300'
+                        : 'bg-amber-500/20 border-amber-400/50 text-amber-300'
+                    }`}
+                  >
+                    {adminTurnstileConfig?.isCustomConfigured ? 'Clés Propres' : 'Mode Test CF'}
+                  </span>
+                </div>
+
+                {cfSaveMsg && (
+                  <div
+                    className={`p-2.5 rounded-xl border text-xs font-bold ${
+                      cfSaveMsg.isError
+                        ? 'bg-rose-500/20 border-rose-500/50 text-rose-300'
+                        : 'bg-emerald-500/20 border-emerald-500/50 text-emerald-300'
+                    }`}
+                  >
+                    {cfSaveMsg.text}
+                  </div>
+                )}
+
+                <form onSubmit={handleAdminSaveTurnstile} className="space-y-3 text-xs">
+                  <div>
+                    <label className="text-[10px] font-bold text-purple-300 block mb-1">
+                      Cloudflare Site Key (Clé du site)
+                    </label>
+                    <input
+                      type="text"
+                      required
+                      value={cfSiteKeyInput}
+                      onChange={e => setCfSiteKeyInput(e.target.value)}
+                      placeholder="Ex: 0x4AAAAAAA..."
+                      className="w-full px-3 py-2.5 rounded-xl bg-[#150D2E] border-2 border-[#8B5CF6]/50 text-white font-mono text-xs"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="text-[10px] font-bold text-purple-300 block mb-1">
+                      Cloudflare Secret Key {adminTurnstileConfig?.hasSecretKey ? '(**** Masqué)' : ''}
+                    </label>
+                    <input
+                      type="password"
+                      autoComplete="new-password"
+                      value={cfSecretKeyInput}
+                      onChange={e => setCfSecretKeyInput(e.target.value)}
+                      placeholder={
+                        adminTurnstileConfig?.hasSecretKey
+                          ? '**************** (laisser vide pour conserver)'
+                          : 'Ex: 0x4AAAAAAA...'
+                      }
+                      className="w-full px-3 py-2.5 rounded-xl bg-[#150D2E] border-2 border-[#8B5CF6]/50 text-white font-mono text-xs"
+                    />
+                  </div>
+
+                  <div className="flex gap-2">
+                    <button
+                      type="submit"
+                      disabled={cfSaving}
+                      className="flex-1 py-3 rounded-xl bg-gradient-to-r from-[#7C3AED] to-[#8B5CF6] text-white font-black text-xs disabled:opacity-50"
+                    >
+                      {cfSaving ? 'Enregistrement...' : 'Enregistrer Clés Cloudflare'}
+                    </button>
+                    {adminTurnstileConfig?.isCustomConfigured && (
+                      <button
+                        type="button"
+                        disabled={cfSaving}
+                        onClick={handleAdminResetTurnstileTest}
+                        className="px-3 py-3 rounded-xl bg-[#150D2E] border border-purple-500/40 text-purple-200 font-bold text-[11px]"
+                      >
+                        Mode Test
+                      </button>
+                    )}
+                  </div>
+                </form>
+              </div>
+
+              {/* MODIFICATION CODE ADMINISTRATEUR */}
+              <div className="p-4 rounded-3xl bg-[#1D1240] border-2 border-[#8B5CF6] space-y-4">
+                <div className="flex items-center gap-2">
+                  <KeyRound className="w-5 h-5 text-amber-400" />
+                  <h3 className="font-black text-white text-sm">Modification Code Administrateur</h3>
+                </div>
+                {codeChangeMsg && (
+                  <div
+                    className={`p-2.5 rounded-xl border text-xs font-bold ${
+                      codeChangeMsg.isError
+                        ? 'bg-rose-500/20 border-rose-500/50 text-rose-300'
+                        : 'bg-emerald-500/20 border-emerald-500/50 text-emerald-300'
+                    }`}
+                  >
+                    {codeChangeMsg.text}
+                  </div>
+                )}
+                <form onSubmit={handleChangeAdminCode} className="space-y-3 text-xs">
                   <input
                     type="password"
                     maxLength={8}
                     required
                     value={oldCodeInput}
                     onChange={e => setOldCodeInput(e.target.value)}
-                    placeholder="88888888"
-                    className="w-full px-3 py-2.5 rounded-xl bg-[#150D2E] border-2 border-[#8B5CF6]/50 text-white font-mono text-center tracking-widest text-base font-bold"
+                    placeholder="Ancien code 8 chiffres"
+                    className="w-full px-3 py-2.5 rounded-xl bg-[#150D2E] border-2 border-[#8B5CF6]/50 text-white font-mono text-center tracking-widest"
                   />
-                </div>
-
-                <div>
-                  <label className="text-purple-300 font-bold block mb-1">Nouveau code 8 chiffres :</label>
                   <input
                     type="password"
                     maxLength={8}
                     required
                     value={newCodeInput1}
                     onChange={e => setNewCodeInput1(e.target.value)}
-                    placeholder="8 chiffres"
-                    className="w-full px-3 py-2.5 rounded-xl bg-[#150D2E] border-2 border-[#8B5CF6]/50 text-white font-mono text-center tracking-widest text-base font-bold"
+                    placeholder="Nouveau code 8 chiffres"
+                    className="w-full px-3 py-2.5 rounded-xl bg-[#150D2E] border-2 border-[#8B5CF6]/50 text-white font-mono text-center tracking-widest"
                   />
-                </div>
-
-                <div>
-                  <label className="text-purple-300 font-bold block mb-1">Confirmer nouveau code :</label>
                   <input
                     type="password"
                     maxLength={8}
                     required
                     value={newCodeInput2}
                     onChange={e => setNewCodeInput2(e.target.value)}
-                    placeholder="Confirmez les 8 chiffres"
-                    className="w-full px-3 py-2.5 rounded-xl bg-[#150D2E] border-2 border-[#8B5CF6]/50 text-white font-mono text-center tracking-widest text-base font-bold"
+                    placeholder="Confirmer nouveau code"
+                    className="w-full px-3 py-2.5 rounded-xl bg-[#150D2E] border-2 border-[#8B5CF6]/50 text-white font-mono text-center tracking-widest"
                   />
-                </div>
-
-                <button
-                  type="submit"
-                  className="w-full py-3.5 rounded-xl bg-gradient-to-r from-[#7C3AED] via-[#8B5CF6] to-[#7C3AED] text-white font-black text-xs shadow"
-                >
-                  Enregistrer le Nouveau Code
-                </button>
-              </form>
+                  <button
+                    type="submit"
+                    className="w-full py-3.5 rounded-xl bg-gradient-to-r from-[#7C3AED] to-[#8B5CF6] text-white font-black text-xs"
+                  >
+                    Enregistrer le Nouveau Code
+                  </button>
+                </form>
+              </div>
             </div>
           )}
         </div>

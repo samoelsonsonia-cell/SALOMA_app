@@ -6,3 +6,5 @@ coverage/
 *.log
 .env*
 !.env.example
+.saloma-apis.json
+.saloma-turnstile.json
