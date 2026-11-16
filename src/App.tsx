@@ -71,7 +71,12 @@ import {
   subscribeToPricesWebSocket,
   formatCoinPrice
 } from './services/priceAggregator';
-import { apiRequest, subscribeToNotificationsStream } from './lib/appwrite';
+import {
+  ENV_CONFIG,
+  hasSupabaseConfig,
+  apiRequest,
+  subscribeToNotificationsStream
+} from './lib/appwrite';
 
 const SESSION_STORAGE_KEY = 'saloma_session_secret';
 const USD_TO_MGA = 4750;
@@ -279,8 +284,17 @@ const COUNTRY_OPTIONS = [
 export default function App() {
   // --- NAVIGATION & AUTH SESSION ---
   const [screen, setScreen] = useState<
-    'splash' | 'main' | 'signup' | 'verifyEmail' | 'conditions' | 'login' | 'forgotPassword' | 'admin'
+    'splash' | 'main' | 'signup' | 'verifyEmail' | 'conditions' | 'privacy' | 'login' | 'forgotPassword' | 'admin'
   >('splash');
+  const [privacyReturnScreen, setPrivacyReturnScreen] = useState<'splash' | 'signup' | 'login' | 'main'>('splash');
+  const openPrivacyPolicy = useCallback(
+    (from: 'splash' | 'signup' | 'login' | 'main') => {
+      setPrivacyReturnScreen(from);
+      setActiveModal(null);
+      setScreen('privacy');
+    },
+    []
+  );
   const [activeTab, setActiveTab] = useState<'earn' | 'trading' | 'exchange' | 'wallet'>('trading');
   const [activeModal, setActiveModal] = useState<
     | null
@@ -480,7 +494,11 @@ export default function App() {
     };
   }, []);
 
-  const [turnstileSiteKey, setTurnstileSiteKey] = useState<string>('1x00000000000000000000AA');
+  const TEST_TURNSTILE_SITE_KEY = '1x00000000000000000000AA';
+  const [turnstileSiteKey, setTurnstileSiteKey] = useState<string>(
+    ENV_CONFIG.cloudflareSiteKey || TEST_TURNSTILE_SITE_KEY
+  );
+  const isCloudflareTestMode = !turnstileSiteKey || turnstileSiteKey === TEST_TURNSTILE_SITE_KEY;
   const [signUpTurnstileToken, setSignUpTurnstileToken] = useState<string>('');
   const [signUpTurnstileReset, setSignUpTurnstileReset] = useState<number>(0);
   const [loginTurnstileToken, setLoginTurnstileToken] = useState<string>('');
@@ -490,14 +508,18 @@ export default function App() {
 
   useEffect(() => {
     let cancelled = false;
-    apiRequest<{ siteKey: string; isCustomConfigured?: boolean }>('/api/security/turnstile')
+    apiRequest<{ siteKey: string; isCustomConfigured?: boolean }>('/api/security/turnstile', {
+      timeoutMs: 5000
+    })
       .then(data => {
         if (!cancelled && data?.siteKey) {
-          setTurnstileSiteKey(data.siteKey);
+          if (data.isCustomConfigured || !ENV_CONFIG.cloudflareSiteKey) {
+            setTurnstileSiteKey(data.siteKey);
+          }
         }
       })
       .catch(() => {
-        // fallback to default test siteKey
+        // fallback cleanly to VITE_CLOUDFLARE_SITE_KEY or Cloudflare test siteKey
       });
     return () => {
       cancelled = true;
@@ -559,7 +581,7 @@ export default function App() {
           requiresEmailVerification: boolean;
           user: AppwriteUserRow;
           wallet: AppwriteWalletRow;
-        }>('/api/me/session', { token: sessionToken });
+        }>('/api/me/session', { token: sessionToken, timeoutMs: 5000 });
 
         if (cancelled) return;
         setUserRow(sess.user);
@@ -633,7 +655,8 @@ export default function App() {
     paysOrigine: 'Madagascar 🇲🇬',
     numero: '',
     parrain: '',
-    accepteConditions: false
+    accepteConditions: false,
+    acceptePolitique: false
   });
   const [showSignUpPassword, setShowSignUpPassword] = useState(false);
   const [showSignUpConfirmPassword, setShowSignUpConfirmPassword] = useState(false);
@@ -702,7 +725,8 @@ export default function App() {
     passwordChecks.isValid &&
     passwordsMatch &&
     localPhoneDigits.length >= 6 &&
-    signUpData.accepteConditions;
+    signUpData.accepteConditions &&
+    signUpData.acceptePolitique;
 
   const handleSignUpSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -738,7 +762,11 @@ export default function App() {
         }
       });
 
-      localStorage.setItem(SESSION_STORAGE_KEY, res.sessionSecret);
+      try {
+        localStorage.setItem(SESSION_STORAGE_KEY, res.sessionSecret);
+      } catch {
+        // ignore storage quota restrictions
+      }
       setSessionToken(res.sessionSecret);
       setUserRow(res.user);
       setWalletRow(res.wallet);
@@ -752,7 +780,16 @@ export default function App() {
     } catch (err) {
       setSignUpTurnstileToken('');
       setSignUpTurnstileReset(k => k + 1);
-      setSignUpError(err instanceof Error ? err.message : 'Erreur lors de l’inscription.');
+      const rawMsg = err instanceof Error ? err.message : '';
+      if (rawMsg.includes('404')) {
+        setSignUpError(
+          hasSupabaseConfig
+            ? 'Route d’inscription introuvable (404). Vérifiez le déploiement des fonctions /api sur Vercel.'
+            : 'Service d’inscription indisponible (404). Vérifiez la configuration Vercel / API ou les variables d’environnement.'
+        );
+      } else {
+        setSignUpError(rawMsg || 'Erreur lors de l’inscription.');
+      }
     } finally {
       setSignUpLoading(false);
     }
@@ -833,7 +870,15 @@ export default function App() {
         }
       });
 
-      localStorage.setItem(SESSION_STORAGE_KEY, res.sessionSecret);
+      if (!res?.sessionSecret || !res?.user) {
+        throw new Error('Réponse invalide du serveur de connexion.');
+      }
+
+      try {
+        localStorage.setItem(SESSION_STORAGE_KEY, res.sessionSecret);
+      } catch {
+        // ignore storage quota restrictions
+      }
       setSessionToken(res.sessionSecret);
       setUserRow(res.user);
       setWalletRow(res.wallet);
@@ -855,7 +900,16 @@ export default function App() {
     } catch (err) {
       setLoginTurnstileToken('');
       setLoginTurnstileReset(k => k + 1);
-      setLoginError(err instanceof Error ? err.message : 'Email ou mot de passe incorrect.');
+      const rawMsg = err instanceof Error ? err.message : '';
+      if (rawMsg.includes('404')) {
+        setLoginError(
+          hasSupabaseConfig
+            ? 'Route de connexion introuvable (404). Vérifiez le déploiement des fonctions /api sur Vercel.'
+            : 'Service de connexion indisponible (404). Vérifiez la configuration Vercel / API ou les variables d’environnement.'
+        );
+      } else {
+        setLoginError(rawMsg || 'Email ou mot de passe incorrect.');
+      }
     } finally {
       setLoginLoading(false);
     }
@@ -2575,6 +2629,23 @@ export default function App() {
               Créer compte
             </button>
             <PWAInstallButton />
+            <footer className="pt-2 text-center text-[11px] text-purple-300/80 flex items-center justify-center gap-3">
+              <button
+                type="button"
+                onClick={() => setScreen('conditions')}
+                className="underline hover:text-white"
+              >
+                Conditions d&apos;utilisation
+              </button>
+              <span>•</span>
+              <button
+                type="button"
+                onClick={() => openPrivacyPolicy('splash')}
+                className="underline hover:text-white font-semibold"
+              >
+                Politique de Confidentialité
+              </button>
+            </footer>
           </div>
         </div>
       )}
@@ -2784,6 +2855,30 @@ export default function App() {
                 </span>
               </label>
 
+              <label className="flex items-start gap-2.5 cursor-pointer bg-[#1D1240]/70 p-3 rounded-xl border border-[#8B5CF6]/30">
+                <input
+                  type="checkbox"
+                  required
+                  checked={signUpData.acceptePolitique}
+                  onChange={e => setSignUpData({ ...signUpData, acceptePolitique: e.target.checked })}
+                  className="mt-0.5 rounded border-[#8B5CF6] text-[#7C3AED] shrink-0"
+                />
+                <span className="text-xs text-purple-200 leading-snug">
+                  J&apos;accepte la{' '}
+                  <button
+                    type="button"
+                    onClick={e => {
+                      e.preventDefault();
+                      e.stopPropagation();
+                      openPrivacyPolicy('signup');
+                    }}
+                    className="text-[#A78BFA] font-black underline hover:text-white"
+                  >
+                    Politique de Confidentialité
+                  </button>
+                </span>
+              </label>
+
               <TurnstileWidget
                 siteKey={turnstileSiteKey}
                 token={signUpTurnstileToken}
@@ -2806,11 +2901,22 @@ export default function App() {
             </form>
           </div>
 
-          <div className="text-center pt-4">
-            <button onClick={() => setScreen('login')} className="text-xs text-purple-300">
-              Déjà un compte ? <span className="text-[#8B5CF6] font-bold underline">Se connecter</span>
-            </button>
-          </div>
+          <footer className="text-center pt-4 space-y-2">
+            <div>
+              <button onClick={() => setScreen('login')} className="text-xs text-purple-300">
+                Déjà un compte ? <span className="text-[#8B5CF6] font-bold underline">Se connecter</span>
+              </button>
+            </div>
+            <div>
+              <button
+                type="button"
+                onClick={() => openPrivacyPolicy('signup')}
+                className="text-[11px] text-purple-300/80 underline hover:text-white"
+              >
+                Politique de Confidentialité
+              </button>
+            </div>
+          </footer>
         </div>
       )}
 
@@ -2935,6 +3041,82 @@ export default function App() {
       )}
 
       {/* ========================================================
+          POLITIQUE DE CONFIDENTIALITÉ - SALOMA
+         ======================================================== */}
+      {screen === 'privacy' && (
+        <div className="min-h-screen p-5 max-w-md mx-auto w-full z-10 flex flex-col space-y-4">
+          <div className="flex items-center justify-between">
+            <button
+              type="button"
+              onClick={() => setScreen(privacyReturnScreen)}
+              className="p-2 rounded-xl bg-[#23154D] text-purple-300"
+            >
+              <ArrowLeft className="w-5 h-5" />
+            </button>
+            <div className="text-center">
+              <span className="text-[11px] font-mono font-black px-3 py-1 rounded-full bg-[#7C3AED]/30 border border-[#8B5CF6] text-purple-100">
+                confidentialite.saloma
+              </span>
+              <h2 className="font-black text-base text-white mt-1">Politique de Confidentialité</h2>
+            </div>
+            <div className="w-9" />
+          </div>
+
+          <div className="flex-1 p-4 rounded-3xl bg-[#1D1240] border-2 border-[#8B5CF6]/60 text-xs text-purple-100/90 leading-relaxed space-y-3 overflow-y-auto max-h-[72vh]">
+            <div className="border-b border-purple-500/30 pb-2 space-y-1">
+              <p className="font-black text-white text-sm">POLITIQUE DE CONFIDENTIALITÉ - SALOMA</p>
+              <p className="text-[11px] text-purple-300 font-semibold">
+                Dernière mise à jour : 16 Novembre 2026
+              </p>
+            </div>
+
+            <p>
+              <strong>1. DONNÉES COLLECTÉES :</strong> Nom, prénom, email, téléphone, photo de profil, documents KYC (CIN, adresse, code postal), historique Trade, Portefeuille, Earn.
+            </p>
+            <p>
+              <strong>2. UTILISATION :</strong> Vérifier votre identité (KYC Niveau 1 et 2), sécuriser votre compte, améliorer SALOMA, lutter contre la fraude.
+            </p>
+            <p>
+              <strong>3. KYC :</strong> Niveau 1 auto-validé. Niveau 2 vérifié manuellement par l&apos;Admin. Vos documents CIN ne sont jamais vendus ni partagés. Ils sont visibles uniquement par l&apos;Admin pour validation.
+            </p>
+            <p>
+              <strong>4. SÉCURITÉ :</strong> Vérification Cloudflare Turnstile contre les robots, mot de passe crypté, données protégées.
+            </p>
+            <p>
+              <strong>5. HISTORIQUE :</strong> Vous pouvez effacer votre historique Trade, Portefeuille et Earn à tout moment.
+            </p>
+            <p>
+              <strong>6. PARTAGE :</strong> Nous ne vendons JAMAIS vos données. Aucun partage avec Bybit, Binance, OKX ou autre plateforme sans votre accord.
+            </p>
+            <p>
+              <strong>7. VOS DROITS :</strong> Vous pouvez demander la suppression de votre compte et de vos données à tout moment en contactant l&apos;Admin.
+            </p>
+            <p>
+              <strong>8. CONTACT :</strong> Via le support dans l&apos;application SALOMA.
+            </p>
+            <p className="pt-2 border-t border-purple-500/30 font-bold text-white">
+              En utilisant SALOMA, vous acceptez cette politique.
+            </p>
+          </div>
+
+          <button
+            type="button"
+            onClick={() => {
+              if (privacyReturnScreen === 'signup') {
+                setSignUpData(prev => ({ ...prev, acceptePolitique: true }));
+              }
+              setScreen(privacyReturnScreen);
+            }}
+            className="w-full py-3.5 rounded-xl bg-gradient-to-r from-[#7C3AED] to-[#8B5CF6] text-white font-black text-xs"
+          >
+            {privacyReturnScreen === 'signup'
+              ? 'Accepter et revenir à l’inscription'
+              : 'Retour'}
+          </button>
+        </div>
+      )}
+
+      {/* ========================================================
           CONNEXION SCREEN (EMAIL + MOT DE PASSE APPWRITE)
          ======================================================== */}
       {screen === 'login' && (
@@ -2954,6 +3136,14 @@ export default function App() {
             {loginError && (
               <div className="p-3 mb-4 rounded-xl bg-rose-500/20 border border-rose-500/40 text-rose-300 text-xs font-bold">
                 {loginError}
+              </div>
+            )}
+
+            {isCloudflareTestMode && (
+              <div className="p-3 mb-4 rounded-xl bg-amber-500/15 border border-amber-400/40 text-amber-200 text-[11px] leading-snug">
+                <strong className="text-amber-300 block mb-0.5">Info Cloudflare : Mode Test actif</strong>
+                Le widget affiche « À des fins de test uniquement ». Configurez{' '}
+                <span className="font-mono font-bold text-white">VITE_CLOUDFLARE_SITE_KEY</span> sur Vercel ou dans Admin → Sécurité pour la production.
               </div>
             )}
 
@@ -3025,11 +3215,22 @@ export default function App() {
               </button>
             </form>
           </div>
-          <div className="text-center pt-4">
-            <button onClick={() => setScreen('signup')} className="text-xs text-purple-300">
-              Pas encore de compte ? <span className="text-[#8B5CF6] font-bold underline">Créer compte</span>
-            </button>
-          </div>
+          <footer className="text-center pt-4 space-y-2">
+            <div>
+              <button onClick={() => setScreen('signup')} className="text-xs text-purple-300">
+                Pas encore de compte ? <span className="text-[#8B5CF6] font-bold underline">Créer compte</span>
+              </button>
+            </div>
+            <div>
+              <button
+                type="button"
+                onClick={() => openPrivacyPolicy('login')}
+                className="text-[11px] text-purple-300/80 underline hover:text-white"
+              >
+                Politique de Confidentialité
+              </button>
+            </div>
+          </footer>
         </div>
       )}
 
@@ -4914,6 +5115,17 @@ export default function App() {
                 </div>
               </div>
             )}
+            <footer className="mt-5 pt-3 pb-2 border-t border-purple-500/20 text-center text-[11px] text-purple-300/80 flex items-center justify-center gap-3">
+              <span>© SALOMA</span>
+              <span>•</span>
+              <button
+                type="button"
+                onClick={() => openPrivacyPolicy('main')}
+                className="underline hover:text-white font-semibold"
+              >
+                Politique de Confidentialité
+              </button>
+            </footer>
           </main>
 
           {/* BOTTOM NAVIGATION */}
@@ -5538,6 +5750,13 @@ export default function App() {
                 <HelpCircle className="w-4 h-4 text-[#8B5CF6]" /> Mode d'emploi
               </button>
             </div>
+            <button
+              onClick={() => openPrivacyPolicy('main')}
+              className="w-full py-2.5 rounded-xl bg-[#23154D] border border-[#8B5CF6]/40 text-purple-200 text-xs font-bold flex items-center justify-center gap-1.5"
+            >
+              <ShieldCheck className="w-4 h-4 text-[#A78BFA]" />
+              <span>Politique de Confidentialité</span>
+            </button>
             <button
               onClick={() => setActiveModal('reportProblem')}
               className="w-full py-2.5 rounded-xl bg-amber-500/20 border border-amber-400/50 text-amber-200 text-xs font-black flex items-center justify-center gap-1.5"

@@ -188,7 +188,7 @@ function loadTurnstileStore(): TurnstileStore {
   } catch {
     // fallback to env or test keys
   }
-  const envSite = String(process.env.TURNSTILE_SITE_KEY || '').trim();
+  const envSite = String(process.env.TURNSTILE_SITE_KEY || process.env.VITE_CLOUDFLARE_SITE_KEY || '').trim();
   const envSecret = String(process.env.TURNSTILE_SECRET_KEY || '').trim();
   if (envSite && envSecret) {
     return {
@@ -198,9 +198,9 @@ function loadTurnstileStore(): TurnstileStore {
     };
   }
   return {
-    siteKey: TEST_TURNSTILE_SITE_KEY,
-    secretKey: TEST_TURNSTILE_SECRET_KEY,
-    isCustom: false
+    siteKey: envSite || TEST_TURNSTILE_SITE_KEY,
+    secretKey: envSecret || TEST_TURNSTILE_SECRET_KEY,
+    isCustom: Boolean(envSite && envSite !== TEST_TURNSTILE_SITE_KEY && envSecret)
   };
 }
 
@@ -1132,7 +1132,7 @@ function requireVerified(req: AuthedRequest, res: Response, next: NextFunction) 
   next();
 }
 
-async function startServer() {
+export function createSalomaApiApp() {
   const app = express();
   app.use(express.json({ limit: '1mb' }));
 
@@ -3313,6 +3313,12 @@ async function startServer() {
     res.json({ turnstile: getMaskedTurnstileConfig() });
   });
 
+  return app;
+}
+
+async function startServer() {
+  const app = createSalomaApiApp();
+
   // ========================================================
   // VITE MIDDLEWARE (DEV) OR STATIC DIST (PROD)
   // ========================================================
@@ -3379,7 +3385,9 @@ async function startServer() {
   });
 }
 
-startServer().catch(err => {
-  console.error('Failed to start server:', err);
-  process.exit(1);
-});
+if (!process.env.VERCEL) {
+  startServer().catch(err => {
+    console.error('Failed to start server:', err);
+    process.exit(1);
+  });
+}

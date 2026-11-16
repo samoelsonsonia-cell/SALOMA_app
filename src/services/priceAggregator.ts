@@ -1199,9 +1199,15 @@ export interface PriceStreamHandlers {
 }
 
 export function subscribeToPricesWebSocket(handlers: PriceStreamHandlers): () => void {
+  if (typeof window === 'undefined' || typeof WebSocket === 'undefined') {
+    return () => {};
+  }
+
   let closed = false;
   let ws: WebSocket | null = null;
   let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  let retryDelayMs = 1500;
+  let consecutiveFailures = 0;
 
   const connect = () => {
     if (closed) return;
@@ -1211,11 +1217,17 @@ export function subscribeToPricesWebSocket(handlers: PriceStreamHandlers): () =>
       ws = new WebSocket(url);
     } catch {
       handlers.onStatusChange?.(false);
-      reconnectTimer = setTimeout(connect, 1000);
+      consecutiveFailures++;
+      if (consecutiveFailures <= 4) {
+        reconnectTimer = setTimeout(connect, retryDelayMs);
+        retryDelayMs = Math.min(retryDelayMs * 2, 30000);
+      }
       return;
     }
 
     ws.onopen = () => {
+      consecutiveFailures = 0;
+      retryDelayMs = 1500;
       handlers.onStatusChange?.(true);
     };
 
@@ -1255,8 +1267,10 @@ export function subscribeToPricesWebSocket(handlers: PriceStreamHandlers): () =>
 
     ws.onclose = () => {
       handlers.onStatusChange?.(false);
-      if (!closed) {
-        reconnectTimer = setTimeout(connect, 800);
+      consecutiveFailures++;
+      if (!closed && consecutiveFailures <= 5) {
+        reconnectTimer = setTimeout(connect, retryDelayMs);
+        retryDelayMs = Math.min(retryDelayMs * 2, 30000);
       }
     };
   };

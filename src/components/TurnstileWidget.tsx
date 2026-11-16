@@ -155,6 +155,9 @@ export const TurnstileWidget: React.FC<TurnstileWidgetProps> = ({
     setReloadNonce(n => n + 1);
   };
 
+  const effectiveSiteKey = (siteKey || '1x00000000000000000000AA').trim();
+  const isTestMode = effectiveSiteKey === '1x00000000000000000000AA';
+
   return (
     <div
       className={`p-2.5 rounded-2xl border transition ${
@@ -169,6 +172,11 @@ export const TurnstileWidget: React.FC<TurnstileWidgetProps> = ({
           <span className="text-[10px] font-bold text-purple-200 truncate">
             Cloudflare • Je ne suis pas un robot
           </span>
+          {isTestMode && (
+            <span className="px-1.5 py-0.5 rounded bg-amber-500/20 border border-amber-400/50 text-amber-300 text-[9px] font-black shrink-0">
+              Mode Test
+            </span>
+          )}
         </div>
 
         {isVerified ? (
@@ -188,6 +196,13 @@ export const TurnstileWidget: React.FC<TurnstileWidgetProps> = ({
           </button>
         )}
       </div>
+
+      {isTestMode && (
+        <div className="mb-2 px-2 py-1.5 rounded-xl bg-amber-500/10 border border-amber-400/35 text-amber-200 text-[10px] leading-snug">
+          Clé Cloudflare en <strong>mode test</strong> (« À des fins de test uniquement »). Ajoutez{' '}
+          <span className="font-mono font-bold text-amber-300">VITE_CLOUDFLARE_SITE_KEY</span> en production ou via Admin → Sécu.
+        </div>
+      )}
 
       {loadError ? (
         <div className="p-2 rounded-xl bg-rose-500/15 border border-rose-500/40 text-rose-300 text-[10px] font-bold flex items-center justify-between gap-2">
