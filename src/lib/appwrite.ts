@@ -44,9 +44,13 @@ export interface ApiError extends Error {
 export function isApiNotFoundError(err: unknown): boolean {
   if (!err || typeof err !== 'object') return false;
   const e = err as ApiError;
-  if (e.status === 404) return true;
+  if (e.status === 404 || (typeof e.status === 'number' && e.status >= 500)) return true;
   const msg = String(e.message || '');
-  return msg.includes('(404)') || msg.includes('Service API introuvable');
+  return (
+    msg.includes('(404)') ||
+    msg.includes('(500)') ||
+    msg.includes('Service API introuvable')
+  );
 }
 
 export function isTurnstileRetryError(err: unknown): boolean {

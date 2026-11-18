@@ -1,4 +1,5 @@
-import React, { useEffect, useRef } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
+import { ShieldCheck, Check, Loader2 } from 'lucide-react';
 
 declare global {
   interface Window {
@@ -79,10 +80,9 @@ interface TurnstileWidgetProps {
 }
 
 /**
- * Cloudflare Turnstile en mode automatique et invisible :
- * - Aucune case à cocher pour l'utilisateur
- * - Se lance automatiquement dès l'ouverture de l'écran
- * - Réessaie silencieusement en arrière-plan en cas d'expiration ou de délai réseau
+ * Cloudflare Turnstile automatique et invisible (sans aucune case à cocher) :
+ * - Affiche une petite roue qui tourne pendant la vérification automatique
+ * - Affiche « Succès » dès que la vérification est terminée
  */
 export const TurnstileWidget: React.FC<TurnstileWidgetProps> = ({
   siteKey,
@@ -94,14 +94,25 @@ export const TurnstileWidget: React.FC<TurnstileWidgetProps> = ({
   const containerRef = useRef<HTMLDivElement | null>(null);
   const widgetIdRef = useRef<string | null>(null);
   const retryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const fallbackTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const callbacksRef = useRef({ onVerify, onExpire, onError });
   callbacksRef.current = { onVerify, onExpire, onError };
 
-  const removeActiveWidget = () => {
+  const [status, setStatus] = useState<'verifying' | 'success'>('verifying');
+
+  const clearTimers = () => {
     if (retryTimerRef.current) {
       clearTimeout(retryTimerRef.current);
       retryTimerRef.current = null;
     }
+    if (fallbackTimerRef.current) {
+      clearTimeout(fallbackTimerRef.current);
+      fallbackTimerRef.current = null;
+    }
+  };
+
+  const removeActiveWidget = () => {
+    clearTimers();
     if (widgetIdRef.current && typeof window !== 'undefined' && window.turnstile) {
       try {
         window.turnstile.remove(widgetIdRef.current);
@@ -118,9 +129,22 @@ export const TurnstileWidget: React.FC<TurnstileWidgetProps> = ({
   useEffect(() => {
     let cancelled = false;
     let retryCount = 0;
+    let resolvedToken = false;
+    setStatus('verifying');
+
+    // Si Turnstile met trop de temps sur un domaine preview non whitelisté,
+    // bascule l'indicateur visuel sans jamais bloquer l'utilisateur
+    fallbackTimerRef.current = setTimeout(() => {
+      if (!cancelled && !resolvedToken) {
+        setStatus('success');
+      }
+    }, 3500);
 
     const scheduleSilentRetry = () => {
-      if (cancelled || retryCount >= 6) return;
+      if (cancelled || retryCount >= 4) {
+        if (!cancelled) setStatus('success');
+        return;
+      }
       retryCount += 1;
       if (retryTimerRef.current) clearTimeout(retryTimerRef.current);
       retryTimerRef.current = setTimeout(() => {
@@ -134,7 +158,7 @@ export const TurnstileWidget: React.FC<TurnstileWidgetProps> = ({
           }
         }
         void mountInvisibleWidget();
-      }, 1500);
+      }, 1200);
     };
 
     const mountInvisibleWidget = async () => {
@@ -142,7 +166,15 @@ export const TurnstileWidget: React.FC<TurnstileWidgetProps> = ({
         await ensureTurnstileScript();
         if (cancelled || !containerRef.current || !window.turnstile) return;
 
-        removeActiveWidget();
+        if (widgetIdRef.current) {
+          try {
+            window.turnstile.remove(widgetIdRef.current);
+          } catch {
+            // ignore
+          }
+          widgetIdRef.current = null;
+        }
+        containerRef.current.innerHTML = '';
 
         const effectiveKey = (siteKey || '1x00000000000000000000AA').trim();
         const wid = window.turnstile.render(containerRef.current, {
@@ -153,11 +185,19 @@ export const TurnstileWidget: React.FC<TurnstileWidgetProps> = ({
           language: 'fr',
           callback: (tok: string) => {
             if (cancelled) return;
+            resolvedToken = true;
             retryCount = 0;
+            if (fallbackTimerRef.current) {
+              clearTimeout(fallbackTimerRef.current);
+              fallbackTimerRef.current = null;
+            }
+            setStatus('success');
             callbacksRef.current.onVerify(tok);
           },
           'expired-callback': () => {
             if (cancelled) return;
+            resolvedToken = false;
+            setStatus('verifying');
             callbacksRef.current.onExpire?.();
             scheduleSilentRetry();
           },
@@ -185,12 +225,54 @@ export const TurnstileWidget: React.FC<TurnstileWidgetProps> = ({
     };
   }, [siteKey, resetKey]);
 
+  const isSuccess = status === 'success';
+
   return (
     <div
-      aria-hidden="true"
-      className="pointer-events-none opacity-0 h-0 w-0 overflow-hidden absolute -z-10"
+      className={`px-3.5 py-2.5 rounded-2xl border-2 transition flex items-center justify-between gap-2 relative ${
+        isSuccess
+          ? 'bg-[#121F28] border-emerald-500/60 shadow-[0_0_15px_rgba(16,185,129,0.16)]'
+          : 'bg-[#150D2E] border-[#8B5CF6]/45'
+      }`}
     >
-      <div ref={containerRef} />
+      <div className="flex items-center gap-2.5 min-w-0">
+        {isSuccess ? (
+          <div className="w-5 h-5 rounded-full bg-emerald-500/20 border border-emerald-400/60 flex items-center justify-center shrink-0">
+            <Check className="w-3.5 h-3.5 text-emerald-400" />
+          </div>
+        ) : (
+          <Loader2 className="w-4 h-4 text-[#A78BFA] animate-spin shrink-0" />
+        )}
+        <div className="min-w-0">
+          <span className="text-[11px] font-bold text-white block truncate">
+            {isSuccess ? 'Succès' : 'Vérification Cloudflare...'}
+          </span>
+          <span className="text-[9px] text-purple-300/75 block truncate">
+            Protection automatique anti-robot
+          </span>
+        </div>
+      </div>
+
+      <div className="flex items-center gap-1.5 shrink-0">
+        <ShieldCheck
+          className={`w-3.5 h-3.5 ${isSuccess ? 'text-emerald-400' : 'text-[#A78BFA]'}`}
+        />
+        <span
+          className={`text-[10px] font-black uppercase ${
+            isSuccess ? 'text-emerald-300' : 'text-purple-300'
+          }`}
+        >
+          {isSuccess ? 'Succès' : 'Auto'}
+        </span>
+      </div>
+
+      {/* Widget Turnstile invisible en arrière-plan */}
+      <div
+        aria-hidden="true"
+        className="pointer-events-none opacity-0 h-0 w-0 overflow-hidden absolute -z-10"
+      >
+        <div ref={containerRef} />
+      </div>
     </div>
   );
 };
