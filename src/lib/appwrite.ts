@@ -10,7 +10,9 @@ const readEnv = (getter: () => unknown, fallback = ''): string => {
 export const ENV_CONFIG = {
   supabaseUrl: readEnv(() => import.meta.env?.VITE_SUPABASE_URL, ''),
   supabaseAnonKey: readEnv(() => import.meta.env?.VITE_SUPABASE_ANON_KEY, ''),
-  cloudflareSiteKey: readEnv(() => import.meta.env?.VITE_CLOUDFLARE_SITE_KEY, ''),
+  cloudflareSiteKey:
+    readEnv(() => import.meta.env?.VITE_CLOUDFLARE_SITE_KEY, '') ||
+    readEnv(() => import.meta.env?.NEXT_PUBLIC_CLOUDFLARE_SITE_KEY, ''),
   appwriteEndpoint: readEnv(
     () => import.meta.env?.VITE_APPWRITE_ENDPOINT,
     'https://fra.cloud.appwrite.io/v1'

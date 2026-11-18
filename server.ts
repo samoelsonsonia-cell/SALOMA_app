@@ -3,6 +3,7 @@ import express, { type Request, type Response, type NextFunction } from 'express
 import path from 'path';
 import fs from 'fs';
 import http from 'http';
+import crypto from 'crypto';
 import { EventEmitter } from 'events';
 import WebSocket, { WebSocketServer } from 'ws';
 import bcrypt from 'bcryptjs';
@@ -170,14 +171,33 @@ interface TurnstileStore {
   isCustom: boolean;
 }
 
+function getEnvTurnstileSiteKey(): string {
+  return String(
+    process.env.VITE_CLOUDFLARE_SITE_KEY ||
+      process.env.NEXT_PUBLIC_CLOUDFLARE_SITE_KEY ||
+      process.env.TURNSTILE_SITE_KEY ||
+      ''
+  ).trim();
+}
+
+function getEnvTurnstileSecretKey(): string {
+  return String(
+    process.env.CLOUDFLARE_TURNSTILE_SECRET_KEY ||
+      process.env.TURNSTILE_SECRET_KEY ||
+      ''
+  ).trim();
+}
+
 function loadTurnstileStore(): TurnstileStore {
+  const envSite = getEnvTurnstileSiteKey();
+  const envSecret = getEnvTurnstileSecretKey();
   try {
     if (fs.existsSync(TURNSTILE_CONFIG_FILE)) {
       const raw = fs.readFileSync(TURNSTILE_CONFIG_FILE, 'utf8');
       const parsed = JSON.parse(raw) as Partial<TurnstileStore>;
       const sk = String(parsed.siteKey || '').trim();
       const sec = String(parsed.secretKey || '').trim();
-      if (sk && sec) {
+      if (sk && sec && (sk !== TEST_TURNSTILE_SITE_KEY || !envSecret)) {
         return {
           siteKey: sk,
           secretKey: sec,
@@ -188,8 +208,6 @@ function loadTurnstileStore(): TurnstileStore {
   } catch {
     // fallback to env or test keys
   }
-  const envSite = String(process.env.TURNSTILE_SITE_KEY || process.env.VITE_CLOUDFLARE_SITE_KEY || '').trim();
-  const envSecret = String(process.env.TURNSTILE_SECRET_KEY || '').trim();
   if (envSite && envSecret) {
     return {
       siteKey: envSite,
@@ -206,6 +224,14 @@ function loadTurnstileStore(): TurnstileStore {
 
 let turnstileStore: TurnstileStore = loadTurnstileStore();
 
+function getActiveTurnstileSecret(): string {
+  const envSecret = getEnvTurnstileSecretKey();
+  if (turnstileStore.isCustom && turnstileStore.secretKey.trim()) {
+    return turnstileStore.secretKey.trim();
+  }
+  return (envSecret || turnstileStore.secretKey || TEST_TURNSTILE_SECRET_KEY).trim();
+}
+
 function saveTurnstileStore() {
   try {
     fs.writeFileSync(TURNSTILE_CONFIG_FILE, JSON.stringify(turnstileStore, null, 2), { mode: 0o600 });
@@ -215,23 +241,41 @@ function saveTurnstileStore() {
 }
 
 function getMaskedTurnstileConfig() {
+  const activeSecret = getActiveTurnstileSecret();
   return {
     siteKey: turnstileStore.siteKey,
-    hasSecretKey: Boolean(turnstileStore.secretKey.trim()),
-    secretKeyMasked: maskSecretValue(turnstileStore.secretKey, 16),
-    isCustomConfigured: Boolean(turnstileStore.isCustom)
+    hasSecretKey: Boolean(activeSecret),
+    secretKeyMasked: maskSecretValue(activeSecret, 16),
+    isCustomConfigured: Boolean(turnstileStore.isCustom || (turnstileStore.siteKey !== TEST_TURNSTILE_SITE_KEY && activeSecret !== TEST_TURNSTILE_SECRET_KEY))
   };
 }
 
-async function verifyTurnstileToken(token: unknown, remoteIp?: string): Promise<boolean> {
-  const cleanToken = typeof token === 'string' ? token.trim() : '';
-  if (!cleanToken) return false;
+function getClientIp(req: Request): string | undefined {
+  const fwd = req.headers['x-forwarded-for'];
+  const first = Array.isArray(fwd)
+    ? fwd[0]
+    : typeof fwd === 'string'
+    ? fwd.split(',')[0]
+    : '';
+  const clean = (first || req.ip || '').trim();
+  if (!clean || clean === '127.0.0.1' || clean === '::1' || clean.startsWith('::ffff:127.')) {
+    return undefined;
+  }
+  return clean;
+}
 
-  const secret = (turnstileStore.secretKey || TEST_TURNSTILE_SECRET_KEY).trim();
-  if (!secret) return false;
+async function verifyTurnstileWithCloudflare(
+  token: unknown,
+  remoteIp?: string
+): Promise<{ success: boolean; errorCodes?: string[] }> {
+  const cleanToken = typeof token === 'string' ? token.trim() : '';
+  if (!cleanToken) return { success: false, errorCodes: ['missing-input-response'] };
+
+  const secret = getActiveTurnstileSecret();
+  if (!secret) return { success: false, errorCodes: ['missing-input-secret'] };
 
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), 5000);
+  const timer = setTimeout(() => controller.abort(), 7000);
   try {
     const form = new URLSearchParams();
     form.set('secret', secret);
@@ -246,14 +290,63 @@ async function verifyTurnstileToken(token: unknown, remoteIp?: string): Promise<
       body: form.toString(),
       signal: controller.signal
     });
-    if (!res.ok) return false;
-    const data = (await res.json()) as { success?: boolean };
-    return Boolean(data?.success);
+    if (!res.ok) return { success: false, errorCodes: [`http-${res.status}`] };
+    const data = (await res.json()) as { success?: boolean; 'error-codes'?: string[] };
+    return {
+      success: Boolean(data?.success),
+      errorCodes: Array.isArray(data?.['error-codes']) ? data['error-codes'] : undefined
+    };
   } catch {
-    return false;
+    return { success: false, errorCodes: ['network-error'] };
   } finally {
     clearTimeout(timer);
   }
+}
+
+function createTurnstileProof(token: string): string {
+  const secret = getActiveTurnstileSecret() || TEST_TURNSTILE_SECRET_KEY;
+  const tokenHash = crypto.createHash('sha256').update(token).digest('hex');
+  const exp = Date.now() + 5 * 60 * 1000;
+  const payload = Buffer.from(JSON.stringify({ h: tokenHash, exp }), 'utf8').toString('base64url');
+  const sig = crypto.createHmac('sha256', secret).update(payload).digest('base64url');
+  return `${payload}.${sig}`;
+}
+
+function verifyTurnstileProof(proof: unknown, token: unknown): boolean {
+  if (typeof proof !== 'string' || typeof token !== 'string') return false;
+  const cleanProof = proof.trim();
+  const cleanToken = token.trim();
+  if (!cleanProof || !cleanToken || !cleanProof.includes('.')) return false;
+  const [payload, sig] = cleanProof.split('.');
+  if (!payload || !sig) return false;
+  const secret = getActiveTurnstileSecret() || TEST_TURNSTILE_SECRET_KEY;
+  const expectedSig = crypto.createHmac('sha256', secret).update(payload).digest('base64url');
+  const sigBuf = Buffer.from(sig);
+  const expBuf = Buffer.from(expectedSig);
+  if (sigBuf.length !== expBuf.length || !crypto.timingSafeEqual(sigBuf, expBuf)) {
+    return false;
+  }
+  try {
+    const decoded = JSON.parse(Buffer.from(payload, 'base64url').toString('utf8')) as {
+      h?: string;
+      exp?: number;
+    };
+    if (!decoded?.h || !decoded?.exp || Date.now() > decoded.exp) return false;
+    const tokenHash = crypto.createHash('sha256').update(cleanToken).digest('hex');
+    return decoded.h === tokenHash;
+  } catch {
+    return false;
+  }
+}
+
+async function validateTurnstileSubmission(req: Request): Promise<boolean> {
+  const token = req.body?.turnstileToken ?? req.body?.token;
+  const proof = req.body?.turnstileProof ?? req.body?.verifiedProof;
+  if (verifyTurnstileProof(proof, token)) {
+    return true;
+  }
+  const result = await verifyTurnstileWithCloudflare(token, getClientIp(req));
+  return result.success;
 }
 
 const CRYPTO_NETWORK_FEES: Record<string, { chain: string; fee: number; minDeposit: number; minWithdraw: number; depositAddress: string }> = {
@@ -1141,11 +1234,39 @@ export function createSalomaApiApp() {
   // ========================================================
 
   app.get('/api/security/turnstile', (_req: Request, res: Response) => {
+    const masked = getMaskedTurnstileConfig();
     res.json({
-      siteKey: turnstileStore.siteKey,
-      isCustomConfigured: Boolean(turnstileStore.isCustom)
+      siteKey: masked.siteKey,
+      isCustomConfigured: masked.isCustomConfigured
     });
   });
+
+  const handleTurnstileVerify = async (req: Request, res: Response) => {
+    const token = String(req.body?.token || req.body?.turnstileToken || '').trim();
+    if (!token) {
+      res.status(400).json({
+        success: false,
+        error: 'Erreur de vérification Cloudflare. Cliquez sur Actualiser.'
+      });
+      return;
+    }
+    const result = await verifyTurnstileWithCloudflare(token, getClientIp(req));
+    if (!result.success) {
+      res.status(400).json({
+        success: false,
+        error: 'Erreur de vérification Cloudflare. Cliquez sur Actualiser.',
+        errorCodes: result.errorCodes
+      });
+      return;
+    }
+    res.json({
+      success: true,
+      verifiedProof: createTurnstileProof(token)
+    });
+  };
+
+  app.post('/api/security/turnstile/verify', handleTurnstileVerify);
+  app.post('/api/turnstile/verify', handleTurnstileVerify);
 
   // ========================================================
   // 1. AUTHENTIFICATION RÉELLE & CODE EMAIL APPWRITE
@@ -1160,14 +1281,14 @@ export function createSalomaApiApp() {
         telephone = '',
         password = '',
         parrain = '',
-        pays = 'Madagascar 🇲🇬',
-        turnstileToken = ''
+        pays = 'Madagascar 🇲🇬'
       } = req.body || {};
 
-      const turnstileValid = await verifyTurnstileToken(turnstileToken, req.ip);
+      const turnstileValid = await validateTurnstileSubmission(req);
       if (!turnstileValid) {
         res.status(400).json({
-          error: 'Vérification Cloudflare Turnstile obligatoire. Veuillez valider « Je ne suis pas un robot ».'
+          success: false,
+          error: 'Erreur de vérification Cloudflare. Cliquez sur Actualiser.'
         });
         return;
       }
@@ -1282,12 +1403,13 @@ export function createSalomaApiApp() {
 
   app.post('/api/auth/login', async (req: Request, res: Response) => {
     try {
-      const { email = '', password = '', turnstileToken = '' } = req.body || {};
+      const { email = '', password = '' } = req.body || {};
 
-      const turnstileValid = await verifyTurnstileToken(turnstileToken, req.ip);
+      const turnstileValid = await validateTurnstileSubmission(req);
       if (!turnstileValid) {
         res.status(400).json({
-          error: 'Vérification Cloudflare Turnstile obligatoire. Veuillez valider « Je ne suis pas un robot ».'
+          success: false,
+          error: 'Erreur de vérification Cloudflare. Cliquez sur Actualiser.'
         });
         return;
       }
@@ -1778,10 +1900,11 @@ export function createSalomaApiApp() {
 
   app.post('/api/wallet/withdraw', requireAuth, requireVerified, async (req: AuthedRequest, res: Response) => {
     try {
-      const turnstileValid = await verifyTurnstileToken(req.body?.turnstileToken, req.ip);
+      const turnstileValid = await validateTurnstileSubmission(req);
       if (!turnstileValid) {
         res.status(400).json({
-          error: 'Vérification Cloudflare Turnstile obligatoire avant validation du retrait.'
+          success: false,
+          error: 'Erreur de vérification Cloudflare. Cliquez sur Actualiser.'
         });
         return;
       }

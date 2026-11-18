@@ -500,10 +500,13 @@ export default function App() {
   );
   const isCloudflareTestMode = !turnstileSiteKey || turnstileSiteKey === TEST_TURNSTILE_SITE_KEY;
   const [signUpTurnstileToken, setSignUpTurnstileToken] = useState<string>('');
+  const [signUpTurnstileProof, setSignUpTurnstileProof] = useState<string>('');
   const [signUpTurnstileReset, setSignUpTurnstileReset] = useState<number>(0);
   const [loginTurnstileToken, setLoginTurnstileToken] = useState<string>('');
+  const [loginTurnstileProof, setLoginTurnstileProof] = useState<string>('');
   const [loginTurnstileReset, setLoginTurnstileReset] = useState<number>(0);
   const [withdrawTurnstileToken, setWithdrawTurnstileToken] = useState<string>('');
+  const [withdrawTurnstileProof, setWithdrawTurnstileProof] = useState<string>('');
   const [withdrawTurnstileReset, setWithdrawTurnstileReset] = useState<number>(0);
 
   useEffect(() => {
@@ -528,7 +531,9 @@ export default function App() {
 
   useEffect(() => {
     setSignUpTurnstileToken('');
+    setSignUpTurnstileProof('');
     setLoginTurnstileToken('');
+    setLoginTurnstileProof('');
   }, [screen]);
 
   // --- DASHBOARD LOADER & SESSION RESTORE ---
@@ -758,7 +763,8 @@ export default function App() {
           password: signUpData.password,
           parrain: signUpData.parrain.trim(),
           pays: signUpData.paysOrigine,
-          turnstileToken: signUpTurnstileToken
+          turnstileToken: signUpTurnstileToken,
+          turnstileProof: signUpTurnstileProof
         }
       });
 
@@ -774,11 +780,13 @@ export default function App() {
       setVerifyOtpError('');
       setResendCooldown(60);
       setSignUpTurnstileToken('');
+      setSignUpTurnstileProof('');
       setSignUpTurnstileReset(k => k + 1);
       setScreen('verifyEmail');
       showToast('Code de vérification envoyé à votre email');
     } catch (err) {
       setSignUpTurnstileToken('');
+      setSignUpTurnstileProof('');
       setSignUpTurnstileReset(k => k + 1);
       const rawMsg = err instanceof Error ? err.message : '';
       if (rawMsg.includes('404')) {
@@ -866,7 +874,8 @@ export default function App() {
         body: {
           email: loginEmail.trim().toLowerCase(),
           password: loginPassword,
-          turnstileToken: loginTurnstileToken
+          turnstileToken: loginTurnstileToken,
+          turnstileProof: loginTurnstileProof
         }
       });
 
@@ -883,6 +892,7 @@ export default function App() {
       setUserRow(res.user);
       setWalletRow(res.wallet);
       setLoginTurnstileToken('');
+      setLoginTurnstileProof('');
       setLoginTurnstileReset(k => k + 1);
 
       if (res.requiresEmailVerification) {
@@ -899,6 +909,7 @@ export default function App() {
       }
     } catch (err) {
       setLoginTurnstileToken('');
+      setLoginTurnstileProof('');
       setLoginTurnstileReset(k => k + 1);
       const rawMsg = err instanceof Error ? err.message : '';
       if (rawMsg.includes('404')) {
@@ -1460,6 +1471,7 @@ export default function App() {
     setIsWalletCoinDropdownOpen(false);
     setWalletCoinSearchTerm('');
     setWithdrawTurnstileToken('');
+    setWithdrawTurnstileProof('');
     setWithdrawTurnstileReset(k => k + 1);
     setActiveModal('withdraw');
   };
@@ -1544,18 +1556,21 @@ export default function App() {
           networkCode: activeNetwork.chain,
           networkLabel: activeNetworkLabel,
           priceUsd: coinPrice,
-          turnstileToken: withdrawTurnstileToken
+          turnstileToken: withdrawTurnstileToken,
+          turnstileProof: withdrawTurnstileProof
         }
       });
       await loadDashboard(sessionToken);
       setWithdrawAmountInput('');
       setWithdrawAccountInput('');
       setWithdrawTurnstileToken('');
+      setWithdrawTurnstileProof('');
       setWithdrawTurnstileReset(k => k + 1);
       setActiveModal(null);
       showToast('✓ Retrait en cours');
     } catch (err) {
       setWithdrawTurnstileToken('');
+      setWithdrawTurnstileProof('');
       setWithdrawTurnstileReset(k => k + 1);
       showToast(err instanceof Error ? err.message : 'Erreur lors du retrait.');
     } finally {
@@ -2883,8 +2898,14 @@ export default function App() {
                 siteKey={turnstileSiteKey}
                 token={signUpTurnstileToken}
                 resetKey={signUpTurnstileReset}
-                onVerify={setSignUpTurnstileToken}
-                onExpire={() => setSignUpTurnstileToken('')}
+                onVerify={(tok, proof) => {
+                  setSignUpTurnstileToken(tok);
+                  setSignUpTurnstileProof(proof || '');
+                }}
+                onExpire={() => {
+                  setSignUpTurnstileToken('');
+                  setSignUpTurnstileProof('');
+                }}
               />
 
               <button
@@ -3198,8 +3219,14 @@ export default function App() {
                 siteKey={turnstileSiteKey}
                 token={loginTurnstileToken}
                 resetKey={loginTurnstileReset}
-                onVerify={setLoginTurnstileToken}
-                onExpire={() => setLoginTurnstileToken('')}
+                onVerify={(tok, proof) => {
+                  setLoginTurnstileToken(tok);
+                  setLoginTurnstileProof(proof || '');
+                }}
+                onExpire={() => {
+                  setLoginTurnstileToken('');
+                  setLoginTurnstileProof('');
+                }}
               />
 
               <button
@@ -5551,8 +5578,14 @@ export default function App() {
               siteKey={turnstileSiteKey}
               token={withdrawTurnstileToken}
               resetKey={withdrawTurnstileReset}
-              onVerify={setWithdrawTurnstileToken}
-              onExpire={() => setWithdrawTurnstileToken('')}
+              onVerify={(tok, proof) => {
+                setWithdrawTurnstileToken(tok);
+                setWithdrawTurnstileProof(proof || '');
+              }}
+              onExpire={() => {
+                setWithdrawTurnstileToken('');
+                setWithdrawTurnstileProof('');
+              }}
             />
 
             <button

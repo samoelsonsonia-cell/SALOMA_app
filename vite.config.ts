@@ -32,6 +32,7 @@ function safeHmrClientPlugin(): Plugin {
 
 export default defineConfig(() => {
   return {
+    envPrefix: ['VITE_', 'NEXT_PUBLIC_'],
     plugins: [
       safeHmrClientPlugin(),
       react(),
