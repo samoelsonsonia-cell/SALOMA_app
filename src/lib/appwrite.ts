@@ -129,6 +129,7 @@ export async function apiRequest<T>(
     body?: unknown;
     token?: string | null;
     adminPin?: string | null;
+    adminEmail?: string | null;
     timeoutMs?: number;
   } = {}
 ): Promise<T> {
@@ -140,6 +141,9 @@ export async function apiRequest<T>(
   }
   if (options.adminPin) {
     headers['x-admin-pin'] = options.adminPin;
+  }
+  if (options.adminEmail) {
+    headers['x-admin-email'] = options.adminEmail;
   }
 
   const controller = typeof AbortController !== 'undefined' ? new AbortController() : null;

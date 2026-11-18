@@ -655,6 +655,7 @@ export default function App() {
     nom: '',
     prenom: '',
     email: '',
+    confirmEmail: '',
     password: '',
     confirmPassword: '',
     paysOrigine: 'Madagascar 🇲🇬',
@@ -719,6 +720,9 @@ export default function App() {
     return { score, missing, isValid: score === 5 };
   }, [signUpData.password]);
 
+  const emailsMatch =
+    signUpData.email.trim().length > 0 &&
+    signUpData.email.trim().toLowerCase() === signUpData.confirmEmail.trim().toLowerCase();
   const passwordsMatch =
     signUpData.password.length > 0 && signUpData.password === signUpData.confirmPassword;
   const localPhoneDigits = signUpData.numero.replace(/[^0-9]/g, '');
@@ -727,6 +731,7 @@ export default function App() {
   const canSubmitSignUp =
     signUpData.nom.trim().length > 0 &&
     /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(signUpData.email.trim()) &&
+    emailsMatch &&
     passwordChecks.isValid &&
     passwordsMatch &&
     localPhoneDigits.length >= 6 &&
@@ -736,6 +741,10 @@ export default function App() {
   const handleSignUpSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setSignUpError('');
+    if (!emailsMatch) {
+      setSignUpError('Les deux adresses e-mail doivent être identiques.');
+      return;
+    }
     if (!canSubmitSignUp) {
       setSignUpError('Veuillez remplir correctement tous les champs obligatoires.');
       return;
@@ -759,6 +768,7 @@ export default function App() {
           nom: signUpData.nom.trim(),
           prenom: signUpData.prenom.trim(),
           email: signUpData.email.trim().toLowerCase(),
+          confirmEmail: signUpData.confirmEmail.trim().toLowerCase(),
           telephone: fullPhoneWithPrefix,
           password: signUpData.password,
           parrain: signUpData.parrain.trim(),
@@ -1898,10 +1908,13 @@ export default function App() {
   const [adminTab, setAdminTab] = useState<'overview' | 'kyc' | 'profit' | 'trading' | 'wallet' | 'apis' | 'security'>('overview');
   const [adminKycActionId, setAdminKycActionId] = useState<string | null>(null);
   const [adminProfitPeriod, setAdminProfitPeriod] = useState<'jour' | 'semaine' | 'mois' | 'total'>('jour');
-  const [adminPin, setAdminPin] = useState<string>('88888888');
+  const [adminPin, setAdminPin] = useState<string>('');
+  const [adminEmail, setAdminEmail] = useState<string>('');
+  const [adminUnlockEmail, setAdminUnlockEmail] = useState<string>('');
+  const [adminUnlockConfirmEmail, setAdminUnlockConfirmEmail] = useState<string>('');
   const [adminUnlockInput1, setAdminUnlockInput1] = useState<string>('');
-  const [adminUnlockInput2, setAdminUnlockInput2] = useState<string>('');
   const [adminUnlockError, setAdminUnlockError] = useState<string>('');
+  const [adminUnlockLoading, setAdminUnlockLoading] = useState<boolean>(false);
 
   const [adminUsers, setAdminUsers] = useState<AppwriteUserRow[]>([]);
   const [adminTransactions, setAdminTransactions] = useState<AppwriteDepotRetraitRow[]>([]);
@@ -1939,7 +1952,7 @@ export default function App() {
   const [newCodeInput2, setNewCodeInput2] = useState<string>('');
   const [codeChangeMsg, setCodeChangeMsg] = useState<{ text: string; isError: boolean } | null>(null);
 
-  const fetchAdminOverview = useCallback(async (pin: string) => {
+  const fetchAdminOverview = useCallback(async (pin: string, email: string) => {
     setAdminLoading(true);
     try {
       const data = await apiRequest<{
@@ -1958,7 +1971,7 @@ export default function App() {
           updatedAt: number;
           primaryExchange?: 'BYBIT' | 'OKX' | 'BINANCE';
         };
-      }>('/api/admin/overview', { adminPin: pin });
+      }>('/api/admin/overview', { adminPin: pin, adminEmail: email });
 
       setAdminUsers(data.users || []);
       setAdminTransactions(data.transactions || []);
@@ -1990,6 +2003,7 @@ export default function App() {
       const res = await apiRequest<{ apis: AdminApisConfig }>(`/api/admin/apis/${provider}`, {
         method: 'POST',
         adminPin,
+        adminEmail,
         body: {
           apiKey: form.apiKey.trim(),
           secret: form.secret.trim(),
@@ -2015,6 +2029,7 @@ export default function App() {
       const res = await apiRequest<{ apis: AdminApisConfig }>(`/api/admin/apis/${provider}/toggle`, {
         method: 'POST',
         adminPin,
+        adminEmail,
         body: { enabled: nextEnabled }
       });
       setAdminApisConfig(res.apis);
@@ -2040,6 +2055,7 @@ export default function App() {
       }>('/api/admin/apis/primary', {
         method: 'POST',
         adminPin,
+        adminEmail,
         body: { primaryApi: provider }
       });
       setAdminApisConfig(res.apis);
@@ -2065,6 +2081,7 @@ export default function App() {
       const res = await apiRequest<{ turnstile: AdminTurnstileConfig }>('/api/admin/turnstile', {
         method: 'POST',
         adminPin,
+        adminEmail,
         body: {
           siteKey: cfSiteKeyInput.trim(),
           secretKey: cfSecretKeyInput.trim()
@@ -2096,6 +2113,7 @@ export default function App() {
       const res = await apiRequest<{ turnstile: AdminTurnstileConfig }>('/api/admin/turnstile', {
         method: 'POST',
         adminPin,
+        adminEmail,
         body: { resetToTest: true }
       });
       setAdminTurnstileConfig(res.turnstile);
@@ -2117,24 +2135,60 @@ export default function App() {
     }
   };
 
-  const handleAdminUnlock = async () => {
+  const handleAdminUnlock = async (e?: React.FormEvent) => {
+    if (e) e.preventDefault();
     setAdminUnlockError('');
-    if (!adminUnlockInput1 || !adminUnlockInput2) {
-      setAdminUnlockError('Veuillez renseigner les 2 champs.');
+    const cleanEmail = adminUnlockEmail.trim().toLowerCase();
+    const cleanConfirm = adminUnlockConfirmEmail.trim().toLowerCase();
+    const cleanCode = adminUnlockInput1.trim();
+
+    if (!cleanEmail || !cleanConfirm || !cleanCode) {
+      setAdminUnlockError('Veuillez saisir Email, Vérification Email et le Code à 9 chiffres.');
       return;
     }
-    if (!/^\d{8}$/.test(adminUnlockInput1) || adminUnlockInput1 !== adminUnlockInput2) {
-      setAdminUnlockError('Les deux codes doivent comporter 8 chiffres identiques.');
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(cleanEmail)) {
+      setAdminUnlockError('Adresse e-mail administrateur invalide.');
       return;
     }
+    if (cleanEmail !== cleanConfirm) {
+      setAdminUnlockError('Email et Vérification Email doivent être identiques.');
+      return;
+    }
+    if (!/^\d{9}$/.test(cleanCode)) {
+      setAdminUnlockError('Le code administrateur doit contenir exactement 9 chiffres.');
+      return;
+    }
+
+    setAdminUnlockLoading(true);
     try {
-      setAdminPin(adminUnlockInput1);
-      await fetchAdminOverview(adminUnlockInput1);
+      const res = await apiRequest<{ ok: boolean; email: string }>('/api/admin/unlock', {
+        method: 'POST',
+        body: {
+          email: cleanEmail,
+          confirmEmail: cleanConfirm,
+          code: cleanCode
+        }
+      });
+      const verifiedEmail = (res.email || cleanEmail).trim().toLowerCase();
+      setAdminPin(cleanCode);
+      setAdminEmail(verifiedEmail);
+      await fetchAdminOverview(cleanCode, verifiedEmail);
+      setAdminUnlockEmail('');
+      setAdminUnlockConfirmEmail('');
+      setAdminUnlockInput1('');
       setActiveModal(null);
       setScreen('admin');
       showToast('Accès Administrateur Déverrouillé');
     } catch (err) {
-      setAdminUnlockError(err instanceof Error ? err.message : 'Code administrateur invalide.');
+      setAdminPin('');
+      setAdminEmail('');
+      setAdminUnlockError(
+        err instanceof Error
+          ? err.message
+          : 'Accès refusé : Email ou Code à 9 chiffres incorrect.'
+      );
+    } finally {
+      setAdminUnlockLoading(false);
     }
   };
 
@@ -2144,9 +2198,10 @@ export default function App() {
       await apiRequest(`/api/admin/transactions/${tx.$id}/validate`, {
         method: 'POST',
         adminPin,
+        adminEmail,
         body: { priceUsd: coinMatch ? coinMatch.price : 0 }
       });
-      await fetchAdminOverview(adminPin);
+      await fetchAdminOverview(adminPin, adminEmail);
       if (sessionToken) await loadDashboard(sessionToken);
       showToast('✓ Transaction validée dans Appwrite !');
     } catch (err) {
@@ -2160,9 +2215,10 @@ export default function App() {
       await apiRequest(`/api/admin/transactions/${tx.$id}/reject`, {
         method: 'POST',
         adminPin,
+        adminEmail,
         body: { priceUsd: coinMatch ? coinMatch.price : 0 }
       });
-      await fetchAdminOverview(adminPin);
+      await fetchAdminOverview(adminPin, adminEmail);
       if (sessionToken) await loadDashboard(sessionToken);
       showToast('Transaction refusée.');
     } catch (err) {
@@ -2175,9 +2231,10 @@ export default function App() {
     try {
       await apiRequest(`/api/admin/kyc/${userRowId}/${action}`, {
         method: 'POST',
-        adminPin
+        adminPin,
+        adminEmail
       });
-      await fetchAdminOverview(adminPin);
+      await fetchAdminOverview(adminPin, adminEmail);
       if (sessionToken) await loadDashboard(sessionToken);
       showToast(action === 'validate' ? '✓ KYC client validé !' : 'KYC client refusé.');
     } catch (err) {
@@ -2193,9 +2250,10 @@ export default function App() {
       await apiRequest(`/api/admin/problemes/${prob.$id}/toggle`, {
         method: 'POST',
         adminPin,
+        adminEmail,
         body: { resolved: nextResolved }
       });
-      await fetchAdminOverview(adminPin);
+      await fetchAdminOverview(adminPin, adminEmail);
     } catch (err) {
       showToast(err instanceof Error ? err.message : 'Erreur mise à jour.');
     }
@@ -2204,21 +2262,22 @@ export default function App() {
   const handleChangeAdminCode = async (e: React.FormEvent) => {
     e.preventDefault();
     setCodeChangeMsg(null);
-    if (!/^\d{8}$/.test(newCodeInput1) || newCodeInput1 !== newCodeInput2) {
-      setCodeChangeMsg({ text: 'Le nouveau code doit comporter 8 chiffres identiques.', isError: true });
+    if (!/^\d{9}$/.test(newCodeInput1) || newCodeInput1 !== newCodeInput2) {
+      setCodeChangeMsg({ text: 'Le nouveau code doit comporter 9 chiffres identiques.', isError: true });
       return;
     }
     try {
       await apiRequest('/api/admin/pin', {
         method: 'POST',
         adminPin: oldCodeInput,
+        adminEmail,
         body: { newPin: newCodeInput1 }
       });
       setAdminPin(newCodeInput1);
       setOldCodeInput('');
       setNewCodeInput1('');
       setNewCodeInput2('');
-      setCodeChangeMsg({ text: 'Succès : Code administrateur 8 chiffres mis à jour !', isError: false });
+      setCodeChangeMsg({ text: 'Succès : Code administrateur 9 chiffres mis à jour !', isError: false });
       showToast('Code Administrateur modifié');
     } catch (err) {
       setCodeChangeMsg({
@@ -2254,6 +2313,10 @@ export default function App() {
     const n = logoClicks + 1;
     if (n >= 4) {
       setLogoClicks(0);
+      setAdminUnlockEmail('');
+      setAdminUnlockConfirmEmail('');
+      setAdminUnlockInput1('');
+      setAdminUnlockError('');
       setActiveModal('adminUnlock');
     } else {
       setLogoClicks(n);
@@ -2723,6 +2786,27 @@ export default function App() {
                   onChange={e => setSignUpData({ ...signUpData, email: e.target.value })}
                   className="w-full px-3 py-2.5 rounded-xl bg-[#1D1240] border-2 border-[#8B5CF6]/40 text-white placeholder-purple-400/50 focus:outline-none focus:border-[#8B5CF6]"
                 />
+              </div>
+
+              <div>
+                <label className="font-bold text-purple-300 block mb-1">Vérification Email *</label>
+                <input
+                  type="email"
+                  required
+                  placeholder="Confirmez votre email"
+                  value={signUpData.confirmEmail}
+                  onChange={e => setSignUpData({ ...signUpData, confirmEmail: e.target.value })}
+                  className="w-full px-3 py-2.5 rounded-xl bg-[#1D1240] border-2 border-[#8B5CF6]/40 text-white placeholder-purple-400/50 focus:outline-none focus:border-[#8B5CF6]"
+                />
+                {signUpData.confirmEmail.length > 0 && (
+                  <span
+                    className={`text-[10px] font-bold block mt-1 ${
+                      emailsMatch ? 'text-emerald-400' : 'text-rose-400'
+                    }`}
+                  >
+                    {emailsMatch ? '✓ Emails identiques' : '✗ Les deux adresses email doivent être identiques'}
+                  </span>
+                )}
                 <span className="text-[10px] text-purple-300/75 block mt-1">
                   Un code de vérification à 6 chiffres sera envoyé à cet email après l’inscription.
                 </span>
@@ -5893,9 +5977,24 @@ export default function App() {
             <div className="flex justify-between items-center">
               <div className="flex items-center gap-2">
                 <Lock className="w-5 h-5 text-amber-400" />
-                <h3 className="font-black text-white text-base">Entrée Administrateur</h3>
+                <div>
+                  <h3 className="font-black text-white text-base">Entrée Administrateur</h3>
+                  <span className="text-[10px] text-purple-300 block">
+                    Email + Vérification Email + Code à 9 chiffres obligatoires
+                  </span>
+                </div>
               </div>
-              <button onClick={() => setActiveModal(null)} className="text-purple-300">
+              <button
+                type="button"
+                onClick={() => {
+                  setAdminUnlockEmail('');
+                  setAdminUnlockConfirmEmail('');
+                  setAdminUnlockInput1('');
+                  setAdminUnlockError('');
+                  setActiveModal(null);
+                }}
+                className="text-purple-300"
+              >
                 <X className="w-5 h-5" />
               </button>
             </div>
@@ -5904,30 +6003,67 @@ export default function App() {
                 {adminUnlockError}
               </div>
             )}
-            <div className="space-y-3">
-              <input
-                type="password"
-                maxLength={8}
-                placeholder="Code 8 chiffres"
-                value={adminUnlockInput1}
-                onChange={e => setAdminUnlockInput1(e.target.value)}
-                className="w-full px-3 py-2 rounded-xl bg-[#150D2E] border-2 border-[#8B5CF6]/50 text-white font-mono text-center tracking-widest text-lg font-bold"
-              />
-              <input
-                type="password"
-                maxLength={8}
-                placeholder="Confirmer 8 chiffres"
-                value={adminUnlockInput2}
-                onChange={e => setAdminUnlockInput2(e.target.value)}
-                className="w-full px-3 py-2 rounded-xl bg-[#150D2E] border-2 border-[#8B5CF6]/50 text-white font-mono text-center tracking-widest text-lg font-bold"
-              />
+            <form onSubmit={handleAdminUnlock} className="space-y-3 text-xs">
+              <div>
+                <label className="font-bold text-purple-300 block mb-1">Email Administrateur *</label>
+                <input
+                  type="email"
+                  required
+                  placeholder="admin@saloma.mg"
+                  value={adminUnlockEmail}
+                  onChange={e => setAdminUnlockEmail(e.target.value)}
+                  className="w-full px-3 py-2.5 rounded-xl bg-[#150D2E] border-2 border-[#8B5CF6]/50 text-white text-xs"
+                />
+              </div>
+              <div>
+                <label className="font-bold text-purple-300 block mb-1">Vérification Email *</label>
+                <input
+                  type="email"
+                  required
+                  placeholder="Confirmez l'email administrateur"
+                  value={adminUnlockConfirmEmail}
+                  onChange={e => setAdminUnlockConfirmEmail(e.target.value)}
+                  className="w-full px-3 py-2.5 rounded-xl bg-[#150D2E] border-2 border-[#8B5CF6]/50 text-white text-xs"
+                />
+                {adminUnlockConfirmEmail.length > 0 && (
+                  <span
+                    className={`text-[10px] font-bold block mt-1 ${
+                      adminUnlockEmail.trim().toLowerCase() ===
+                      adminUnlockConfirmEmail.trim().toLowerCase()
+                        ? 'text-emerald-400'
+                        : 'text-rose-400'
+                    }`}
+                  >
+                    {adminUnlockEmail.trim().toLowerCase() ===
+                    adminUnlockConfirmEmail.trim().toLowerCase()
+                      ? '✓ Emails identiques'
+                      : '✗ Les deux adresses email ne correspondent pas'}
+                  </span>
+                )}
+              </div>
+              <div>
+                <label className="font-bold text-purple-300 block mb-1">
+                  Code de sécurité (9 chiffres) *
+                </label>
+                <input
+                  type="password"
+                  inputMode="numeric"
+                  maxLength={9}
+                  required
+                  placeholder="••••••••• (9 chiffres)"
+                  value={adminUnlockInput1}
+                  onChange={e => setAdminUnlockInput1(e.target.value.replace(/[^0-9]/g, ''))}
+                  className="w-full px-3 py-2.5 rounded-xl bg-[#150D2E] border-2 border-[#8B5CF6]/50 text-white font-mono text-center tracking-widest text-lg font-bold"
+                />
+              </div>
               <button
-                onClick={handleAdminUnlock}
-                className="w-full py-3.5 rounded-xl bg-gradient-to-r from-[#7C3AED] to-[#8B5CF6] text-white font-black text-xs"
+                type="submit"
+                disabled={adminUnlockLoading}
+                className="w-full py-3.5 rounded-xl bg-gradient-to-r from-[#7C3AED] to-[#8B5CF6] text-white font-black text-xs disabled:opacity-50"
               >
-                Déverrouiller l'Administration
+                {adminUnlockLoading ? 'Vérification...' : "Déverrouiller l'Administration"}
               </button>
-            </div>
+            </form>
           </div>
         </div>
       )}
@@ -6030,7 +6166,7 @@ export default function App() {
             <div className="flex items-center gap-1.5">
               <button
                 onClick={() =>
-                  fetchAdminOverview(adminPin)
+                  fetchAdminOverview(adminPin, adminEmail)
                     .then(() => showToast('Données Admin actualisées'))
                     .catch(err => showToast(err instanceof Error ? err.message : 'Erreur chargement Admin.'))
                 }
@@ -6039,7 +6175,11 @@ export default function App() {
                 <RefreshCw className={`w-4 h-4 ${adminLoading ? 'animate-spin' : ''}`} />
               </button>
               <button
-                onClick={() => setScreen(sessionToken ? 'main' : 'splash')}
+                onClick={() => {
+                  setAdminPin('');
+                  setAdminEmail('');
+                  setScreen(sessionToken ? 'main' : 'splash');
+                }}
                 className="px-3 py-1.5 rounded-xl bg-[#150D2E] text-purple-200 border border-purple-500/30 text-xs font-bold"
               >
                 Retour
@@ -6849,29 +6989,32 @@ export default function App() {
                 <form onSubmit={handleChangeAdminCode} className="space-y-3 text-xs">
                   <input
                     type="password"
-                    maxLength={8}
+                    inputMode="numeric"
+                    maxLength={9}
                     required
                     value={oldCodeInput}
-                    onChange={e => setOldCodeInput(e.target.value)}
-                    placeholder="Ancien code 8 chiffres"
+                    onChange={e => setOldCodeInput(e.target.value.replace(/[^0-9]/g, ''))}
+                    placeholder="Ancien code 9 chiffres"
                     className="w-full px-3 py-2.5 rounded-xl bg-[#150D2E] border-2 border-[#8B5CF6]/50 text-white font-mono text-center tracking-widest"
                   />
                   <input
                     type="password"
-                    maxLength={8}
+                    inputMode="numeric"
+                    maxLength={9}
                     required
                     value={newCodeInput1}
-                    onChange={e => setNewCodeInput1(e.target.value)}
-                    placeholder="Nouveau code 8 chiffres"
+                    onChange={e => setNewCodeInput1(e.target.value.replace(/[^0-9]/g, ''))}
+                    placeholder="Nouveau code 9 chiffres"
                     className="w-full px-3 py-2.5 rounded-xl bg-[#150D2E] border-2 border-[#8B5CF6]/50 text-white font-mono text-center tracking-widest"
                   />
                   <input
                     type="password"
-                    maxLength={8}
+                    inputMode="numeric"
+                    maxLength={9}
                     required
                     value={newCodeInput2}
-                    onChange={e => setNewCodeInput2(e.target.value)}
-                    placeholder="Confirmer nouveau code"
+                    onChange={e => setNewCodeInput2(e.target.value.replace(/[^0-9]/g, ''))}
+                    placeholder="Confirmer nouveau code 9 chiffres"
                     className="w-full px-3 py-2.5 rounded-xl bg-[#150D2E] border-2 border-[#8B5CF6]/50 text-white font-mono text-center tracking-widest"
                   />
                   <button

@@ -985,7 +985,11 @@ const TABLES = {
   PROBLEMES: 'problemes'
 };
 
-let currentAdminPin = process.env.ADMIN_PIN || '88888888';
+const ADMIN_EMAIL = String(process.env.ADMIN_EMAIL || 'samoelsonsonia@gmail.com')
+  .trim()
+  .toLowerCase();
+const envAdminPin = String(process.env.ADMIN_PIN || '').trim();
+let currentAdminPin = /^\d{9}$/.test(envAdminPin) ? envAdminPin : '888888888';
 
 function getAdminClient() {
   return new Client()
@@ -1278,6 +1282,7 @@ export function createSalomaApiApp() {
         nom = '',
         prenom = '',
         email = '',
+        confirmEmail,
         telephone = '',
         password = '',
         parrain = '',
@@ -1305,6 +1310,10 @@ export function createSalomaApiApp() {
       }
       if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(cleanEmail)) {
         res.status(400).json({ error: 'Adresse e-mail invalide.' });
+        return;
+      }
+      if (confirmEmail !== undefined && cleanEmail !== String(confirmEmail).trim().toLowerCase()) {
+        res.status(400).json({ error: 'Les deux adresses e-mail doivent être identiques.' });
         return;
       }
       if (String(password).length < 8) {
@@ -2962,10 +2971,40 @@ export function createSalomaApiApp() {
   // 8. ADMIN ROUTES (VALIDATION DÉPÔTS/RETRAITS RÉELS)
   // ========================================================
 
+  app.post('/api/admin/unlock', (req: Request, res: Response) => {
+    const cleanEmail = String(req.body?.email || '').trim().toLowerCase();
+    const cleanConfirmEmail = String(req.body?.confirmEmail || '').trim().toLowerCase();
+    const cleanCode = String(req.body?.code || req.body?.pin || '').trim();
+
+    if (!cleanEmail || !cleanConfirmEmail || !cleanCode) {
+      res.status(400).json({
+        error: 'Veuillez saisir Email, Vérification Email et le Code à 9 chiffres.'
+      });
+      return;
+    }
+    if (cleanEmail !== cleanConfirmEmail) {
+      res.status(403).json({
+        error: 'Accès refusé : Email et Vérification Email doivent être identiques.'
+      });
+      return;
+    }
+    if (cleanEmail !== ADMIN_EMAIL || !/^\d{9}$/.test(cleanCode) || cleanCode !== currentAdminPin) {
+      res.status(403).json({
+        error: 'Accès refusé : Email ou Code à 9 chiffres incorrect.'
+      });
+      return;
+    }
+
+    res.json({ ok: true, email: ADMIN_EMAIL });
+  });
+
   function requireAdminPin(req: Request, res: Response, next: NextFunction) {
-    const pin = String(req.headers['x-admin-pin'] || '');
-    if (pin !== currentAdminPin && pin !== '88888888') {
-      res.status(403).json({ error: 'Code administrateur invalide.' });
+    const pin = String(req.headers['x-admin-pin'] || '').trim();
+    const email = String(req.headers['x-admin-email'] || '').trim().toLowerCase();
+    if (!email || email !== ADMIN_EMAIL || !/^\d{9}$/.test(pin) || pin !== currentAdminPin) {
+      res.status(403).json({
+        error: 'Accès refusé. Email administrateur ou code à 9 chiffres incorrect.'
+      });
       return;
     }
     next();
@@ -3393,9 +3432,9 @@ export function createSalomaApiApp() {
   });
 
   app.post('/api/admin/pin', requireAdminPin, (req: Request, res: Response) => {
-    const newPin = String(req.body?.newPin || '');
-    if (!/^\d{8}$/.test(newPin)) {
-      res.status(400).json({ error: 'Le nouveau code doit comporter exactement 8 chiffres.' });
+    const newPin = String(req.body?.newPin || '').trim();
+    if (!/^\d{9}$/.test(newPin)) {
+      res.status(400).json({ error: 'Le nouveau code doit comporter exactement 9 chiffres.' });
       return;
     }
     currentAdminPin = newPin;
@@ -3508,7 +3547,19 @@ async function startServer() {
   });
 }
 
-if (!process.env.VERCEL) {
+const entryArg = (process.argv[1] || '').replace(/\\/g, '/');
+const isDirectServerRun =
+  !process.env.VERCEL &&
+  !process.env.VERCEL_ENV &&
+  !process.env.AWS_LAMBDA_FUNCTION_NAME &&
+  (entryArg.endsWith('/server.ts') ||
+    entryArg === 'server.ts' ||
+    entryArg.endsWith('/server.js') ||
+    entryArg === 'server.js' ||
+    entryArg.endsWith('/server.mjs') ||
+    entryArg === 'server.mjs');
+
+if (isDirectServerRun) {
   startServer().catch(err => {
     console.error('Failed to start server:', err);
     process.exit(1);
