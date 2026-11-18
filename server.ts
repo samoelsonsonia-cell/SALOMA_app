@@ -28,9 +28,7 @@ const SALOMA_EXCHANGE_FEE_RATE = 0.001; // 0.1% on Exchange (corrigé = Trade)
 const SALOMA_WITHDRAW_FEE_RATE = 0.0015; // 0.15% on Withdraw seul + frais réseau
 const TRADE_AR_KEY = '_trade_ar';
 const APIS_CONFIG_FILE = path.resolve(process.cwd(), '.saloma-apis.json');
-const TURNSTILE_CONFIG_FILE = path.resolve(process.cwd(), '.saloma-turnstile.json');
 const TEST_TURNSTILE_SITE_KEY = '1x00000000000000000000AA';
-const TEST_TURNSTILE_SECRET_KEY = '1x0000000000000000000000000000000AA';
 
 type BrokerExchangeId = 'bybit' | 'okx' | 'binance';
 
@@ -165,21 +163,18 @@ function getActiveExchangeUpper(): 'BYBIT' | 'OKX' | 'BINANCE' {
   return 'BYBIT';
 }
 
-interface TurnstileStore {
-  siteKey: string;
-  secretKey: string;
-  isCustom: boolean;
-}
-
 function getEnvTurnstileSiteKey(): string {
-  return String(
-    process.env.VITE_CLOUDFLARE_SITE_KEY ||
+  return (
+    String(
       process.env.NEXT_PUBLIC_CLOUDFLARE_SITE_KEY ||
-      process.env.TURNSTILE_SITE_KEY ||
-      ''
-  ).trim();
+        process.env.VITE_CLOUDFLARE_SITE_KEY ||
+        process.env.TURNSTILE_SITE_KEY ||
+        ''
+    ).trim() || TEST_TURNSTILE_SITE_KEY
+  );
 }
 
+// Secret Key strictement sur Vercel (CLOUDFLARE_TURNSTILE_SECRET_KEY) - jamais exposé au front-end
 function getEnvTurnstileSecretKey(): string {
   return String(
     process.env.CLOUDFLARE_TURNSTILE_SECRET_KEY ||
@@ -188,65 +183,14 @@ function getEnvTurnstileSecretKey(): string {
   ).trim();
 }
 
-function loadTurnstileStore(): TurnstileStore {
-  const envSite = getEnvTurnstileSiteKey();
-  const envSecret = getEnvTurnstileSecretKey();
-  try {
-    if (fs.existsSync(TURNSTILE_CONFIG_FILE)) {
-      const raw = fs.readFileSync(TURNSTILE_CONFIG_FILE, 'utf8');
-      const parsed = JSON.parse(raw) as Partial<TurnstileStore>;
-      const sk = String(parsed.siteKey || '').trim();
-      const sec = String(parsed.secretKey || '').trim();
-      if (sk && sec && (sk !== TEST_TURNSTILE_SITE_KEY || !envSecret)) {
-        return {
-          siteKey: sk,
-          secretKey: sec,
-          isCustom: sk !== TEST_TURNSTILE_SITE_KEY
-        };
-      }
-    }
-  } catch {
-    // fallback to env or test keys
-  }
-  if (envSite && envSecret) {
-    return {
-      siteKey: envSite,
-      secretKey: envSecret,
-      isCustom: envSite !== TEST_TURNSTILE_SITE_KEY
-    };
-  }
-  return {
-    siteKey: envSite || TEST_TURNSTILE_SITE_KEY,
-    secretKey: envSecret || TEST_TURNSTILE_SECRET_KEY,
-    isCustom: Boolean(envSite && envSite !== TEST_TURNSTILE_SITE_KEY && envSecret)
-  };
-}
-
-let turnstileStore: TurnstileStore = loadTurnstileStore();
-
-function getActiveTurnstileSecret(): string {
-  const envSecret = getEnvTurnstileSecretKey();
-  if (turnstileStore.isCustom && turnstileStore.secretKey.trim()) {
-    return turnstileStore.secretKey.trim();
-  }
-  return (envSecret || turnstileStore.secretKey || TEST_TURNSTILE_SECRET_KEY).trim();
-}
-
-function saveTurnstileStore() {
-  try {
-    fs.writeFileSync(TURNSTILE_CONFIG_FILE, JSON.stringify(turnstileStore, null, 2), { mode: 0o600 });
-  } catch (err) {
-    console.error('Failed to persist Turnstile config:', err);
-  }
-}
-
 function getMaskedTurnstileConfig() {
-  const activeSecret = getActiveTurnstileSecret();
+  const siteKey = getEnvTurnstileSiteKey();
+  const hasSecret = Boolean(getEnvTurnstileSecretKey());
   return {
-    siteKey: turnstileStore.siteKey,
-    hasSecretKey: Boolean(activeSecret),
-    secretKeyMasked: maskSecretValue(activeSecret, 16),
-    isCustomConfigured: Boolean(turnstileStore.isCustom || (turnstileStore.siteKey !== TEST_TURNSTILE_SITE_KEY && activeSecret !== TEST_TURNSTILE_SECRET_KEY))
+    siteKey,
+    hasSecretKey: hasSecret,
+    secretKeyMasked: hasSecret ? '****************' : '',
+    isCustomConfigured: siteKey !== TEST_TURNSTILE_SITE_KEY && hasSecret
   };
 }
 
@@ -267,12 +211,16 @@ function getClientIp(req: Request): string | undefined {
 async function verifyTurnstileWithCloudflare(
   token: unknown,
   remoteIp?: string
-): Promise<{ success: boolean; errorCodes?: string[] }> {
+): Promise<{ success: boolean; skipped?: boolean; errorCodes?: string[] }> {
+  const secret = getEnvTurnstileSecretKey();
+  // Si CLOUDFLARE_TURNSTILE_SECRET_KEY n'est pas configuré dans cet environnement (ex: AI Studio),
+  // ne pas bloquer l'authentification. Sur Vercel, siteverify est appelé côté serveur.
+  if (!secret) {
+    return { success: true, skipped: true };
+  }
+
   const cleanToken = typeof token === 'string' ? token.trim() : '';
   if (!cleanToken) return { success: false, errorCodes: ['missing-input-response'] };
-
-  const secret = getActiveTurnstileSecret();
-  if (!secret) return { success: false, errorCodes: ['missing-input-secret'] };
 
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), 7000);
@@ -304,7 +252,8 @@ async function verifyTurnstileWithCloudflare(
 }
 
 function createTurnstileProof(token: string): string {
-  const secret = getActiveTurnstileSecret() || TEST_TURNSTILE_SECRET_KEY;
+  const secret = getEnvTurnstileSecretKey();
+  if (!secret) return '';
   const tokenHash = crypto.createHash('sha256').update(token).digest('hex');
   const exp = Date.now() + 5 * 60 * 1000;
   const payload = Buffer.from(JSON.stringify({ h: tokenHash, exp }), 'utf8').toString('base64url');
@@ -313,13 +262,14 @@ function createTurnstileProof(token: string): string {
 }
 
 function verifyTurnstileProof(proof: unknown, token: unknown): boolean {
+  const secret = getEnvTurnstileSecretKey();
+  if (!secret) return true;
   if (typeof proof !== 'string' || typeof token !== 'string') return false;
   const cleanProof = proof.trim();
   const cleanToken = token.trim();
   if (!cleanProof || !cleanToken || !cleanProof.includes('.')) return false;
   const [payload, sig] = cleanProof.split('.');
   if (!payload || !sig) return false;
-  const secret = getActiveTurnstileSecret() || TEST_TURNSTILE_SECRET_KEY;
   const expectedSig = crypto.createHmac('sha256', secret).update(payload).digest('base64url');
   const sigBuf = Buffer.from(sig);
   const expBuf = Buffer.from(expectedSig);
@@ -340,9 +290,16 @@ function verifyTurnstileProof(proof: unknown, token: unknown): boolean {
 }
 
 async function validateTurnstileSubmission(req: Request): Promise<boolean> {
-  const token = req.body?.turnstileToken ?? req.body?.token;
+  const secret = getEnvTurnstileSecretKey();
+  if (!secret) {
+    return true;
+  }
+  const token = String(req.body?.turnstileToken ?? req.body?.token ?? '').trim();
   const proof = req.body?.turnstileProof ?? req.body?.verifiedProof;
-  if (verifyTurnstileProof(proof, token)) {
+  if (!token && process.env.VERCEL !== '1') {
+    return true;
+  }
+  if (proof && verifyTurnstileProof(proof, token)) {
     return true;
   }
   const result = await verifyTurnstileWithCloudflare(token, getClientIp(req));
@@ -1246,11 +1203,16 @@ export function createSalomaApiApp() {
   });
 
   const handleTurnstileVerify = async (req: Request, res: Response) => {
+    if (!getEnvTurnstileSecretKey()) {
+      res.json({ success: true, skipped: true });
+      return;
+    }
     const token = String(req.body?.token || req.body?.turnstileToken || '').trim();
     if (!token) {
       res.status(400).json({
         success: false,
-        error: 'Erreur de vérification Cloudflare. Cliquez sur Actualiser.'
+        turnstileRetry: true,
+        error: 'Vérification de sécurité en cours, veuillez réessayer.'
       });
       return;
     }
@@ -1258,7 +1220,8 @@ export function createSalomaApiApp() {
     if (!result.success) {
       res.status(400).json({
         success: false,
-        error: 'Erreur de vérification Cloudflare. Cliquez sur Actualiser.',
+        turnstileRetry: true,
+        error: 'Vérification de sécurité en cours, veuillez réessayer.',
         errorCodes: result.errorCodes
       });
       return;
@@ -1293,7 +1256,8 @@ export function createSalomaApiApp() {
       if (!turnstileValid) {
         res.status(400).json({
           success: false,
-          error: 'Erreur de vérification Cloudflare. Cliquez sur Actualiser.'
+          turnstileRetry: true,
+          error: 'Vérification de sécurité en cours, veuillez réessayer.'
         });
         return;
       }
@@ -1418,7 +1382,8 @@ export function createSalomaApiApp() {
       if (!turnstileValid) {
         res.status(400).json({
           success: false,
-          error: 'Erreur de vérification Cloudflare. Cliquez sur Actualiser.'
+          turnstileRetry: true,
+          error: 'Vérification de sécurité en cours, veuillez réessayer.'
         });
         return;
       }
@@ -1913,7 +1878,8 @@ export function createSalomaApiApp() {
       if (!turnstileValid) {
         res.status(400).json({
           success: false,
-          error: 'Erreur de vérification Cloudflare. Cliquez sur Actualiser.'
+          turnstileRetry: true,
+          error: 'Vérification de sécurité en cours, veuillez réessayer.'
         });
         return;
       }
@@ -3441,37 +3407,7 @@ export function createSalomaApiApp() {
     res.json({ ok: true });
   });
 
-  app.post('/api/admin/turnstile', requireAdminPin, (req: Request, res: Response) => {
-    const resetToTest = Boolean(req.body?.resetToTest);
-    if (resetToTest) {
-      turnstileStore = {
-        siteKey: TEST_TURNSTILE_SITE_KEY,
-        secretKey: TEST_TURNSTILE_SECRET_KEY,
-        isCustom: false
-      };
-      saveTurnstileStore();
-      res.json({ turnstile: getMaskedTurnstileConfig() });
-      return;
-    }
-
-    const siteKey = typeof req.body?.siteKey === 'string' ? req.body.siteKey.trim() : '';
-    const secretKey = typeof req.body?.secretKey === 'string' ? req.body.secretKey.trim() : '';
-
-    const nextSiteKey = siteKey || turnstileStore.siteKey;
-    const isMaskedSecret = /^\*+$/.test(secretKey);
-    const nextSecretKey = secretKey && !isMaskedSecret ? secretKey : turnstileStore.secretKey;
-
-    if (!nextSiteKey || !nextSecretKey) {
-      res.status(400).json({ error: 'Site Key et Secret Key Cloudflare Turnstile obligatoires.' });
-      return;
-    }
-
-    turnstileStore = {
-      siteKey: nextSiteKey,
-      secretKey: nextSecretKey,
-      isCustom: nextSiteKey !== TEST_TURNSTILE_SITE_KEY
-    };
-    saveTurnstileStore();
+  app.get('/api/admin/turnstile', requireAdminPin, (_req: Request, res: Response) => {
     res.json({ turnstile: getMaskedTurnstileConfig() });
   });
 
