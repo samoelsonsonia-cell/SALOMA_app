@@ -3214,31 +3214,102 @@ export function createSalomaApiApp() {
     }
   }
 
-  const globalAdminOtpKey = '__saloma_admin_otp_store__';
-  const gOtp = globalThis as unknown as Record<
-    string,
-    Map<string, { email: string; code: string; expiresAt: number }> | undefined
-  >;
-  const adminOtpMemoryStore =
-    gOtp[globalAdminOtpKey] ||
-    (gOtp[globalAdminOtpKey] = new Map<string, { email: string; code: string; expiresAt: number }>());
+  const ADMIN_OTP_VALIDITY_MS = 2 * 60 * 1000;
+  const ADMIN_MAX_PIN_ATTEMPTS = 3;
+  const ADMIN_LOCKOUT_MS = 15 * 60 * 1000;
+  const ADMIN_ATTEMPTS_COOKIE = 'saloma_admin_attempts';
 
-  function createAdminOtpChallengeToken(
-    email: string,
-    nonce: string,
-    code: string,
-    expiresAt: number
-  ): string {
-    const codeHash = crypto.createHash('sha256').update(`${email}:${code}`).digest('hex');
-    return signAdminPayload(
+  const globalPinAttemptsKey = '__saloma_admin_pin_attempts__';
+  const gAttempts = globalThis as unknown as Record<
+    string,
+    Map<string, { fails: number; blockedUntil: number }> | undefined
+  >;
+  const adminPinAttemptsMap =
+    gAttempts[globalPinAttemptsKey] ||
+    (gAttempts[globalPinAttemptsKey] = new Map<string, { fails: number; blockedUntil: number }>());
+
+  function parseAdminCookies(cookieHeader: string | undefined): Record<string, string> {
+    const out: Record<string, string> = {};
+    if (!cookieHeader) return out;
+    for (const part of cookieHeader.split(';')) {
+      const idx = part.indexOf('=');
+      if (idx === -1) continue;
+      const k = part.slice(0, idx).trim();
+      const v = part.slice(idx + 1).trim();
+      if (k) out[k] = decodeURIComponent(v);
+    }
+    return out;
+  }
+
+  function getAdminClientKey(req: Request, email: string): string {
+    const fwd = String(req.headers['x-forwarded-for'] || '').split(',')[0].trim();
+    const ip = fwd || req.ip || req.socket?.remoteAddress || 'unknown';
+    return `${ip}:${email}`;
+  }
+
+  function readAdminAttemptState(
+    req: Request,
+    clientKey: string,
+    secret: string
+  ): { fails: number; blockedUntil: number } {
+    const now = Date.now();
+    const mem = adminPinAttemptsMap.get(clientKey);
+    let best = { fails: 0, blockedUntil: 0 };
+    if (mem) {
+      if (mem.blockedUntil > now) {
+        best = { fails: mem.fails, blockedUntil: mem.blockedUntil };
+      } else if (mem.blockedUntil === 0) {
+        best = { fails: mem.fails, blockedUntil: 0 };
+      } else {
+        adminPinAttemptsMap.delete(clientKey);
+      }
+    }
+    const cookies = parseAdminCookies(req.headers.cookie);
+    const rawCookie = cookies[ADMIN_ATTEMPTS_COOKIE];
+    if (rawCookie) {
+      const parsed = verifyAdminSignedPayload<{
+        fails?: number;
+        blockedUntil?: number;
+        exp?: number;
+      }>(rawCookie, secret);
+      if (parsed) {
+        const cBlockedUntil = Number(parsed.blockedUntil) || 0;
+        const cFails = Number(parsed.fails) || 0;
+        if (cBlockedUntil > now && cBlockedUntil > best.blockedUntil) {
+          best = { fails: Math.max(cFails, best.fails), blockedUntil: cBlockedUntil };
+        } else if (cBlockedUntil === 0 && best.blockedUntil === 0) {
+          best = { fails: Math.max(cFails, best.fails), blockedUntil: 0 };
+        }
+      }
+    }
+    return best;
+  }
+
+  function writeAdminAttemptCookie(
+    res: Response,
+    state: { fails: number; blockedUntil: number },
+    secret: string
+  ) {
+    const isProd = process.env.NODE_ENV === 'production' || Boolean(process.env.VERCEL);
+    const secureFlag = isProd ? '; Secure' : '';
+    if (state.fails === 0 && state.blockedUntil === 0) {
+      res.setHeader(
+        'Set-Cookie',
+        `${ADMIN_ATTEMPTS_COOKIE}=; Path=/api/admin; HttpOnly; SameSite=Lax; Max-Age=0${secureFlag}`
+      );
+      return;
+    }
+    const token = signAdminPayload(
       {
-        kind: 'admin-otp-v2',
-        email,
-        nonce,
-        codeHash,
-        exp: expiresAt
+        fails: state.fails,
+        blockedUntil: state.blockedUntil,
+        exp: Date.now() + ADMIN_LOCKOUT_MS
       },
-      getAdminHmacSecret()
+      secret
+    );
+    res.setHeader(
+      'Set-Cookie',
+      `${ADMIN_ATTEMPTS_COOKIE}=${encodeURIComponent(token)}; Path=/api/admin; HttpOnly; SameSite=Lax; Max-Age=900${secureFlag}`
     );
   }
 
@@ -3252,35 +3323,6 @@ export function createSalomaApiApp() {
       },
       getAdminHmacSecret(pin)
     );
-  }
-
-  async function trySendAdminEmailResend(toEmail: string, code: string): Promise<boolean> {
-    const resendKey = stripWrappingQuotes(process.env.RESEND_API_KEY);
-    if (!resendKey) return false;
-    const fromEmail =
-      stripWrappingQuotes(process.env.RESEND_FROM_EMAIL) || 'SALOMA Admin <onboarding@resend.dev>';
-    try {
-      const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), 7000);
-      const resp = await fetch('https://api.resend.com/emails', {
-        method: 'POST',
-        headers: {
-          Authorization: `Bearer ${resendKey}`,
-          'Content-Type': 'application/json'
-        },
-        body: JSON.stringify({
-          from: fromEmail,
-          to: [toEmail],
-          subject: 'SALOMA Admin - Code de vérification à 6 chiffres',
-          html: `<p>Votre code de vérification administrateur SALOMA est : <strong>${code}</strong></p><p>Ce code expire dans 5 minutes.</p>`
-        }),
-        signal: controller.signal
-      });
-      clearTimeout(timer);
-      return resp.ok;
-    } catch {
-      return false;
-    }
   }
 
   app.post('/api/admin/send-code', async (req: Request, res: Response) => {
@@ -3318,47 +3360,49 @@ export function createSalomaApiApp() {
         return;
       }
 
-      const code = String(crypto.randomInt(100000, 1000000));
-      const nonce = crypto.randomBytes(12).toString('hex');
-      const now = Date.now();
-      const expiresAt = now + 5 * 60 * 1000;
+      const anonAcc = new Account(getAnonClient());
+      const token = await anonAcc.createEmailToken({
+        userId: ID.unique(),
+        email: configuredEmail
+      });
 
-      for (const [k, v] of adminOtpMemoryStore.entries()) {
-        if (v.expiresAt < now) adminOtpMemoryStore.delete(k);
-      }
-      adminOtpMemoryStore.set(nonce, { email: cleanEmail, code, expiresAt });
-
-      const challengeToken = createAdminOtpChallengeToken(cleanEmail, nonce, code, expiresAt);
-      const emailDelivered = await trySendAdminEmailResend(cleanEmail, code);
-
-      if (emailDelivered) {
-        res.json({
-          success: true,
-          ok: true,
-          email: cleanEmail,
-          challengeToken,
-          demoMode: false,
-          message: 'Code de vérification à 6 chiffres envoyé par email.'
-        });
-        return;
-      }
+      const issuedAt = Date.now();
+      const expiresAt = issuedAt + ADMIN_OTP_VALIDITY_MS;
+      const challengeToken = signAdminPayload(
+        {
+          kind: 'admin-appwrite-otp-v3',
+          email: configuredEmail,
+          userId: token.userId,
+          issuedAt,
+          exp: expiresAt
+        },
+        getAdminHmacSecret()
+      );
 
       res.json({
         success: true,
         ok: true,
-        email: cleanEmail,
+        email: configuredEmail,
         challengeToken,
-        demoMode: true,
-        demoCode: code,
-        message: `Code démo : ${code}`
+        expiresAt,
+        expiresInSeconds: 120,
+        message: 'Code de vérification à 6 chiffres envoyé par email (valide 2 minutes).'
       });
     } catch (err) {
-      console.error('[SALOMA Admin] Erreur send-code:', err instanceof Error ? err.message : 'Erreur inconnue');
-      res.status(400).json({
+      const e = err as { code?: number; type?: string; message?: string };
+      const isRateLimited = e?.code === 429 || e?.type === 'general_rate_limit_exceeded';
+      console.error(
+        '[SALOMA Admin] Erreur send-code Appwrite:',
+        err instanceof Error ? err.message : 'Erreur inconnue'
+      );
+      const errMsg = isRateLimited
+        ? 'Trop de tentatives Appwrite. Veuillez patienter quelques instants avant de réessayer.'
+        : formatAppwriteErrorFr(err, "Impossible d'envoyer le code de vérification par email.");
+      res.status(isRateLimited ? 429 : 400).json({
         success: false,
         ok: false,
-        message: "Impossible de générer le code administrateur pour le moment.",
-        error: "Impossible de générer le code administrateur pour le moment."
+        message: errMsg,
+        error: errMsg
       });
     }
   });
@@ -3392,66 +3436,84 @@ export function createSalomaApiApp() {
         });
         return;
       }
-      if (cleanEmail !== configuredEmail || !/^\d{9}$/.test(cleanCode) || cleanCode !== configuredPin) {
+      if (cleanEmail !== configuredEmail) {
         res.status(403).json({
           success: false,
           ok: false,
-          message: 'Accès refusé : Email ou Code à 9 chiffres incorrect.',
-          error: 'Accès refusé : Email ou Code à 9 chiffres incorrect.'
+          message: 'Accès refusé : Email administrateur incorrect.',
+          error: 'Accès refusé : Email administrateur incorrect.'
         });
         return;
       }
+
+      const secret = getAdminHmacSecret();
+      const clientKey = getAdminClientKey(req, configuredEmail);
+      const attemptState = readAdminAttemptState(req, clientKey, secret);
+      if (attemptState.blockedUntil > Date.now()) {
+        const minsLeft = Math.max(1, Math.ceil((attemptState.blockedUntil - Date.now()) / 60000));
+        const msg = `Trop de tentatives incorrectes. Accès bloqué pendant ${minsLeft} minute(s).`;
+        res.status(429).json({
+          success: false,
+          ok: false,
+          message: msg,
+          error: msg
+        });
+        return;
+      }
+
       if (!/^\d{6}$/.test(cleanEmailCode)) {
         res.status(403).json({
           success: false,
           ok: false,
-          message: 'Accès refusé : Le code à 6 chiffres est invalide.',
-          error: 'Accès refusé : Le code à 6 chiffres est invalide.'
+          message: 'Accès refusé : Le code reçu par email doit contenir exactement 6 chiffres.',
+          error: 'Accès refusé : Le code reçu par email doit contenir exactement 6 chiffres.'
+        });
+        return;
+      }
+      if (!/^\d{9}$/.test(cleanCode)) {
+        res.status(403).json({
+          success: false,
+          ok: false,
+          message: 'Le code de sécurité administrateur doit contenir exactement 9 chiffres.',
+          error: 'Le code de sécurité administrateur doit contenir exactement 9 chiffres.'
         });
         return;
       }
 
+      // Étape 1 : Validité stricte 2 minutes + Appwrite Auth OTP
       const challenge = verifyAdminSignedPayload<{
         kind?: string;
         email?: string;
-        nonce?: string;
-        codeHash?: string;
+        userId?: string;
+        issuedAt?: number;
         exp?: number;
-      }>(challengeToken, getAdminHmacSecret());
+      }>(challengeToken, secret);
 
       if (
         !challenge ||
-        challenge.kind !== 'admin-otp-v2' ||
+        challenge.kind !== 'admin-appwrite-otp-v3' ||
         String(challenge.email || '').trim().toLowerCase() !== configuredEmail ||
-        !challenge.codeHash
+        !challenge.userId ||
+        (typeof challenge.issuedAt === 'number' &&
+          Date.now() - challenge.issuedAt > ADMIN_OTP_VALIDITY_MS)
       ) {
         res.status(403).json({
           success: false,
           ok: false,
-          message: 'Code expiré ou invalide. Veuillez cliquer sur Envoyer pour générer un nouveau code.',
-          error: 'Code expiré ou invalide. Veuillez cliquer sur Envoyer pour générer un nouveau code.'
+          message: 'Code expiré, demandez un nouveau code',
+          error: 'Code expiré, demandez un nouveau code'
         });
         return;
       }
 
-      const expectedCodeHash = crypto
-        .createHash('sha256')
-        .update(`${cleanEmail}:${cleanEmailCode}`)
-        .digest('hex');
-
-      const stored = challenge.nonce ? adminOtpMemoryStore.get(challenge.nonce) : undefined;
-      if (stored) {
-        if (stored.expiresAt < Date.now() || stored.email !== cleanEmail || stored.code !== cleanEmailCode) {
-          res.status(403).json({
-            success: false,
-            ok: false,
-            message: 'Accès refusé : Code à 6 chiffres incorrect ou expiré.',
-            error: 'Accès refusé : Code à 6 chiffres incorrect ou expiré.'
-          });
-          return;
-        }
-        adminOtpMemoryStore.delete(challenge.nonce!);
-      } else if (challenge.codeHash !== expectedCodeHash) {
+      const anonAcc = new Account(getAnonClient());
+      let tempSess: { $id?: string; secret?: string } | null = null;
+      try {
+        tempSess = await anonAcc.createSession({
+          userId: challenge.userId,
+          secret: cleanEmailCode
+        });
+      } catch {
         res.status(403).json({
           success: false,
           ok: false,
@@ -3461,6 +3523,54 @@ export function createSalomaApiApp() {
         return;
       }
 
+      let appwriteEmailMatches = true;
+      if (tempSess?.secret) {
+        try {
+          const tempAcc = new Account(getUserSessionClient(tempSess.secret));
+          const accObj = await tempAcc.get();
+          appwriteEmailMatches =
+            String(accObj?.email || '').trim().toLowerCase() === configuredEmail;
+          await tempAcc.deleteSession({ sessionId: 'current' });
+        } catch {
+          // ignore cleanup failure
+        }
+      }
+
+      if (!appwriteEmailMatches) {
+        res.status(403).json({
+          success: false,
+          ok: false,
+          message: 'Accès refusé : Email administrateur incorrect.',
+          error: 'Accès refusé : Email administrateur incorrect.'
+        });
+        return;
+      }
+
+      // Étape 2 : Vérifier ADMIN_PIN (3 tentatives max puis blocage 15 minutes)
+      if (cleanCode !== configuredPin) {
+        const nextFails = attemptState.fails + 1;
+        const isNowBlocked = nextFails >= ADMIN_MAX_PIN_ATTEMPTS;
+        const nextState = {
+          fails: nextFails,
+          blockedUntil: isNowBlocked ? Date.now() + ADMIN_LOCKOUT_MS : 0
+        };
+        adminPinAttemptsMap.set(clientKey, nextState);
+        writeAdminAttemptCookie(res, nextState, secret);
+        const errMsg = isNowBlocked
+          ? 'Code à 9 chiffres incorrect. 3 tentatives échouées : accès bloqué pendant 15 minutes.'
+          : `Code à 9 chiffres incorrect. Tentative ${nextFails}/${ADMIN_MAX_PIN_ATTEMPTS}.`;
+        res.status(isNowBlocked ? 429 : 403).json({
+          success: false,
+          ok: false,
+          message: errMsg,
+          error: errMsg
+        });
+        return;
+      }
+
+      adminPinAttemptsMap.delete(clientKey);
+      writeAdminAttemptCookie(res, { fails: 0, blockedUntil: 0 }, secret);
+
       const adminSessionToken = createAdminSessionToken(configuredEmail, configuredPin);
       res.json({
         success: true,
@@ -3469,7 +3579,10 @@ export function createSalomaApiApp() {
         adminSessionToken
       });
     } catch (err) {
-      console.error('[SALOMA Admin] Erreur verify:', err instanceof Error ? err.message : 'Erreur inconnue');
+      console.error(
+        '[SALOMA Admin] Erreur verify Appwrite:',
+        err instanceof Error ? err.message : 'Erreur inconnue'
+      );
       res.status(400).json({
         success: false,
         ok: false,

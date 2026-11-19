@@ -1,18 +1,7 @@
 import type { IncomingMessage, ServerResponse } from 'http';
 import crypto from 'crypto';
 
-const OTP_TTL_MS = 5 * 60 * 1000;
-
-interface StoredAdminOtp {
-  email: string;
-  code: string;
-  expiresAt: number;
-}
-
-const globalOtpStoreKey = '__saloma_admin_otp_store__';
-const g = globalThis as unknown as Record<string, Map<string, StoredAdminOtp> | undefined>;
-const adminOtpMemoryStore: Map<string, StoredAdminOtp> =
-  g[globalOtpStoreKey] || (g[globalOtpStoreKey] = new Map<string, StoredAdminOtp>());
+const OTP_VALIDITY_MS = 2 * 60 * 1000; // 2 minutes strictement
 
 function stripWrappingQuotes(raw: unknown): string {
   const s = String(raw || '').trim();
@@ -28,6 +17,14 @@ function getServerAdminEmail(): string {
 
 function getServerAdminPin(): string {
   return stripWrappingQuotes(process.env.ADMIN_PIN).trim();
+}
+
+function getAppwriteEndpoint(): string {
+  return (
+    stripWrappingQuotes(
+      process.env.APPWRITE_ENDPOINT || process.env.VITE_APPWRITE_ENDPOINT
+    ) || 'https://fra.cloud.appwrite.io/v1'
+  );
 }
 
 function getAppwriteProjectId(): string {
@@ -51,6 +48,13 @@ function signPayload(payloadObj: Record<string, unknown>, secret: string): strin
   return `${payloadB64}.${sig}`;
 }
 
+function generateAppwriteUniqueId(): string {
+  const now = new Date();
+  const sec = Math.floor(now.getTime() / 1000).toString(16);
+  const msec = now.getMilliseconds().toString(16).padStart(5, '0');
+  return `${sec}${msec}${crypto.randomBytes(4).toString('hex').slice(0, 7)}`;
+}
+
 function sendJson(res: ServerResponse, statusCode: number, payload: Record<string, unknown>) {
   try {
     if (res.headersSent) return;
@@ -59,7 +63,7 @@ function sendJson(res: ServerResponse, statusCode: number, payload: Record<strin
     res.setHeader('Cache-Control', 'no-store');
     res.end(JSON.stringify(payload));
   } catch {
-    // ignore response write failure
+    // ignore write failure
   }
 }
 
@@ -86,35 +90,6 @@ async function readJsonBody(
     return JSON.parse(raw) as Record<string, unknown>;
   } catch {
     return {};
-  }
-}
-
-async function trySendEmailViaResend(toEmail: string, code: string): Promise<boolean> {
-  const resendKey = stripWrappingQuotes(process.env.RESEND_API_KEY);
-  if (!resendKey) return false;
-  const fromEmail =
-    stripWrappingQuotes(process.env.RESEND_FROM_EMAIL) || 'SALOMA Admin <onboarding@resend.dev>';
-  try {
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 7000);
-    const resp = await fetch('https://api.resend.com/emails', {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${resendKey}`,
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify({
-        from: fromEmail,
-        to: [toEmail],
-        subject: 'SALOMA Admin - Code de vérification à 6 chiffres',
-        html: `<p>Votre code de vérification administrateur SALOMA est : <strong>${code}</strong></p><p>Ce code expire dans 5 minutes.</p>`
-      }),
-      signal: controller.signal
-    });
-    clearTimeout(timer);
-    return resp.ok;
-  } catch {
-    return false;
   }
 }
 
@@ -169,58 +144,86 @@ export default async function handler(
       return;
     }
 
-    const code = String(crypto.randomInt(100000, 1000000));
-    const nonce = crypto.randomBytes(12).toString('hex');
-    const expiresAt = Date.now() + OTP_TTL_MS;
+    const endpoint = getAppwriteEndpoint();
+    const projectId = getAppwriteProjectId();
 
-    // Purge expired entries and save in server memory (TTL 5 minutes)
-    const now = Date.now();
-    for (const [k, v] of adminOtpMemoryStore.entries()) {
-      if (v.expiresAt < now) adminOtpMemoryStore.delete(k);
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 9000);
+    let appwriteResp: Response;
+    try {
+      appwriteResp = await fetch(`${endpoint}/account/tokens/email`, {
+        method: 'POST',
+        headers: {
+          'X-Appwrite-Project': projectId,
+          'Content-Type': 'application/json',
+          Accept: 'application/json'
+        },
+        body: JSON.stringify({
+          userId: generateAppwriteUniqueId(),
+          email: configuredEmail
+        }),
+        signal: controller.signal
+      });
+    } finally {
+      clearTimeout(timer);
     }
-    adminOtpMemoryStore.set(nonce, { email: cleanEmail, code, expiresAt });
 
-    const codeHash = crypto.createHash('sha256').update(`${cleanEmail}:${code}`).digest('hex');
+    const tokenJson = (await appwriteResp.json().catch(() => ({}))) as {
+      userId?: string;
+      message?: string;
+      type?: string;
+      code?: number;
+    };
+
+    if (!appwriteResp.ok || !tokenJson?.userId) {
+      const errType = String(tokenJson?.type || '');
+      const isRateLimited =
+        appwriteResp.status === 429 || errType === 'general_rate_limit_exceeded';
+      sendJson(res, isRateLimited ? 429 : 400, {
+        success: false,
+        ok: false,
+        message: isRateLimited
+          ? 'Trop de tentatives Appwrite. Veuillez patienter quelques instants avant de réessayer.'
+          : tokenJson?.message || "Impossible d'envoyer le code Appwrite par email.",
+        error: isRateLimited
+          ? 'Trop de tentatives Appwrite. Veuillez patienter quelques instants avant de réessayer.'
+          : tokenJson?.message || "Impossible d'envoyer le code Appwrite par email."
+      });
+      return;
+    }
+
+    const issuedAt = Date.now();
+    const expiresAt = issuedAt + OTP_VALIDITY_MS;
     const challengeToken = signPayload(
       {
-        kind: 'admin-otp-v2',
-        email: cleanEmail,
-        nonce,
-        codeHash,
+        kind: 'admin-appwrite-otp-v3',
+        email: configuredEmail,
+        userId: tokenJson.userId,
+        issuedAt,
         exp: expiresAt
       },
       getAdminHmacSecret(configuredEmail, configuredPin)
     );
 
-    const emailDelivered = await trySendEmailViaResend(cleanEmail, code);
-    if (emailDelivered) {
-      sendJson(res, 200, {
-        success: true,
-        ok: true,
-        email: cleanEmail,
-        challengeToken,
-        demoMode: false,
-        message: 'Code de vérification à 6 chiffres envoyé par email.'
-      });
-      return;
-    }
-
     sendJson(res, 200, {
       success: true,
       ok: true,
-      email: cleanEmail,
+      email: configuredEmail,
       challengeToken,
-      demoMode: true,
-      demoCode: code,
-      message: `Code démo : ${code}`
+      expiresAt,
+      expiresInSeconds: 120,
+      message: 'Code de vérification à 6 chiffres envoyé par email (valide 2 minutes).'
     });
   } catch (err) {
-    console.error('[SALOMA Admin] Erreur send-code:', err instanceof Error ? err.message : 'Erreur inconnue');
+    console.error(
+      '[SALOMA Admin] Erreur send-code Appwrite:',
+      err instanceof Error ? err.message : 'Erreur inconnue'
+    );
     sendJson(res, 400, {
       success: false,
       ok: false,
-      message: "Impossible de générer le code administrateur pour le moment.",
-      error: "Impossible de générer le code administrateur pour le moment."
+      message: "Impossible d'envoyer le code de vérification par email.",
+      error: "Impossible d'envoyer le code de vérification par email."
     });
   }
 }

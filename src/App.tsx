@@ -2239,7 +2239,7 @@ export default function App() {
   const [adminUnlockEmail, setAdminUnlockEmail] = useState<string>('');
   const [adminUnlockEmailCode, setAdminUnlockEmailCode] = useState<string>('');
   const [adminChallengeToken, setAdminChallengeToken] = useState<string>('');
-  const [adminDemoCode, setAdminDemoCode] = useState<string>('');
+  const [adminOtpSecondsLeft, setAdminOtpSecondsLeft] = useState<number>(0);
   const [adminEmailSending, setAdminEmailSending] = useState<boolean>(false);
   const [adminEmailSentTo, setAdminEmailSentTo] = useState<string>('');
   const [adminEmailCooldown, setAdminEmailCooldown] = useState<number>(0);
@@ -2284,6 +2284,18 @@ export default function App() {
     return () => clearTimeout(t);
   }, [adminEmailCooldown]);
 
+  useEffect(() => {
+    if (adminOtpSecondsLeft <= 0) return;
+    const t = setTimeout(() => setAdminOtpSecondsLeft(s => Math.max(0, s - 1)), 1000);
+    return () => clearTimeout(t);
+  }, [adminOtpSecondsLeft]);
+
+  const formatOtpCountdown = (sec: number): string => {
+    const m = Math.floor(sec / 60);
+    const s = sec % 60;
+    return `${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
+  };
+
   const sendAdminEmailCode = useCallback(
     async (rawEmail: string) => {
       const cleanEmail = rawEmail.trim().toLowerCase();
@@ -2295,7 +2307,6 @@ export default function App() {
       if (!(await ensureOnlineOrBlock())) return;
 
       setAdminUnlockError('');
-      setAdminDemoCode('');
       setAdminEmailSending(true);
       try {
         const res = await apiRequest<{
@@ -2303,8 +2314,7 @@ export default function App() {
           ok?: boolean;
           challengeToken: string;
           email: string;
-          demoMode?: boolean;
-          demoCode?: string;
+          expiresInSeconds?: number;
           message?: string;
         }>('/api/admin/send-code', {
           method: 'POST',
@@ -2313,17 +2323,12 @@ export default function App() {
         setAdminChallengeToken(res.challengeToken || '');
         setAdminEmailSentTo(cleanEmail);
         setAdminEmailCooldown(60);
-        if (res.demoMode && res.demoCode) {
-          setAdminDemoCode(res.demoCode);
-          showToast(`Code démo : ${res.demoCode}`);
-        } else {
-          setAdminDemoCode('');
-          showToast('Code envoyé - Vérifiez votre email');
-        }
+        setAdminOtpSecondsLeft(res.expiresInSeconds || 120);
+        showToast('Code envoyé - Vérifiez votre email (valide 2 min)');
       } catch (err) {
         setAdminEmailSentTo('');
         setAdminChallengeToken('');
-        setAdminDemoCode('');
+        setAdminOtpSecondsLeft(0);
         setAdminUnlockError(
           err instanceof Error
             ? err.message
@@ -2495,6 +2500,10 @@ export default function App() {
       setAdminUnlockError('Veuillez d\'abord cliquer sur "Envoyer" pour recevoir le code à 6 chiffres par email.');
       return;
     }
+    if (adminOtpSecondsLeft <= 0) {
+      setAdminUnlockError('Code expiré, demandez un nouveau code');
+      return;
+    }
 
     setAdminUnlockLoading(true);
     try {
@@ -2522,7 +2531,7 @@ export default function App() {
       setAdminUnlockEmail('');
       setAdminUnlockEmailCode('');
       setAdminChallengeToken('');
-      setAdminDemoCode('');
+      setAdminOtpSecondsLeft(0);
       setAdminEmailSentTo('');
       setAdminUnlockInput1('');
       setActiveModal(null);
@@ -2679,7 +2688,7 @@ export default function App() {
       setAdminUnlockEmail('');
       setAdminUnlockEmailCode('');
       setAdminChallengeToken('');
-      setAdminDemoCode('');
+      setAdminOtpSecondsLeft(0);
       setAdminEmailSentTo('');
       setAdminUnlockInput1('');
       setAdminUnlockError('');
@@ -6348,7 +6357,7 @@ export default function App() {
                   setAdminUnlockEmail('');
                   setAdminUnlockEmailCode('');
                   setAdminChallengeToken('');
-                  setAdminDemoCode('');
+                  setAdminOtpSecondsLeft(0);
                   setAdminEmailSentTo('');
                   setAdminUnlockInput1('');
                   setAdminUnlockError('');
@@ -6381,7 +6390,7 @@ export default function App() {
                       if (nextVal.trim().toLowerCase() !== adminEmailSentTo) {
                         setAdminEmailSentTo('');
                         setAdminChallengeToken('');
-                        setAdminDemoCode('');
+                        setAdminOtpSecondsLeft(0);
                       }
                     }}
                     className="flex-1 min-w-0 px-3 py-2.5 rounded-xl bg-[#150D2E] border-2 border-[#8B5CF6]/50 text-white text-xs"
@@ -6396,6 +6405,8 @@ export default function App() {
                       ? 'Envoi...'
                       : adminEmailCooldown > 0
                       ? `Renvoyer dans ${adminEmailCooldown}s`
+                      : adminEmailSentTo && adminEmailSentTo === adminUnlockEmail.trim().toLowerCase()
+                      ? 'Renvoyer'
                       : 'Envoyer'}
                   </button>
                 </div>
@@ -6406,32 +6417,22 @@ export default function App() {
                 )}
                 {!adminEmailSending &&
                   adminEmailSentTo &&
-                  adminEmailSentTo === adminUnlockEmail.trim().toLowerCase() &&
-                  (adminDemoCode ? (
-                    <div className="mt-1.5 px-2.5 py-2 rounded-xl bg-amber-500/15 border border-amber-400/50 text-amber-200 text-[11px] font-bold flex items-center justify-between gap-2">
-                      <span>
-                        Code démo :{' '}
-                        <strong className="font-mono text-white tracking-widest select-all">
-                          {adminDemoCode}
-                        </strong>
+                  adminEmailSentTo === adminUnlockEmail.trim().toLowerCase() && (
+                    <div className="mt-1.5 space-y-1">
+                      <span className="text-[11px] text-emerald-400 font-bold block">
+                        ✓ Code envoyé - Vérifiez votre email
                       </span>
-                      <button
-                        type="button"
-                        onClick={() => {
-                          navigator.clipboard?.writeText(adminDemoCode);
-                          setAdminUnlockEmailCode(adminDemoCode);
-                          showToast(`Code démo copié : ${adminDemoCode}`);
-                        }}
-                        className="px-2 py-0.5 rounded bg-amber-500/30 text-amber-100 text-[10px] font-black hover:bg-amber-500/45"
-                      >
-                        Copier
-                      </button>
+                      {adminOtpSecondsLeft > 0 ? (
+                        <span className="text-[11px] font-mono font-bold text-amber-300 block">
+                          Code valide {formatOtpCountdown(adminOtpSecondsLeft)}
+                        </span>
+                      ) : (
+                        <span className="text-[11px] font-bold text-rose-400 block">
+                          Code expiré, renvoyez un nouveau code
+                        </span>
+                      )}
                     </div>
-                  ) : (
-                    <span className="text-[11px] text-emerald-400 font-bold block mt-1.5">
-                      ✓ Code envoyé - Vérifiez votre email
-                    </span>
-                  ))}
+                  )}
               </div>
 
               <div>

@@ -187,6 +187,7 @@ export async function apiRequest<T>(
     res = await fetch(path, {
       method: options.method || 'GET',
       headers,
+      credentials: 'same-origin',
       body: options.body !== undefined ? JSON.stringify(options.body) : undefined,
       signal: controller?.signal
     });
