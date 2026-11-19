@@ -60,25 +60,81 @@ export function usePWAInstall() {
   };
 }
 
+export async function checkInternetConnectivity(timeoutMs = 4500): Promise<boolean> {
+  if (typeof navigator !== 'undefined' && navigator.onLine === false) {
+    return false;
+  }
+  if (typeof fetch === 'undefined') {
+    return typeof navigator !== 'undefined' ? navigator.onLine : true;
+  }
+
+  const controller = typeof AbortController !== 'undefined' ? new AbortController() : null;
+  const timer =
+    controller && timeoutMs > 0 ? setTimeout(() => controller.abort(), timeoutMs) : null;
+
+  try {
+    await fetch(`/api/security/turnstile?ping=${Date.now()}`, {
+      method: 'GET',
+      cache: 'no-store',
+      headers: { 'Cache-Control': 'no-cache' },
+      signal: controller?.signal
+    });
+    if (timer) clearTimeout(timer);
+    return typeof navigator !== 'undefined' ? navigator.onLine !== false : true;
+  } catch {
+    if (timer) clearTimeout(timer);
+    return false;
+  }
+}
+
 export function useOnlineStatus() {
   const [isOnline, setIsOnline] = useState(
     typeof navigator !== 'undefined' ? navigator.onLine : true
   );
 
   useEffect(() => {
-    const handleOnline = () => setIsOnline(true);
-    const handleOffline = () => setIsOnline(false);
+    let active = true;
+
+    const verifyOnline = async () => {
+      if (typeof navigator !== 'undefined' && !navigator.onLine) {
+        if (active) setIsOnline(false);
+        return;
+      }
+      const ok = await checkInternetConnectivity(4000);
+      if (active) setIsOnline(ok);
+    };
+
+    const handleOnline = () => {
+      void verifyOnline();
+    };
+    const handleOffline = () => {
+      if (active) setIsOnline(false);
+    };
+    const handleVisibility = () => {
+      if (document.visibilityState === 'visible') {
+        void verifyOnline();
+      }
+    };
+
+    void verifyOnline();
+    const pollTimer = setInterval(() => {
+      void verifyOnline();
+    }, 15000);
 
     window.addEventListener('online', handleOnline);
     window.addEventListener('offline', handleOffline);
+    document.addEventListener('visibilitychange', handleVisibility);
 
     return () => {
+      active = false;
+      clearInterval(pollTimer);
       window.removeEventListener('online', handleOnline);
       window.removeEventListener('offline', handleOffline);
+      document.removeEventListener('visibilitychange', handleVisibility);
     };
   }, []);
 
-  return isOnline;
+  return { isOnline, setIsOnline };
 }
 
 export const PWAInstallButton: React.FC<{ compact?: boolean }> = ({ compact = false }) => {
@@ -153,15 +209,74 @@ export const PWAInstallButton: React.FC<{ compact?: boolean }> = ({ compact = fa
   return null;
 };
 
-export const OfflineIndicator: React.FC = () => {
-  const isOnline = useOnlineStatus();
+export const OfflineIndicator: React.FC<{
+  blocked?: boolean;
+  onRetry?: () => Promise<boolean> | void;
+}> = ({ blocked = false, onRetry }) => {
+  const [retrying, setRetrying] = useState(false);
+  const [stillOfflineMsg, setStillOfflineMsg] = useState(false);
 
-  if (isOnline) return null;
+  if (!blocked) return null;
+
+  const handleRetryClick = async () => {
+    if (retrying) return;
+    setRetrying(true);
+    setStillOfflineMsg(false);
+    try {
+      const ok = onRetry ? await onRetry() : await checkInternetConnectivity(4000);
+      if (ok === false) {
+        setStillOfflineMsg(true);
+      }
+    } catch {
+      setStillOfflineMsg(true);
+    } finally {
+      setRetrying(false);
+    }
+  };
 
   return (
-    <div className="fixed bottom-20 left-1/2 -translate-x-1/2 z-50 flex items-center gap-2 rounded-2xl bg-amber-500/95 border border-amber-300 px-3.5 py-1.5 text-xs font-bold text-slate-950 shadow-xl backdrop-blur-md">
-      <WifiOff className="w-3.5 h-3.5 shrink-0" />
-      <span>Mode Hors Ligne — Données en cache actives</span>
+    <div
+      role="alertdialog"
+      aria-modal="true"
+      aria-labelledby="saloma-offline-title"
+      className="fixed inset-0 z-[120] bg-[#150D2E] flex flex-col items-center justify-center p-6 text-center select-none"
+    >
+      <div className="fixed top-0 left-1/2 -translate-x-1/2 w-[520px] h-[300px] bg-gradient-to-b from-[#7C3AED]/30 via-[#8B5CF6]/10 to-transparent blur-3xl pointer-events-none" />
+      <div className="w-full max-w-sm rounded-3xl bg-[#1D1240] border-2 border-[#8B5CF6] shadow-[0_0_45px_rgba(124,58,237,0.5)] p-6 space-y-5 relative z-10">
+        <div className="w-16 h-16 mx-auto rounded-2xl bg-rose-500/15 border-2 border-rose-500/60 flex items-center justify-center shadow-[0_0_25px_rgba(244,63,94,0.25)]">
+          <WifiOff className="w-8 h-8 text-rose-400" />
+        </div>
+
+        <div className="space-y-2">
+          <span className="inline-block text-[10px] font-black uppercase tracking-widest px-3 py-1 rounded-full bg-[#23154D] text-purple-200 border border-[#8B5CF6]/40">
+            SALOMA • Hors Ligne
+          </span>
+          <h2 id="saloma-offline-title" className="text-lg font-black text-white">
+            Connexion Internet requise
+          </h2>
+          <p className="text-xs font-bold text-amber-300">
+            Vérifiez vos données mobiles
+          </p>
+          <p className="text-[11px] text-purple-200/80 leading-relaxed">
+            Activez vos données mobiles ou le Wi-Fi pour accéder au Dashboard, au Trading, à l&apos;Échange et à votre Portefeuille.
+          </p>
+        </div>
+
+        {stillOfflineMsg && (
+          <div className="p-2.5 rounded-xl bg-rose-500/20 border border-rose-500/40 text-rose-200 text-[11px] font-bold">
+            Toujours aucune connexion détectée. Vérifiez vos données mobiles.
+          </div>
+        )}
+
+        <button
+          type="button"
+          disabled={retrying}
+          onClick={handleRetryClick}
+          className="w-full py-3.5 rounded-2xl bg-gradient-to-r from-[#7C3AED] via-[#8B5CF6] to-[#7C3AED] text-white font-black text-sm shadow-[0_0_25px_rgba(124,58,237,0.7)] border border-purple-300/40 active:scale-[0.98] transition disabled:opacity-60"
+        >
+          {retrying ? 'Vérification de la connexion...' : 'Réessayer'}
+        </button>
+      </div>
     </div>
   );
 };

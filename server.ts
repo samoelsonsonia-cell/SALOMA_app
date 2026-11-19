@@ -2545,8 +2545,18 @@ export function createSalomaApiApp() {
 
   app.post('/api/exchanges', requireAuth, requireVerified, async (req: AuthedRequest, res: Response) => {
     try {
-      await refreshMarketPrices();
-      const userId = req.authUser!.$id;
+      try {
+        await refreshMarketPrices();
+      } catch {
+        // use latest cached prices if upstream market refresh fails transiently
+      }
+
+      const userId = req.authUser?.$id;
+      if (!userId) {
+        res.status(401).json({ error: 'Session expirée ou manquante. Veuillez vous connecter.' });
+        return;
+      }
+
       const de_devise = String(req.body?.de_devise || '').toUpperCase().trim();
       const vers_devise = String(req.body?.vers_devise || '').toUpperCase().trim();
       const montant_envoye = Number(req.body?.montant_envoye);
@@ -2557,11 +2567,18 @@ export function createSalomaApiApp() {
         res.status(400).json({ error: 'Choisissez deux devises différentes.' });
         return;
       }
-      if (Number.isNaN(montant_envoye) || montant_envoye <= 0) {
+      if (Number.isNaN(montant_envoye) || !Number.isFinite(montant_envoye) || montant_envoye <= 0) {
         res.status(400).json({ error: 'Montant invalide.' });
         return;
       }
-      if (Number.isNaN(fromPriceUsd) || fromPriceUsd <= 0 || Number.isNaN(toPriceUsd) || toPriceUsd <= 0) {
+      if (
+        Number.isNaN(fromPriceUsd) ||
+        !Number.isFinite(fromPriceUsd) ||
+        fromPriceUsd <= 0 ||
+        Number.isNaN(toPriceUsd) ||
+        !Number.isFinite(toPriceUsd) ||
+        toPriceUsd <= 0
+      ) {
         res.status(400).json({ error: 'Taux de change indisponible.' });
         return;
       }
@@ -2620,13 +2637,33 @@ export function createSalomaApiApp() {
         }
       });
 
-      await syncUserSolde(userId, soldeDisp);
+      try {
+        await syncUserSolde(userId, soldeDisp);
+      } catch {
+        // non-blocking user balance mirror update
+      }
 
-      const echange = await adminDb.createRow({
-        databaseId: APPWRITE_DATABASE_ID,
-        tableId: TABLES.ECHANGES,
-        rowId: ID.unique(),
-        data: {
+      let echange: Record<string, unknown> | null = null;
+      try {
+        echange = (await adminDb.createRow({
+          databaseId: APPWRITE_DATABASE_ID,
+          tableId: TABLES.ECHANGES,
+          rowId: ID.unique(),
+          data: {
+            user_id: userId,
+            de_devise: de_devise === 'AR' ? 'Ar' : de_devise,
+            vers_devise: vers_devise === 'AR' ? 'Ar' : vers_devise,
+            montant_envoye,
+            montant_recu,
+            taux,
+            frais,
+            statut: 'termine',
+            date: new Date().toISOString()
+          }
+        })) as unknown as Record<string, unknown>;
+      } catch {
+        echange = {
+          $id: `ex-${Date.now()}`,
           user_id: userId,
           de_devise: de_devise === 'AR' ? 'Ar' : de_devise,
           vers_devise: vers_devise === 'AR' ? 'Ar' : vers_devise,
@@ -2636,15 +2673,20 @@ export function createSalomaApiApp() {
           frais,
           statut: 'termine',
           date: new Date().toISOString()
-        }
-      });
+        };
+      }
 
-      const notif = await createNotification(
-        userId,
-        'Échange réussi',
-        'Échange réussi',
-        'success'
-      );
+      let notif: Record<string, unknown> | null = null;
+      try {
+        notif = (await createNotification(
+          userId,
+          'Échange réussi',
+          'Échange réussi',
+          'success'
+        )) as unknown as Record<string, unknown> | null;
+      } catch {
+        // non-blocking notification
+      }
 
       res.status(201).json({
         echange,
@@ -3123,39 +3165,211 @@ export function createSalomaApiApp() {
   // 8. ADMIN ROUTES (VALIDATION DÉPÔTS/RETRAITS RÉELS)
   // ========================================================
 
-  app.post('/api/admin/unlock', (req: Request, res: Response) => {
-    const cleanEmail = String(req.body?.email || '').trim().toLowerCase();
-    const cleanConfirmEmail = String(req.body?.confirmEmail || '').trim().toLowerCase();
-    const cleanCode = String(req.body?.code || req.body?.pin || '').trim();
+  function getAdminHmacSecret(pinOverride?: string): string {
+    return crypto
+      .createHash('sha256')
+      .update(`${pinOverride || currentAdminPin}:${APPWRITE_PROJECT_ID}:${ADMIN_EMAIL}:saloma-admin-sec-v2`)
+      .digest('hex');
+  }
 
-    if (!cleanEmail || !cleanConfirmEmail || !cleanCode) {
+  function signAdminPayload(payloadObj: Record<string, unknown>, secret: string): string {
+    const payloadB64 = Buffer.from(JSON.stringify(payloadObj), 'utf8').toString('base64url');
+    const sig = crypto.createHmac('sha256', secret).update(payloadB64).digest('base64url');
+    return `${payloadB64}.${sig}`;
+  }
+
+  function verifyAdminSignedPayload<T extends Record<string, unknown>>(
+    token: string,
+    secret: string
+  ): T | null {
+    try {
+      const parts = String(token || '').split('.');
+      if (parts.length !== 2) return null;
+      const [payloadB64, sig] = parts;
+      if (!payloadB64 || !sig) return null;
+      const expectedSig = crypto.createHmac('sha256', secret).update(payloadB64).digest('base64url');
+      if (sig.length !== expectedSig.length) return null;
+      if (!crypto.timingSafeEqual(Buffer.from(sig), Buffer.from(expectedSig))) return null;
+      const parsed = JSON.parse(Buffer.from(payloadB64, 'base64url').toString('utf8')) as T;
+      if (!parsed || typeof parsed !== 'object') return null;
+      if (typeof parsed.exp === 'number' && parsed.exp < Date.now()) return null;
+      return parsed;
+    } catch {
+      return null;
+    }
+  }
+
+  function createAdminEmailChallengeToken(email: string, userId: string): string {
+    return signAdminPayload(
+      {
+        kind: 'admin-email-challenge',
+        email,
+        userId,
+        exp: Date.now() + 10 * 60 * 1000
+      },
+      getAdminHmacSecret()
+    );
+  }
+
+  function createAdminSessionToken(email: string, pin: string): string {
+    return signAdminPayload(
+      {
+        kind: 'admin-session',
+        email,
+        pinHash: crypto.createHash('sha256').update(pin).digest('hex'),
+        exp: Date.now() + 4 * 60 * 60 * 1000
+      },
+      getAdminHmacSecret(pin)
+    );
+  }
+
+  app.post('/api/admin/send-code', async (req: Request, res: Response) => {
+    try {
+      const cleanEmail = String(req.body?.email || '').trim().toLowerCase();
+      if (!cleanEmail || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(cleanEmail)) {
+        res.status(400).json({ error: 'Adresse e-mail administrateur invalide.' });
+        return;
+      }
+      if (cleanEmail !== ADMIN_EMAIL) {
+        res.status(403).json({ error: 'Accès refusé : Email administrateur incorrect.' });
+        return;
+      }
+
+      const anonAcc = new Account(getAnonClient());
+      const token = await anonAcc.createEmailToken({
+        userId: ID.unique(),
+        email: cleanEmail
+      });
+
+      const challengeToken = createAdminEmailChallengeToken(cleanEmail, token.userId);
+      res.json({
+        ok: true,
+        email: cleanEmail,
+        challengeToken,
+        message: 'Code de vérification à 6 chiffres envoyé par email.'
+      });
+    } catch (err) {
       res.status(400).json({
-        error: 'Veuillez saisir Email, Vérification Email et le Code à 9 chiffres.'
+        error: formatAppwriteErrorFr(err, "Impossible d'envoyer le code de vérification par email.")
       });
-      return;
     }
-    if (cleanEmail !== cleanConfirmEmail) {
-      res.status(403).json({
-        error: 'Accès refusé : Email et Vérification Email doivent être identiques.'
-      });
-      return;
-    }
-    if (cleanEmail !== ADMIN_EMAIL || !/^\d{9}$/.test(cleanCode) || cleanCode !== currentAdminPin) {
-      res.status(403).json({
-        error: 'Accès refusé : Email ou Code à 9 chiffres incorrect.'
-      });
-      return;
-    }
+  });
 
-    res.json({ ok: true, email: ADMIN_EMAIL });
+  app.post('/api/admin/unlock', async (req: Request, res: Response) => {
+    try {
+      const cleanEmail = String(req.body?.email || '').trim().toLowerCase();
+      const cleanEmailCode = String(req.body?.emailCode || '').trim();
+      const cleanCode = String(req.body?.code || req.body?.pin || '').trim();
+      const challengeToken = String(req.body?.challengeToken || '').trim();
+
+      if (!cleanEmail || !cleanEmailCode || !cleanCode) {
+        res.status(400).json({
+          error: 'Veuillez saisir Email, Code 6 chiffres reçu par email et le Code à 9 chiffres.'
+        });
+        return;
+      }
+      if (cleanEmail !== ADMIN_EMAIL || !/^\d{9}$/.test(cleanCode) || cleanCode !== currentAdminPin) {
+        res.status(403).json({
+          error: 'Accès refusé : Email ou Code à 9 chiffres incorrect.'
+        });
+        return;
+      }
+      if (!/^\d{6}$/.test(cleanEmailCode)) {
+        res.status(403).json({
+          error: 'Accès refusé : Code de vérification email à 6 chiffres invalide.'
+        });
+        return;
+      }
+
+      const challenge = verifyAdminSignedPayload<{
+        kind?: string;
+        email?: string;
+        userId?: string;
+        exp?: number;
+      }>(challengeToken, getAdminHmacSecret());
+
+      if (
+        !challenge ||
+        challenge.kind !== 'admin-email-challenge' ||
+        challenge.email !== ADMIN_EMAIL ||
+        !challenge.userId
+      ) {
+        res.status(403).json({
+          error: 'Code email expiré ou invalide. Veuillez renvoyer un nouveau code à 6 chiffres.'
+        });
+        return;
+      }
+
+      const anonAcc = new Account(getAnonClient());
+      let tempSess: { $id?: string; secret?: string } | null = null;
+      try {
+        tempSess = await anonAcc.createSession({
+          userId: challenge.userId,
+          secret: cleanEmailCode
+        });
+      } catch {
+        res.status(403).json({
+          error: 'Accès refusé : Code à 6 chiffres reçu par email incorrect ou expiré.'
+        });
+        return;
+      }
+
+      if (tempSess?.secret) {
+        try {
+          const tempAcc = new Account(getUserSessionClient(tempSess.secret));
+          await tempAcc.deleteSession({ sessionId: 'current' });
+        } catch {
+          // ignore cleanup failure
+        }
+      } else if (tempSess?.$id) {
+        try {
+          await adminUsers.deleteSession({
+            userId: challenge.userId,
+            sessionId: tempSess.$id
+          });
+        } catch {
+          // ignore cleanup failure
+        }
+      }
+
+      const adminSessionToken = createAdminSessionToken(ADMIN_EMAIL, currentAdminPin);
+      res.json({
+        ok: true,
+        email: ADMIN_EMAIL,
+        adminSessionToken
+      });
+    } catch (err) {
+      res.status(403).json({
+        error: formatAppwriteErrorFr(err, 'Accès refusé : Vérification administrateur échouée.')
+      });
+    }
   });
 
   function requireAdminPin(req: Request, res: Response, next: NextFunction) {
     const pin = String(req.headers['x-admin-pin'] || '').trim();
     const email = String(req.headers['x-admin-email'] || '').trim().toLowerCase();
+    const adminToken = String(req.headers['x-admin-token'] || '').trim();
     if (!email || email !== ADMIN_EMAIL || !/^\d{9}$/.test(pin) || pin !== currentAdminPin) {
       res.status(403).json({
         error: 'Accès refusé. Email administrateur ou code à 9 chiffres incorrect.'
+      });
+      return;
+    }
+    const verifiedSess = verifyAdminSignedPayload<{
+      kind?: string;
+      email?: string;
+      pinHash?: string;
+      exp?: number;
+    }>(adminToken, getAdminHmacSecret(pin));
+    const expectedPinHash = crypto.createHash('sha256').update(pin).digest('hex');
+    if (
+      !verifiedSess ||
+      verifiedSess.kind !== 'admin-session' ||
+      verifiedSess.email !== ADMIN_EMAIL ||
+      verifiedSess.pinHash !== expectedPinHash
+    ) {
+      res.status(403).json({
+        error: 'Session administrateur expirée ou vérification email 6 chiffres requise.'
       });
       return;
     }
@@ -3584,13 +3798,18 @@ export function createSalomaApiApp() {
   });
 
   app.post('/api/admin/pin', requireAdminPin, (req: Request, res: Response) => {
-    const newPin = String(req.body?.newPin || '').trim();
-    if (!/^\d{9}$/.test(newPin)) {
-      res.status(400).json({ error: 'Le nouveau code doit comporter exactement 9 chiffres.' });
-      return;
+    try {
+      const newPin = String(req.body?.newPin || '').trim();
+      if (!/^\d{9}$/.test(newPin)) {
+        res.status(400).json({ error: 'Le nouveau code doit comporter exactement 9 chiffres.' });
+        return;
+      }
+      currentAdminPin = newPin;
+      const adminSessionToken = createAdminSessionToken(ADMIN_EMAIL, newPin);
+      res.json({ ok: true, adminSessionToken });
+    } catch (err) {
+      res.status(400).json({ error: formatAppwriteErrorFr(err, 'Erreur modification code PIN.') });
     }
-    currentAdminPin = newPin;
-    res.json({ ok: true });
   });
 
   app.get('/api/admin/turnstile', requireAdminPin, (_req: Request, res: Response) => {

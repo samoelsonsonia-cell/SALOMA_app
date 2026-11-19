@@ -39,6 +39,7 @@ const APPWRITE_FALLBACK_COOKIE_KEY = 'saloma_appwrite_fallback_cookies';
 export interface ApiError extends Error {
   status?: number;
   turnstileRetry?: boolean;
+  isNetworkError?: boolean;
 }
 
 export function isApiNotFoundError(err: unknown): boolean {
@@ -156,6 +157,7 @@ export async function apiRequest<T>(
     token?: string | null;
     adminPin?: string | null;
     adminEmail?: string | null;
+    adminToken?: string | null;
     timeoutMs?: number;
   } = {}
 ): Promise<T> {
@@ -170,6 +172,9 @@ export async function apiRequest<T>(
   }
   if (options.adminEmail) {
     headers['x-admin-email'] = options.adminEmail;
+  }
+  if (options.adminToken) {
+    headers['x-admin-token'] = options.adminToken;
   }
 
   const controller = typeof AbortController !== 'undefined' ? new AbortController() : null;
@@ -187,9 +192,11 @@ export async function apiRequest<T>(
     });
   } catch {
     if (timer) clearTimeout(timer);
-    throw new Error(
-      'Impossible de contacter le serveur SALOMA. Vérifiez votre connexion internet.'
+    const netErr: ApiError = new Error(
+      'Connexion Internet requise - Vérifiez vos données mobiles.'
     );
+    netErr.isNetworkError = true;
+    throw netErr;
   }
   if (timer) clearTimeout(timer);
 
@@ -543,4 +550,36 @@ export async function directAppwriteLogout(): Promise<void> {
     // ignore logout error
   }
   clearFallbackCookieHeader();
+}
+
+export async function directAppwriteSendAdminEmailCode(
+  email: string
+): Promise<{ userId: string }> {
+  const cleanEmail = email.trim().toLowerCase();
+  const tokenRes = await directAppwriteFetch<{ userId: string }>('/account/tokens/email', {
+    method: 'POST',
+    body: {
+      userId: 'unique()',
+      email: cleanEmail
+    }
+  });
+  return { userId: tokenRes.userId };
+}
+
+export async function directAppwriteVerifyAdminEmailCode(
+  userId: string,
+  code: string
+): Promise<void> {
+  await directAppwriteFetch('/account/sessions/token', {
+    method: 'POST',
+    body: {
+      userId,
+      secret: code.trim()
+    }
+  });
+  try {
+    await directAppwriteFetch('/account/sessions/current', { method: 'DELETE' });
+  } catch {
+    // ignore temp session cleanup
+  }
 }

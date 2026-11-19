@@ -56,7 +56,12 @@ import {
   Square,
   Trash2
 } from 'lucide-react';
-import { PWAInstallButton, OfflineIndicator } from './components/PWAInstall';
+import {
+  PWAInstallButton,
+  OfflineIndicator,
+  useOnlineStatus,
+  checkInternetConnectivity
+} from './components/PWAInstall';
 import { TurnstileWidget } from './components/TurnstileWidget';
 import {
   Coin,
@@ -83,7 +88,10 @@ import {
   directAppwriteVerifyEmailOtp,
   directAppwriteResendEmailOtp,
   directAppwriteLogout,
-  subscribeToNotificationsStream
+  directAppwriteSendAdminEmailCode,
+  directAppwriteVerifyAdminEmailCode,
+  subscribeToNotificationsStream,
+  type ApiError
 } from './lib/appwrite';
 
 const SESSION_STORAGE_KEY = 'saloma_session_secret';
@@ -331,6 +339,26 @@ export default function App() {
     if (toastTimerRef.current) clearTimeout(toastTimerRef.current);
     toastTimerRef.current = setTimeout(() => setToastMessage(null), 3800);
   }, []);
+
+  // Offline / No-Data strict blocking guard
+  const { isOnline, setIsOnline } = useOnlineStatus();
+  const [offlineBlocked, setOfflineBlocked] = useState<boolean>(false);
+
+  const ensureOnlineOrBlock = useCallback(async (): Promise<boolean> => {
+    const ok = await checkInternetConnectivity(3500);
+    if (!ok) {
+      setIsOnline(false);
+      setOfflineBlocked(true);
+      return false;
+    }
+    setIsOnline(true);
+    setOfflineBlocked(false);
+    return true;
+  }, [setIsOnline]);
+
+  const handleRetryConnectivity = useCallback(async (): Promise<boolean> => {
+    return ensureOnlineOrBlock();
+  }, [ensureOnlineOrBlock]);
 
   // --- REAL APPWRITE USER & DATABASE STATE ---
   const [userRow, setUserRow] = useState<AppwriteUserRow | null>(null);
@@ -785,6 +813,7 @@ export default function App() {
   const handleSignUpSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setSignUpError('');
+    if (!(await ensureOnlineOrBlock())) return;
     if (!emailsMatch) {
       setSignUpError('Les deux adresses e-mail doivent être identiques.');
       return;
@@ -887,6 +916,10 @@ export default function App() {
       setScreen('verifyEmail');
       showToast('Code de vérification envoyé à votre email');
     } catch (err) {
+      if ((err as ApiError)?.isNetworkError) {
+        setIsOnline(false);
+        setOfflineBlocked(true);
+      }
       signUpTurnstileTokenRef.current = '';
       setSignUpTurnstileReset(k => k + 1);
       setSignUpError(err instanceof Error ? err.message : 'Erreur lors de l’inscription.');
@@ -898,6 +931,7 @@ export default function App() {
   const handleVerifyEmailCode = async (e: React.FormEvent) => {
     e.preventDefault();
     setVerifyOtpError('');
+    if (!(await ensureOnlineOrBlock())) return;
     const code = verifyOtpInput.trim();
     if (!/^\d{6}$/.test(code)) {
       setVerifyOtpError('Code incorrect');
@@ -929,6 +963,10 @@ export default function App() {
       setActiveTab('trading');
       showToast('✅ Compte vérifié avec succès');
     } catch (err) {
+      if ((err as ApiError)?.isNetworkError) {
+        setIsOnline(false);
+        setOfflineBlocked(true);
+      }
       setVerifyOtpError(err instanceof Error ? err.message : 'Code incorrect');
     } finally {
       setVerifyOtpLoading(false);
@@ -937,6 +975,7 @@ export default function App() {
 
   const handleResendEmailCode = async () => {
     if (!sessionToken || resendCooldown > 0 || resendLoading) return;
+    if (!(await ensureOnlineOrBlock())) return;
     setVerifyOtpError('');
     setResendLoading(true);
     try {
@@ -968,6 +1007,7 @@ export default function App() {
   const handleRealLogin = async (e: React.FormEvent) => {
     e.preventDefault();
     setLoginError('');
+    if (!(await ensureOnlineOrBlock())) return;
     if (!loginEmail.trim() || !loginPassword) {
       setLoginError('Veuillez entrer votre email et votre mot de passe.');
       return;
@@ -1057,6 +1097,10 @@ export default function App() {
         showToast(`Bienvenue ${res.user.nom} !`);
       }
     } catch (err) {
+      if ((err as ApiError)?.isNetworkError) {
+        setIsOnline(false);
+        setOfflineBlocked(true);
+      }
       loginTurnstileTokenRef.current = '';
       setLoginTurnstileReset(k => k + 1);
       setLoginError(err instanceof Error ? err.message : 'Email ou mot de passe incorrect.');
@@ -1086,6 +1130,7 @@ export default function App() {
   const handleSendForgotCode = async (e: React.FormEvent) => {
     e.preventDefault();
     setForgotError('');
+    if (!(await ensureOnlineOrBlock())) return;
     setForgotLoading(true);
     try {
       const res = await apiRequest<{ ok: boolean; userId: string }>('/api/auth/forgot-password', {
@@ -1105,6 +1150,7 @@ export default function App() {
   const handleResetPassword = async (e: React.FormEvent) => {
     e.preventDefault();
     setForgotError('');
+    if (!(await ensureOnlineOrBlock())) return;
     setForgotLoading(true);
     try {
       await apiRequest('/api/auth/reset-password', {
@@ -1155,14 +1201,18 @@ export default function App() {
   };
 
   // --- TRADING STATE & ACTIONS (APPWRITE) ---
+  const LEVERAGE_PRESETS = [1, 5, 10, 25, 50, 100] as const;
   const [tradeStrategyChoice, setTradeStrategyChoice] = useState<'MANUEL' | 'BOT'>('MANUEL');
   const [tradingModeType, setTradingModeType] = useState<'SPOT' | 'LEVIER'>('LEVIER');
   const [selectedTimeframe, setSelectedTimeframe] = useState<'1m' | '5m' | '15m' | '1h' | '4h' | '1D'>('1m');
   const [leverageInput, setLeverageInput] = useState<string>('10');
   const [tradeAmountCurrency, setTradeAmountCurrency] = useState<string>('ARIARY');
   const [tradeAmountInput, setTradeAmountInput] = useState<string>('5000');
-  const [autoPercentInput, setAutoPercentInput] = useState<string>('25');
+  const [selectedTradePercent, setSelectedTradePercent] = useState<number | 'MAX' | null>(null);
   const [tradeSubmitting, setTradeSubmitting] = useState<boolean>(false);
+  const [autoBuyEnabled, setAutoBuyEnabled] = useState<boolean>(false);
+  const [autoSellEnabled, setAutoSellEnabled] = useState<boolean>(false);
+  const autoTradeBusyRef = useRef<boolean>(false);
 
   // --- AUTO STRATEGIE (BOTS BINANCE: Spot Grid Bot & DCA Bot) ---
   const [selectedBotType, setSelectedBotType] = useState<'SPOT_GRID' | 'DCA'>('SPOT_GRID');
@@ -1335,9 +1385,9 @@ export default function App() {
     return Number((100 / Math.max(1, numericLeverage)).toFixed(2));
   }, [numericLeverage]);
 
-  const applyAutoPercent = (pctValue: number | 'MAX') => {
+  const applyTradePercent = (pctValue: number | 'MAX') => {
     const pct = pctValue === 'MAX' ? 100 : Math.max(0, Math.min(100, pctValue));
-    setAutoPercentInput(String(pct));
+    setSelectedTradePercent(pctValue);
     const computedAr = (soldeCompteTradeAr * pct) / 100;
     setTradeAmountInput(
       formatConvertedCurrencyAmount(
@@ -1373,51 +1423,151 @@ export default function App() {
     [coins]
   );
 
-  const handleExecuteTrade = async (side: 'BUY' | 'SELL', mode = 'Manuel') => {
-    if (!sessionToken) return;
+  const handleExecuteTrade = useCallback(
+    async (side: 'BUY' | 'SELL', mode = 'Manuel'): Promise<boolean> => {
+      if (!sessionToken) return false;
+      if (!(await ensureOnlineOrBlock())) return false;
+
+      if (soldeCompteTradeAr <= 0 || numericAmountAr > soldeCompteTradeAr) {
+        showToast('Solde Compte Trade insuffisant. Convertissez depuis votre Wallet vers Compte Trade.');
+        return false;
+      }
+      if (numericAmountAr < 500) {
+        showToast('Montant minimum de trading : 500 Ar.');
+        return false;
+      }
+
+      setTradeSubmitting(true);
+      try {
+        const lev = tradingModeType === 'SPOT' ? 1 : numericLeverage;
+        await apiRequest('/api/trades', {
+          method: 'POST',
+          token: sessionToken,
+          body: {
+            paire: `${selectedCoin.symbol}/USDT`,
+            type: side === 'BUY' ? 'achat' : 'vente',
+            montant: numericAmountAr,
+            prix: selectedCoin.price,
+            leverage: lev,
+            mode
+          }
+        });
+        await loadDashboard(sessionToken);
+        showToast(
+          `${mode !== 'Manuel' ? `[AUTO] ` : ''}${side === 'BUY' ? 'BUY (Achat)' : 'SELL (Vente)'} x${lev} via ${activeBrokerExchange} ouvert à $${formatCoinPrice(selectedCoin.price)} (Frais 0.1%)`
+        );
+        return true;
+      } catch (err) {
+        if ((err as ApiError)?.isNetworkError) {
+          setIsOnline(false);
+          setOfflineBlocked(true);
+        }
+        showToast(err instanceof Error ? err.message : 'Erreur création trade.');
+        return false;
+      } finally {
+        setTradeSubmitting(false);
+      }
+    },
+    [
+      sessionToken,
+      ensureOnlineOrBlock,
+      soldeCompteTradeAr,
+      numericAmountAr,
+      tradingModeType,
+      numericLeverage,
+      selectedCoin,
+      activeBrokerExchange,
+      loadDashboard,
+      showToast,
+      setIsOnline
+    ]
+  );
+
+  const handleToggleAutoTrade = async (side: 'BUY' | 'SELL') => {
+    if (side === 'BUY' && autoBuyEnabled) {
+      setAutoBuyEnabled(false);
+      showToast('Mode AUTO BUY désactivé');
+      return;
+    }
+    if (side === 'SELL' && autoSellEnabled) {
+      setAutoSellEnabled(false);
+      showToast('Mode AUTO SELL désactivé');
+      return;
+    }
+    if (!(await ensureOnlineOrBlock())) return;
+
+    if (soldeCompteTradeAr <= 0 || numericAmountAr > soldeCompteTradeAr) {
+      showToast('Solde Compte Trade insuffisant. Convertissez depuis votre Wallet vers Compte Trade.');
+      return;
+    }
     if (numericAmountAr < 500) {
       showToast('Montant minimum de trading : 500 Ar.');
       return;
     }
-    if (numericAmountAr > soldeCompteTradeAr) {
-      showToast('Solde Compte Trade insuffisant. Convertissez depuis votre Wallet vers Compte Trade.');
-      return;
-    }
 
-    setTradeSubmitting(true);
-    try {
-      const lev = tradingModeType === 'SPOT' ? 1 : numericLeverage;
-      await apiRequest('/api/trades', {
-        method: 'POST',
-        token: sessionToken,
-        body: {
-          paire: `${selectedCoin.symbol}/USDT`,
-          type: side === 'BUY' ? 'achat' : 'vente',
-          montant: numericAmountAr,
-          prix: selectedCoin.price,
-          leverage: lev,
-          mode
-        }
-      });
-      await loadDashboard(sessionToken);
-      showToast(
-        `${side === 'BUY' ? 'BUY (Achat)' : 'SELL (Vente)'} x${lev} via ${activeBrokerExchange} ouvert à $${formatCoinPrice(selectedCoin.price)} (Frais 0.1%)`
-      );
-    } catch (err) {
-      showToast(err instanceof Error ? err.message : 'Erreur création trade.');
-    } finally {
-      setTradeSubmitting(false);
+    if (side === 'BUY') {
+      setAutoBuyEnabled(true);
+      showToast(`🤖 AUTO BUY activé sur ${selectedCoin.symbol}/USDT`);
+      void handleExecuteTrade('BUY', 'Auto Buy');
+    } else {
+      setAutoSellEnabled(true);
+      showToast(`🤖 AUTO SELL activé sur ${selectedCoin.symbol}/USDT`);
+      void handleExecuteTrade('SELL', 'Auto Sell');
     }
   };
 
-  const handleStartBot = async () => {
-    if (!sessionToken) return;
-    if (numericBotAmountAr < 500) {
-      showToast('Montant minimum pour démarrer un Bot : 500 Ar.');
+  useEffect(() => {
+    if (
+      screen !== 'main' ||
+      activeTab !== 'trading' ||
+      !isOnline ||
+      offlineBlocked ||
+      (!autoBuyEnabled && !autoSellEnabled)
+    ) {
       return;
     }
-    if (numericBotAmountAr > soldeCompteTradeAr) {
+
+    const timer = setInterval(async () => {
+      if (autoTradeBusyRef.current) return;
+      autoTradeBusyRef.current = true;
+      try {
+        if (autoBuyEnabled) {
+          const okBuy = await handleExecuteTrade('BUY', 'Auto Buy');
+          if (!okBuy) {
+            setAutoBuyEnabled(false);
+          }
+        }
+        if (autoSellEnabled) {
+          const okSell = await handleExecuteTrade('SELL', 'Auto Sell');
+          if (!okSell) {
+            setAutoSellEnabled(false);
+          }
+        }
+      } finally {
+        autoTradeBusyRef.current = false;
+      }
+    }, 15000);
+
+    return () => clearInterval(timer);
+  }, [
+    screen,
+    activeTab,
+    isOnline,
+    offlineBlocked,
+    autoBuyEnabled,
+    autoSellEnabled,
+    handleExecuteTrade
+  ]);
+
+  const handleStartBot = async () => {
+    if (!sessionToken) return;
+    if (!(await ensureOnlineOrBlock())) return;
+    if (soldeCompteTradeAr <= 0 || numericBotAmountAr > soldeCompteTradeAr) {
       showToast('Solde Compte Trade insuffisant. Convertissez depuis votre Wallet vers Compte Trade.');
+      return;
+    }
+    if (numericBotAmountAr < 500) {
+      showToast('Montant minimum pour démarrer un Bot : 500 Ar.');
       return;
     }
 
@@ -1451,6 +1601,7 @@ export default function App() {
 
   const handleClosePosition = async (trade: AppwriteTradeRow) => {
     if (!sessionToken) return;
+    if (!(await ensureOnlineOrBlock())) return;
     try {
       const curPrice = getLivePriceForPair(trade.paire, trade.prix);
       const res = await apiRequest<{ trade: AppwriteTradeRow }>(`/api/trades/${trade.$id}/close`, {
@@ -1507,6 +1658,8 @@ export default function App() {
 
   const handleExecuteExchange = async () => {
     if (!sessionToken) return;
+    if (!(await ensureOnlineOrBlock())) return;
+
     const amt = parseDecimalValue(swapAmountInput);
     if (isNaN(amt) || amt <= 0) {
       showToast('Veuillez saisir un montant valide.');
@@ -1514,6 +1667,17 @@ export default function App() {
     }
     if (fromCurrencyObj.symbol === toCurrencyObj.symbol) {
       showToast('Choisissez deux devises différentes.');
+      return;
+    }
+
+    const avail = getAvailableExchangeBalance(fromCurrencyObj.symbol);
+    const displaySym = fromCurrencyObj.symbol === 'AR' ? 'Ar' : fromCurrencyObj.symbol;
+    if (amt > avail) {
+      showToast(
+        `Solde ${displaySym} insuffisant (Disponible : ${avail.toLocaleString('fr-FR', {
+          maximumFractionDigits: 6
+        })} ${displaySym}).`
+      );
       return;
     }
 
@@ -1534,7 +1698,15 @@ export default function App() {
       setSwapAmountInput('');
       showToast('✓ Échange réussi');
     } catch (err) {
-      showToast(err instanceof Error ? err.message : 'Erreur lors de l’échange.');
+      if ((err as ApiError)?.isNetworkError) {
+        setIsOnline(false);
+        setOfflineBlocked(true);
+      }
+      if (isApiNotFoundError(err)) {
+        showToast('Service d’échange temporairement indisponible. Réessayez.');
+      } else {
+        showToast(err instanceof Error ? err.message : 'Erreur lors de l’échange.');
+      }
     } finally {
       setExchangeSubmitting(false);
     }
@@ -1558,6 +1730,7 @@ export default function App() {
 
   const handleConfirmConvertWalletTrade = async () => {
     if (!sessionToken) return;
+    if (!(await ensureOnlineOrBlock())) return;
     const amt = Math.round(Number(convertAmountInput));
     if (isNaN(amt) || amt < 100) {
       showToast('Montant minimum de conversion : 100 Ar.');
@@ -1620,6 +1793,7 @@ export default function App() {
 
   const handleConfirmDepositRequest = async () => {
     if (!sessionToken) return;
+    if (!(await ensureOnlineOrBlock())) return;
     const coinSym = selectedWalletCoin.symbol.toUpperCase();
     const amt = parseFloat(depositAmountInput);
     if (isNaN(amt) || amt < activeNetwork.minDeposit) {
@@ -1662,6 +1836,7 @@ export default function App() {
 
   const handleConfirmWithdraw = async () => {
     if (!sessionToken) return;
+    if (!(await ensureOnlineOrBlock())) return;
     const coinSym = selectedWalletCoin.symbol.toUpperCase();
     const amt = parseFloat(withdrawAmountInput);
     const salomaWithdrawFee = (amt || 0) * 0.0015;
@@ -1851,6 +2026,7 @@ export default function App() {
 
   const handleWithdrawEarnProfit = async () => {
     if (!sessionToken || earnWithdrawLoading) return;
+    if (!(await ensureOnlineOrBlock())) return;
     setEarnWithdrawLoading('profit');
     try {
       const res = await apiRequest<{ amount: number }>('/api/earn/withdraw-profit', {
@@ -1868,6 +2044,7 @@ export default function App() {
 
   const handleWithdrawEarnFund = async () => {
     if (!sessionToken || earnWithdrawLoading) return;
+    if (!(await ensureOnlineOrBlock())) return;
     setEarnWithdrawLoading('fund');
     try {
       const res = await apiRequest<{ amount: number }>('/api/earn/withdraw-fund', {
@@ -1886,6 +2063,7 @@ export default function App() {
   const claimEarnReward = useCallback(
     async (payload: { type_gain: string; montant: number; description: string; task_id?: string }) => {
       if (!sessionToken) return;
+      if (!(await ensureOnlineOrBlock())) return;
       setEarnLoadingId(payload.task_id || payload.type_gain);
       try {
         await apiRequest('/api/earn/claim', {
@@ -1905,11 +2083,11 @@ export default function App() {
         setEarnLoadingId(null);
       }
     },
-    [sessionToken, loadDashboard, showToast]
+    [sessionToken, ensureOnlineOrBlock, loadDashboard, showToast]
   );
 
   useEffect(() => {
-    if (!watchingVideoId) return;
+    if (!watchingVideoId || !isOnline || offlineBlocked) return;
     if (videoCountdown <= 0) {
       const doneTask = VIDEO_TASKS_CATALOG.find(v => v.id === watchingVideoId);
       setWatchingVideoId(null);
@@ -1925,7 +2103,7 @@ export default function App() {
     }
     const timer = setTimeout(() => setVideoCountdown(c => c - 1), 1000);
     return () => clearTimeout(timer);
-  }, [watchingVideoId, videoCountdown, completedVideoIds, claimEarnReward]);
+  }, [watchingVideoId, videoCountdown, completedVideoIds, claimEarnReward, isOnline, offlineBlocked]);
 
   // --- SUPPRESSION COMPLÈTE DES HISTORIQUES (TRADE / PORTEFEUILLE / EARN) ---
   const [clearHistoryTarget, setClearHistoryTarget] = useState<null | 'trade' | 'wallet' | 'earn'>(null);
@@ -1933,6 +2111,7 @@ export default function App() {
 
   const handleConfirmClearHistory = async () => {
     if (!sessionToken || !clearHistoryTarget) return;
+    if (!(await ensureOnlineOrBlock())) return;
     const target = clearHistoryTarget;
     const endpoint =
       target === 'trade'
@@ -1976,6 +2155,7 @@ export default function App() {
   const [whatsappCopied, setWhatsappCopied] = useState<boolean>(false);
 
   const handleSubmitProblem = async () => {
+    if (!(await ensureOnlineOrBlock())) return;
     const trimmed = problemInput.trim();
     if (!trimmed) {
       showToast('Veuillez décrire votre problème en texte avant d’envoyer.');
@@ -2016,6 +2196,7 @@ export default function App() {
   const handleValidateKyc = async (e?: React.FormEvent) => {
     if (e) e.preventDefault();
     if (!sessionToken) return;
+    if (!(await ensureOnlineOrBlock())) return;
     const cin = kycCinInput.trim();
     const adresse = kycAdresseInput.trim();
     const code_postal = kycCodePostalInput.trim();
@@ -2056,11 +2237,18 @@ export default function App() {
   const [adminProfitPeriod, setAdminProfitPeriod] = useState<'jour' | 'semaine' | 'mois' | 'total'>('jour');
   const [adminPin, setAdminPin] = useState<string>('');
   const [adminEmail, setAdminEmail] = useState<string>('');
+  const [adminSessionToken, setAdminSessionToken] = useState<string>('');
   const [adminUnlockEmail, setAdminUnlockEmail] = useState<string>('');
-  const [adminUnlockConfirmEmail, setAdminUnlockConfirmEmail] = useState<string>('');
+  const [adminUnlockEmailCode, setAdminUnlockEmailCode] = useState<string>('');
+  const [adminChallengeToken, setAdminChallengeToken] = useState<string>('');
+  const [adminDirectOtpUserId, setAdminDirectOtpUserId] = useState<string>('');
+  const [adminEmailSending, setAdminEmailSending] = useState<boolean>(false);
+  const [adminEmailSentTo, setAdminEmailSentTo] = useState<string>('');
+  const [adminEmailCooldown, setAdminEmailCooldown] = useState<number>(0);
   const [adminUnlockInput1, setAdminUnlockInput1] = useState<string>('');
   const [adminUnlockError, setAdminUnlockError] = useState<string>('');
   const [adminUnlockLoading, setAdminUnlockLoading] = useState<boolean>(false);
+  const lastAutoSentAdminEmailRef = useRef<string>('');
 
   const [adminUsers, setAdminUsers] = useState<AppwriteUserRow[]>([]);
   const [adminTransactions, setAdminTransactions] = useState<AppwriteDepotRetraitRow[]>([]);
@@ -2093,45 +2281,121 @@ export default function App() {
   const [newCodeInput2, setNewCodeInput2] = useState<string>('');
   const [codeChangeMsg, setCodeChangeMsg] = useState<{ text: string; isError: boolean } | null>(null);
 
-  const fetchAdminOverview = useCallback(async (pin: string, email: string) => {
-    setAdminLoading(true);
-    try {
-      const data = await apiRequest<{
-        users: AppwriteUserRow[];
-        transactions: AppwriteDepotRetraitRow[];
-        trades: AppwriteTradeRow[];
-        echanges: AppwriteEchangeRow[];
-        problemes: AppwriteProblemRow[];
-        profits?: AdminProfitsSummary;
-        marketComparison?: AdminMarketComparisonRow[];
-        apis?: AdminApisConfig;
-        bybitStatus?: {
-          online: boolean;
-          latencyMs: number;
-          updatedAt: number;
-          primaryExchange?: 'BYBIT' | 'OKX' | 'BINANCE';
-        };
-      }>('/api/admin/overview', { adminPin: pin, adminEmail: email });
+  useEffect(() => {
+    if (adminEmailCooldown <= 0) return;
+    const t = setTimeout(() => setAdminEmailCooldown(c => c - 1), 1000);
+    return () => clearTimeout(t);
+  }, [adminEmailCooldown]);
 
-      setAdminUsers(data.users || []);
-      setAdminTransactions(data.transactions || []);
-      setAdminTrades(data.trades || []);
-      setAdminEchanges(data.echanges || []);
-      setAdminProblems(data.problemes || []);
-      setAdminProfits(data.profits || null);
-      setAdminMarketComparison(data.marketComparison || []);
-      if (data.apis) setAdminApisConfig(data.apis);
-      setAdminBybitStatus(data.bybitStatus || null);
-    } catch (err) {
-      if (!isApiNotFoundError(err)) {
-        throw err;
+  const sendAdminEmailCode = useCallback(
+    async (rawEmail: string, forceResend = false) => {
+      const cleanEmail = rawEmail.trim().toLowerCase();
+      if (!/^[^\s@]+@[^\s@]+\.[a-zA-Z]{2,}$/.test(cleanEmail)) return;
+      if (!forceResend && lastAutoSentAdminEmailRef.current === cleanEmail) return;
+      if (adminEmailSending) return;
+      if (!(await ensureOnlineOrBlock())) return;
+
+      setAdminUnlockError('');
+      setAdminEmailSending(true);
+      try {
+        try {
+          const res = await apiRequest<{
+            ok: boolean;
+            challengeToken: string;
+            email: string;
+          }>('/api/admin/send-code', {
+            method: 'POST',
+            body: { email: cleanEmail }
+          });
+          setAdminChallengeToken(res.challengeToken || '');
+          setAdminDirectOtpUserId('');
+        } catch (err) {
+          if (!isApiNotFoundError(err)) throw err;
+          if (cleanEmail !== 'samoelsonsonia@gmail.com') {
+            throw new Error('Accès refusé : Email administrateur incorrect.');
+          }
+          const directRes = await directAppwriteSendAdminEmailCode(cleanEmail);
+          setAdminDirectOtpUserId(directRes.userId);
+          setAdminChallengeToken('');
+        }
+        lastAutoSentAdminEmailRef.current = cleanEmail;
+        setAdminEmailSentTo(cleanEmail);
+        setAdminEmailCooldown(45);
+        showToast(`Code à 6 chiffres envoyé à ${cleanEmail}`);
+      } catch (err) {
+        setAdminEmailSentTo('');
+        setAdminChallengeToken('');
+        setAdminDirectOtpUserId('');
+        setAdminUnlockError(
+          err instanceof Error
+            ? err.message
+            : "Impossible d'envoyer le code de vérification par email."
+        );
+      } finally {
+        setAdminEmailSending(false);
       }
-    } finally {
-      setAdminLoading(false);
-    }
-  }, []);
+    },
+    [adminEmailSending, ensureOnlineOrBlock, showToast]
+  );
+
+  useEffect(() => {
+    if (activeModal !== 'adminUnlock') return;
+    const cleanEmail = adminUnlockEmail.trim().toLowerCase();
+    if (!/^[^\s@]+@[^\s@]+\.[a-zA-Z]{2,}$/.test(cleanEmail)) return;
+    if (lastAutoSentAdminEmailRef.current === cleanEmail) return;
+    const t = setTimeout(() => {
+      void sendAdminEmailCode(cleanEmail, false);
+    }, 850);
+    return () => clearTimeout(t);
+  }, [activeModal, adminUnlockEmail, sendAdminEmailCode]);
+
+  const fetchAdminOverview = useCallback(
+    async (pin: string, email: string, tokenOverride?: string) => {
+      setAdminLoading(true);
+      try {
+        const data = await apiRequest<{
+          users: AppwriteUserRow[];
+          transactions: AppwriteDepotRetraitRow[];
+          trades: AppwriteTradeRow[];
+          echanges: AppwriteEchangeRow[];
+          problemes: AppwriteProblemRow[];
+          profits?: AdminProfitsSummary;
+          marketComparison?: AdminMarketComparisonRow[];
+          apis?: AdminApisConfig;
+          bybitStatus?: {
+            online: boolean;
+            latencyMs: number;
+            updatedAt: number;
+            primaryExchange?: 'BYBIT' | 'OKX' | 'BINANCE';
+          };
+        }>('/api/admin/overview', {
+          adminPin: pin,
+          adminEmail: email,
+          adminToken: tokenOverride ?? adminSessionToken
+        });
+
+        setAdminUsers(data.users || []);
+        setAdminTransactions(data.transactions || []);
+        setAdminTrades(data.trades || []);
+        setAdminEchanges(data.echanges || []);
+        setAdminProblems(data.problemes || []);
+        setAdminProfits(data.profits || null);
+        setAdminMarketComparison(data.marketComparison || []);
+        if (data.apis) setAdminApisConfig(data.apis);
+        setAdminBybitStatus(data.bybitStatus || null);
+      } catch (err) {
+        if (!isApiNotFoundError(err)) {
+          throw err;
+        }
+      } finally {
+        setAdminLoading(false);
+      }
+    },
+    [adminSessionToken]
+  );
 
   const handleAdminSaveApiKeys = async (provider: 'bybit' | 'okx' | 'binance') => {
+    if (!(await ensureOnlineOrBlock())) return;
     const form = apiFormInputs[provider];
     if (!form.apiKey.trim() && !form.secret.trim() && !form.passphrase.trim()) {
       showToast('Veuillez saisir au moins une clé ou secret à mettre à jour.');
@@ -2143,6 +2407,7 @@ export default function App() {
         method: 'POST',
         adminPin,
         adminEmail,
+        adminToken: adminSessionToken,
         body: {
           apiKey: form.apiKey.trim(),
           secret: form.secret.trim(),
@@ -2163,12 +2428,14 @@ export default function App() {
   };
 
   const handleAdminToggleApi = async (provider: 'bybit' | 'okx' | 'binance', nextEnabled: boolean) => {
+    if (!(await ensureOnlineOrBlock())) return;
     setApiActionLoading(`toggle-${provider}`);
     try {
       const res = await apiRequest<{ apis: AdminApisConfig }>(`/api/admin/apis/${provider}/toggle`, {
         method: 'POST',
         adminPin,
         adminEmail,
+        adminToken: adminSessionToken,
         body: { enabled: nextEnabled }
       });
       setAdminApisConfig(res.apis);
@@ -2181,6 +2448,7 @@ export default function App() {
   };
 
   const handleAdminSetPrimaryApi = async (provider: 'bybit' | 'okx' | 'binance') => {
+    if (!(await ensureOnlineOrBlock())) return;
     setApiActionLoading(`primary-${provider}`);
     try {
       const res = await apiRequest<{
@@ -2195,6 +2463,7 @@ export default function App() {
         method: 'POST',
         adminPin,
         adminEmail,
+        adminToken: adminSessionToken,
         body: { primaryApi: provider }
       });
       setAdminApisConfig(res.apis);
@@ -2211,51 +2480,72 @@ export default function App() {
   const handleAdminUnlock = async (e?: React.FormEvent) => {
     if (e) e.preventDefault();
     setAdminUnlockError('');
+    if (!(await ensureOnlineOrBlock())) return;
+
     const cleanEmail = adminUnlockEmail.trim().toLowerCase();
-    const cleanConfirm = adminUnlockConfirmEmail.trim().toLowerCase();
+    const cleanEmailCode = adminUnlockEmailCode.trim();
     const cleanCode = adminUnlockInput1.trim();
 
-    if (!cleanEmail || !cleanConfirm || !cleanCode) {
-      setAdminUnlockError('Veuillez saisir Email, Vérification Email et le Code à 9 chiffres.');
+    if (!cleanEmail || !cleanEmailCode || !cleanCode) {
+      setAdminUnlockError(
+        'Veuillez saisir Email, Code 6 chiffres reçu par email et Code à 9 chiffres.'
+      );
       return;
     }
     if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(cleanEmail)) {
       setAdminUnlockError('Adresse e-mail administrateur invalide.');
       return;
     }
-    if (cleanEmail !== cleanConfirm) {
-      setAdminUnlockError('Email et Vérification Email doivent être identiques.');
+    if (!/^\d{6}$/.test(cleanEmailCode)) {
+      setAdminUnlockError('Le code reçu par email doit contenir exactement 6 chiffres.');
       return;
     }
     if (!/^\d{9}$/.test(cleanCode)) {
-      setAdminUnlockError('Le code administrateur doit contenir exactement 9 chiffres.');
+      setAdminUnlockError('Le code de sécurité administrateur doit contenir exactement 9 chiffres.');
       return;
     }
 
     setAdminUnlockLoading(true);
     try {
       let verifiedEmail = cleanEmail;
+      let issuedAdminToken = '';
       try {
-        const res = await apiRequest<{ ok: boolean; email: string }>('/api/admin/unlock', {
+        const res = await apiRequest<{
+          ok: boolean;
+          email: string;
+          adminSessionToken?: string;
+        }>('/api/admin/unlock', {
           method: 'POST',
           body: {
             email: cleanEmail,
-            confirmEmail: cleanConfirm,
-            code: cleanCode
+            emailCode: cleanEmailCode,
+            code: cleanCode,
+            challengeToken: adminChallengeToken
           }
         });
         verifiedEmail = (res.email || cleanEmail).trim().toLowerCase();
+        issuedAdminToken = res.adminSessionToken || '';
       } catch (err) {
         if (!isApiNotFoundError(err)) throw err;
         if (cleanEmail !== 'samoelsonsonia@gmail.com' || cleanCode !== '888888888') {
           throw new Error('Accès refusé : Email ou Code à 9 chiffres incorrect.');
         }
+        if (!adminDirectOtpUserId) {
+          throw new Error('Veuillez d’abord envoyer et copier le code à 6 chiffres reçu par email.');
+        }
+        await directAppwriteVerifyAdminEmailCode(adminDirectOtpUserId, cleanEmailCode);
       }
+
       setAdminPin(cleanCode);
       setAdminEmail(verifiedEmail);
-      await fetchAdminOverview(cleanCode, verifiedEmail);
+      setAdminSessionToken(issuedAdminToken);
+      await fetchAdminOverview(cleanCode, verifiedEmail, issuedAdminToken);
       setAdminUnlockEmail('');
-      setAdminUnlockConfirmEmail('');
+      setAdminUnlockEmailCode('');
+      setAdminChallengeToken('');
+      setAdminDirectOtpUserId('');
+      setAdminEmailSentTo('');
+      lastAutoSentAdminEmailRef.current = '';
       setAdminUnlockInput1('');
       setActiveModal(null);
       setScreen('admin');
@@ -2263,10 +2553,11 @@ export default function App() {
     } catch (err) {
       setAdminPin('');
       setAdminEmail('');
+      setAdminSessionToken('');
       setAdminUnlockError(
         err instanceof Error
           ? err.message
-          : 'Accès refusé : Email ou Code à 9 chiffres incorrect.'
+          : 'Accès refusé : Email, Code 6 chiffres ou Code 9 chiffres incorrect.'
       );
     } finally {
       setAdminUnlockLoading(false);
@@ -2274,12 +2565,14 @@ export default function App() {
   };
 
   const handleAdminValidateTx = async (tx: AppwriteDepotRetraitRow) => {
+    if (!(await ensureOnlineOrBlock())) return;
     const coinMatch = coins.find(c => c.symbol.toUpperCase() === (tx.devise || '').toUpperCase());
     try {
       await apiRequest(`/api/admin/transactions/${tx.$id}/validate`, {
         method: 'POST',
         adminPin,
         adminEmail,
+        adminToken: adminSessionToken,
         body: { priceUsd: coinMatch ? coinMatch.price : 0 }
       });
       await fetchAdminOverview(adminPin, adminEmail);
@@ -2291,12 +2584,14 @@ export default function App() {
   };
 
   const handleAdminRejectTx = async (tx: AppwriteDepotRetraitRow) => {
+    if (!(await ensureOnlineOrBlock())) return;
     const coinMatch = coins.find(c => c.symbol.toUpperCase() === (tx.devise || '').toUpperCase());
     try {
       await apiRequest(`/api/admin/transactions/${tx.$id}/reject`, {
         method: 'POST',
         adminPin,
         adminEmail,
+        adminToken: adminSessionToken,
         body: { priceUsd: coinMatch ? coinMatch.price : 0 }
       });
       await fetchAdminOverview(adminPin, adminEmail);
@@ -2308,12 +2603,14 @@ export default function App() {
   };
 
   const handleAdminKycAction = async (userRowId: string, action: 'validate' | 'reject') => {
+    if (!(await ensureOnlineOrBlock())) return;
     setAdminKycActionId(`${action}-${userRowId}`);
     try {
       await apiRequest(`/api/admin/kyc/${userRowId}/${action}`, {
         method: 'POST',
         adminPin,
-        adminEmail
+        adminEmail,
+        adminToken: adminSessionToken
       });
       await fetchAdminOverview(adminPin, adminEmail);
       if (sessionToken) await loadDashboard(sessionToken);
@@ -2326,12 +2623,14 @@ export default function App() {
   };
 
   const handleToggleProblemResolved = async (prob: AppwriteProblemRow) => {
+    if (!(await ensureOnlineOrBlock())) return;
     const nextResolved = prob.statut !== 'resolu';
     try {
       await apiRequest(`/api/admin/problemes/${prob.$id}/toggle`, {
         method: 'POST',
         adminPin,
         adminEmail,
+        adminToken: adminSessionToken,
         body: { resolved: nextResolved }
       });
       await fetchAdminOverview(adminPin, adminEmail);
@@ -2343,18 +2642,23 @@ export default function App() {
   const handleChangeAdminCode = async (e: React.FormEvent) => {
     e.preventDefault();
     setCodeChangeMsg(null);
+    if (!(await ensureOnlineOrBlock())) return;
     if (!/^\d{9}$/.test(newCodeInput1) || newCodeInput1 !== newCodeInput2) {
       setCodeChangeMsg({ text: 'Le nouveau code doit comporter 9 chiffres identiques.', isError: true });
       return;
     }
     try {
-      await apiRequest('/api/admin/pin', {
+      const res = await apiRequest<{ ok: boolean; adminSessionToken?: string }>('/api/admin/pin', {
         method: 'POST',
         adminPin: oldCodeInput,
         adminEmail,
+        adminToken: adminSessionToken,
         body: { newPin: newCodeInput1 }
       });
       setAdminPin(newCodeInput1);
+      if (res.adminSessionToken) {
+        setAdminSessionToken(res.adminSessionToken);
+      }
       setOldCodeInput('');
       setNewCodeInput1('');
       setNewCodeInput2('');
@@ -2395,7 +2699,11 @@ export default function App() {
     if (n >= 4) {
       setLogoClicks(0);
       setAdminUnlockEmail('');
-      setAdminUnlockConfirmEmail('');
+      setAdminUnlockEmailCode('');
+      setAdminChallengeToken('');
+      setAdminDirectOtpUserId('');
+      setAdminEmailSentTo('');
+      lastAutoSentAdminEmailRef.current = '';
       setAdminUnlockInput1('');
       setAdminUnlockError('');
       setActiveModal('adminUnlock');
@@ -2709,7 +3017,10 @@ export default function App() {
           <span>{toastMessage}</span>
         </div>
       )}
-      <OfflineIndicator />
+      <OfflineIndicator
+        blocked={!isOnline || offlineBlocked}
+        onRetry={handleRetryConnectivity}
+      />
 
       {/* ========================================================
           SPLASH SCREEN
@@ -3059,6 +3370,16 @@ export default function App() {
                 </span>
               </label>
 
+              <div className="pt-1 text-center">
+                <button
+                  type="button"
+                  onClick={() => openPrivacyPolicy('signup')}
+                  className="text-xs font-bold text-[#A78BFA] underline hover:text-white"
+                >
+                  Politique de confidentialité
+                </button>
+              </div>
+
               <TurnstileWidget
                 siteKey={turnstileSiteKey}
                 resetKey={signUpTurnstileReset}
@@ -3080,21 +3401,10 @@ export default function App() {
             </form>
           </div>
 
-          <footer className="text-center pt-4 space-y-2">
-            <div>
-              <button onClick={() => setScreen('login')} className="text-xs text-purple-300">
-                Déjà un compte ? <span className="text-[#8B5CF6] font-bold underline">Se connecter</span>
-              </button>
-            </div>
-            <div>
-              <button
-                type="button"
-                onClick={() => openPrivacyPolicy('signup')}
-                className="text-[11px] text-purple-300/80 underline hover:text-white"
-              >
-                Politique de Confidentialité
-              </button>
-            </div>
+          <footer className="text-center pt-4">
+            <button onClick={() => setScreen('login')} className="text-xs text-purple-300">
+              Déjà un compte ? <span className="text-[#8B5CF6] font-bold underline">Se connecter</span>
+            </button>
           </footer>
         </div>
       )}
@@ -3530,13 +3840,6 @@ export default function App() {
                     {unreadNotificationsCount > 9 ? '9+' : unreadNotificationsCount}
                   </span>
                 )}
-              </button>
-              <button
-                onClick={() => setActiveModal('guide')}
-                className="p-1.5 rounded-xl bg-[#23154D] text-purple-300 border border-[#8B5CF6]/30 shadow"
-                title="Mode d'emploi"
-              >
-                <HelpCircle className="w-4 h-4" />
               </button>
               <button
                 onClick={() => setActiveModal('kyc')}
@@ -4518,15 +4821,35 @@ export default function App() {
                     <div className="p-3.5 rounded-2xl bg-[#1D1240] border-2 border-[#8B5CF6]/60 space-y-3">
                       <div className="space-y-2">
                         {tradingModeType === 'LEVIER' ? (
-                          <div className="p-2.5 rounded-xl bg-[#150D2E] border border-[#8B5CF6]/50 space-y-1.5">
+                          <div className="p-2.5 rounded-xl bg-[#150D2E] border border-[#8B5CF6]/50 space-y-2">
                             <div className="flex justify-between items-center">
                               <span className="text-[10px] font-black text-purple-200">LEVIER (x1–x500)</span>
                               <button
+                                type="button"
                                 onClick={() => setTradingModeType('SPOT')}
                                 className="text-[9px] px-2 py-0.5 rounded bg-[#23154D] text-purple-200 font-bold flex items-center gap-0.5"
                               >
                                 <ArrowLeft className="w-2.5 h-2.5" /> SPOT
                               </button>
+                            </div>
+                            <div className="grid grid-cols-6 gap-1">
+                              {LEVERAGE_PRESETS.map(levPreset => {
+                                const isSelected = numericLeverage === levPreset;
+                                return (
+                                  <button
+                                    key={levPreset}
+                                    type="button"
+                                    onClick={() => setLeverageInput(String(levPreset))}
+                                    className={`py-1 rounded-lg text-[10px] font-mono font-black border transition ${
+                                      isSelected
+                                        ? 'bg-[#7C3AED] border-purple-300 text-white shadow'
+                                        : 'bg-[#1F1042] border-purple-500/30 text-purple-200 hover:border-[#8B5CF6]'
+                                    }`}
+                                  >
+                                    x{levPreset}
+                                  </button>
+                                );
+                              })}
                             </div>
                             <div className="flex items-center gap-2">
                               <input
@@ -4546,6 +4869,7 @@ export default function App() {
                           <div className="p-2.5 rounded-xl bg-[#150D2E] border border-emerald-500/40 flex justify-between items-center">
                             <span className="text-[10px] font-black text-emerald-300">Mode SPOT (x1) • Frais 0.1%</span>
                             <button
+                              type="button"
                               onClick={() => setTradingModeType('LEVIER')}
                               className="text-[10px] px-2.5 py-1 rounded bg-[#7C3AED] text-white font-bold"
                             >
@@ -4564,22 +4888,25 @@ export default function App() {
                             </span>
                           </div>
                           <div className="grid grid-cols-12 gap-1.5 items-center">
-                            <div className="col-span-5">
+                            <div className="col-span-8">
                               <input
                                 type="text"
                                 inputMode="decimal"
                                 value={tradeAmountInput}
-                                onChange={e => setTradeAmountInput(sanitizeDecimalInput(e.target.value))}
+                                onChange={e => {
+                                  setSelectedTradePercent(null);
+                                  setTradeAmountInput(sanitizeDecimalInput(e.target.value));
+                                }}
                                 placeholder={`Montant (${selectedTradeCurrencyObj.shortLabel})`}
                                 className="w-full px-2.5 py-1.5 rounded-xl bg-[#150D2E] border border-purple-500/40 text-white text-xs font-mono font-bold focus:outline-none focus:border-[#8B5CF6]"
                               />
                             </div>
-                            <div className="col-span-3">
+                            <div className="col-span-4">
                               <select
                                 aria-label="Devise du montant"
                                 value={tradeAmountCurrency}
                                 onChange={e => handleChangeTradeAmountCurrency(e.target.value)}
-                                className="w-full px-1.5 py-1.5 rounded-xl bg-[#23154D] border border-[#8B5CF6]/70 text-white text-[11px] font-black focus:outline-none"
+                                className="w-full px-2 py-1.5 rounded-xl bg-[#23154D] border border-[#8B5CF6]/70 text-white text-[11px] font-black focus:outline-none"
                               >
                                 {tradeAmountCurrencies.map(c => (
                                   <option key={c.symbol} value={c.symbol}>
@@ -4587,35 +4914,6 @@ export default function App() {
                                   </option>
                                 ))}
                               </select>
-                            </div>
-                            <div className="col-span-4 flex items-center justify-end gap-1">
-                              <span className="text-[9px] font-black text-purple-200 whitespace-nowrap">AUTO %</span>
-                              <input
-                                type="text"
-                                inputMode="decimal"
-                                value={autoPercentInput}
-                                placeholder="0.1"
-                                onChange={e => {
-                                  const cleaned = sanitizeDecimalInput(e.target.value);
-                                  setAutoPercentInput(cleaned);
-                                  if (cleaned === '') {
-                                    setTradeAmountInput('');
-                                    return;
-                                  }
-                                  const num = parseDecimalValue(cleaned);
-                                  if (!isNaN(num) && num >= 0) {
-                                    const targetAr = (soldeCompteTradeAr * Math.min(100, num)) / 100;
-                                    setTradeAmountInput(
-                                      formatConvertedCurrencyAmount(
-                                        targetAr,
-                                        tradeAmountCurrency,
-                                        selectedTradeCurrencyObj.priceAr
-                                      )
-                                    );
-                                  }
-                                }}
-                                className="w-14 px-1.5 py-1 rounded-lg bg-[#150D2E] border border-[#8B5CF6]/50 text-white font-mono text-[11px] text-center font-bold focus:outline-none focus:border-[#8B5CF6]"
-                              />
                             </div>
                           </div>
                         </div>
@@ -4625,9 +4923,9 @@ export default function App() {
                             <button
                               key={String(p)}
                               type="button"
-                              onClick={() => applyAutoPercent(p)}
+                              onClick={() => applyTradePercent(p)}
                               className={`py-1 rounded-lg text-[10px] font-mono font-black border transition ${
-                                (p === 'MAX' && autoPercentInput === '100') || String(p) === autoPercentInput
+                                selectedTradePercent === p
                                   ? 'bg-[#7C3AED] border-purple-300 text-white shadow'
                                   : 'bg-[#150D2E] border-purple-500/30 text-purple-200'
                               }`}
@@ -4638,37 +4936,83 @@ export default function App() {
                         </div>
                       </div>
 
-                      {/* GAUCHE = BUY | DROITE = SELL */}
-                      <div className="grid grid-cols-2 gap-2.5">
-                        <button
-                          type="button"
-                          disabled={tradeSubmitting}
-                          onClick={() => handleExecuteTrade('BUY', 'Manuel')}
-                          className="py-3 px-2 rounded-2xl bg-gradient-to-br from-emerald-600 to-emerald-500 text-white font-black text-xs shadow flex flex-col items-center justify-center active:scale-95 transition disabled:opacity-50"
-                        >
-                          <span className="flex items-center gap-1 text-sm">
-                            <TrendingUp className="w-4 h-4" /> BUY
+                      {(autoBuyEnabled || autoSellEnabled) && (
+                        <div className="px-2.5 py-1.5 rounded-xl bg-[#150D2E] border border-[#8B5CF6]/60 flex items-center justify-between text-[10px] font-bold">
+                          <span className="text-purple-100 flex items-center gap-1.5">
+                            <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
+                            AUTO actif :{' '}
+                            <strong className="text-white">
+                              {[autoBuyEnabled ? 'BUY' : '', autoSellEnabled ? 'SELL' : '']
+                                .filter(Boolean)
+                                .join(' + ')}
+                            </strong>{' '}
+                            • {selectedCoin.symbol}/USDT
                           </span>
-                          <span className="text-[10px] font-bold opacity-95">Mividy (Hausse)</span>
-                          <span className="text-[9px] font-mono bg-black/20 px-1.5 py-0.5 rounded mt-1">
+                          <span className="font-mono text-purple-300">
                             {tradingModeType === 'SPOT' ? 'SPOT x1' : `x${numericLeverage}`}
                           </span>
-                        </button>
+                        </div>
+                      )}
 
-                        <button
-                          type="button"
-                          disabled={tradeSubmitting}
-                          onClick={() => handleExecuteTrade('SELL', 'Manuel')}
-                          className="py-3 px-2 rounded-2xl bg-gradient-to-br from-rose-600 to-rose-500 text-white font-black text-xs shadow flex flex-col items-center justify-center active:scale-95 transition disabled:opacity-50"
-                        >
-                          <span className="flex items-center gap-1 text-sm">
-                            <TrendingDown className="w-4 h-4" /> SELL
-                          </span>
-                          <span className="text-[10px] font-bold opacity-95">Mivarotra (Baisse)</span>
-                          <span className="text-[9px] font-mono bg-black/20 px-1.5 py-0.5 rounded mt-1">
-                            {tradingModeType === 'SPOT' ? 'SPOT x1' : `x${numericLeverage}`}
-                          </span>
-                        </button>
+                      {/* GAUCHE = BUY + AUTO | DROITE = SELL + AUTO */}
+                      <div className="grid grid-cols-2 gap-2.5">
+                        <div className="space-y-1.5">
+                          <button
+                            type="button"
+                            disabled={tradeSubmitting}
+                            onClick={() => void handleExecuteTrade('BUY', 'Manuel')}
+                            className="w-full py-3 px-2 rounded-2xl bg-gradient-to-br from-emerald-600 to-emerald-500 text-white font-black text-xs shadow flex flex-col items-center justify-center active:scale-95 transition disabled:opacity-50"
+                          >
+                            <span className="flex items-center gap-1 text-sm">
+                              <TrendingUp className="w-4 h-4" /> BUY
+                            </span>
+                            <span className="text-[10px] font-bold opacity-95">Mividy (Hausse)</span>
+                            <span className="text-[9px] font-mono bg-black/20 px-1.5 py-0.5 rounded mt-1">
+                              {tradingModeType === 'SPOT' ? 'SPOT x1' : `x${numericLeverage}`}
+                            </span>
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => void handleToggleAutoTrade('BUY')}
+                            className={`w-full py-1.5 px-2 rounded-xl border text-[10px] font-black flex items-center justify-center gap-1.5 transition ${
+                              autoBuyEnabled
+                                ? 'bg-emerald-500/25 border-emerald-400 text-emerald-200 shadow-[0_0_12px_rgba(16,185,129,0.3)]'
+                                : 'bg-[#150D2E] border-purple-500/40 text-purple-200 hover:border-emerald-400/60'
+                            }`}
+                          >
+                            <Bot className="w-3.5 h-3.5" />
+                            <span>{autoBuyEnabled ? 'AUTO BUY : ACTIF' : 'AUTO BUY'}</span>
+                          </button>
+                        </div>
+
+                        <div className="space-y-1.5">
+                          <button
+                            type="button"
+                            disabled={tradeSubmitting}
+                            onClick={() => void handleExecuteTrade('SELL', 'Manuel')}
+                            className="w-full py-3 px-2 rounded-2xl bg-gradient-to-br from-rose-600 to-rose-500 text-white font-black text-xs shadow flex flex-col items-center justify-center active:scale-95 transition disabled:opacity-50"
+                          >
+                            <span className="flex items-center gap-1 text-sm">
+                              <TrendingDown className="w-4 h-4" /> SELL
+                            </span>
+                            <span className="text-[10px] font-bold opacity-95">Mivarotra (Baisse)</span>
+                            <span className="text-[9px] font-mono bg-black/20 px-1.5 py-0.5 rounded mt-1">
+                              {tradingModeType === 'SPOT' ? 'SPOT x1' : `x${numericLeverage}`}
+                            </span>
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => void handleToggleAutoTrade('SELL')}
+                            className={`w-full py-1.5 px-2 rounded-xl border text-[10px] font-black flex items-center justify-center gap-1.5 transition ${
+                              autoSellEnabled
+                                ? 'bg-rose-500/25 border-rose-400 text-rose-200 shadow-[0_0_12px_rgba(244,63,94,0.3)]'
+                                : 'bg-[#150D2E] border-purple-500/40 text-purple-200 hover:border-rose-400/60'
+                            }`}
+                          >
+                            <Bot className="w-3.5 h-3.5" />
+                            <span>{autoSellEnabled ? 'AUTO SELL : ACTIF' : 'AUTO SELL'}</span>
+                          </button>
+                        </div>
                       </div>
 
                       {/* Positions Actives (Marge Isolée Individuelle) */}
@@ -5285,16 +5629,8 @@ export default function App() {
                 </div>
               </div>
             )}
-            <footer className="mt-5 pt-3 pb-2 border-t border-purple-500/20 text-center text-[11px] text-purple-300/80 flex items-center justify-center gap-3">
+            <footer className="mt-5 pt-3 pb-2 border-t border-purple-500/20 text-center text-[11px] text-purple-300/80 flex items-center justify-center">
               <span>© SALOMA</span>
-              <span>•</span>
-              <button
-                type="button"
-                onClick={() => openPrivacyPolicy('main')}
-                className="underline hover:text-white font-semibold"
-              >
-                Politique de Confidentialité
-              </button>
             </footer>
           </main>
 
@@ -5920,13 +6256,6 @@ export default function App() {
               </button>
             </div>
             <button
-              onClick={() => openPrivacyPolicy('main')}
-              className="w-full py-2.5 rounded-xl bg-[#23154D] border border-[#8B5CF6]/40 text-purple-200 text-xs font-bold flex items-center justify-center gap-1.5"
-            >
-              <ShieldCheck className="w-4 h-4 text-[#A78BFA]" />
-              <span>Politique de Confidentialité</span>
-            </button>
-            <button
               onClick={() => setActiveModal('reportProblem')}
               className="w-full py-2.5 rounded-xl bg-amber-500/20 border border-amber-400/50 text-amber-200 text-xs font-black flex items-center justify-center gap-1.5"
             >
@@ -6032,7 +6361,7 @@ export default function App() {
                 <div>
                   <h3 className="font-black text-white text-base">Entrée Administrateur</h3>
                   <span className="text-[10px] text-purple-300 block">
-                    Email + Vérification Email + Code à 9 chiffres obligatoires
+                    Email + Code 6 chiffres par Email + Code à 9 chiffres
                   </span>
                 </div>
               </div>
@@ -6040,7 +6369,11 @@ export default function App() {
                 type="button"
                 onClick={() => {
                   setAdminUnlockEmail('');
-                  setAdminUnlockConfirmEmail('');
+                  setAdminUnlockEmailCode('');
+                  setAdminChallengeToken('');
+                  setAdminDirectOtpUserId('');
+                  setAdminEmailSentTo('');
+                  lastAutoSentAdminEmailRef.current = '';
                   setAdminUnlockInput1('');
                   setAdminUnlockError('');
                   setActiveModal(null);
@@ -6057,42 +6390,80 @@ export default function App() {
             )}
             <form onSubmit={handleAdminUnlock} className="space-y-3 text-xs">
               <div>
-                <label className="font-bold text-purple-300 block mb-1">Email Administrateur *</label>
+                <div className="flex items-center justify-between mb-1">
+                  <label className="font-bold text-purple-300">Email Administrateur *</label>
+                  {/^[^\s@]+@[^\s@]+\.[a-zA-Z]{2,}$/.test(adminUnlockEmail.trim()) && (
+                    <button
+                      type="button"
+                      disabled={adminEmailSending || adminEmailCooldown > 0}
+                      onClick={() => void sendAdminEmailCode(adminUnlockEmail, true)}
+                      className="text-[10px] font-bold text-[#A78BFA] hover:text-white underline disabled:opacity-50"
+                    >
+                      {adminEmailSending
+                        ? 'Envoi...'
+                        : adminEmailCooldown > 0
+                        ? `Renvoyer (${adminEmailCooldown}s)`
+                        : adminEmailSentTo === adminUnlockEmail.trim().toLowerCase()
+                        ? 'Renvoyer le code'
+                        : 'Envoyer le code'}
+                    </button>
+                  )}
+                </div>
                 <input
                   type="email"
                   required
                   placeholder="admin@saloma.mg"
                   value={adminUnlockEmail}
-                  onChange={e => setAdminUnlockEmail(e.target.value)}
+                  onChange={e => {
+                    const nextVal = e.target.value;
+                    setAdminUnlockEmail(nextVal);
+                    if (nextVal.trim().toLowerCase() !== adminEmailSentTo) {
+                      setAdminEmailSentTo('');
+                      setAdminChallengeToken('');
+                      setAdminDirectOtpUserId('');
+                      lastAutoSentAdminEmailRef.current = '';
+                    }
+                  }}
+                  onBlur={() => {
+                    if (/^[^\s@]+@[^\s@]+\.[a-zA-Z]{2,}$/.test(adminUnlockEmail.trim())) {
+                      void sendAdminEmailCode(adminUnlockEmail, false);
+                    }
+                  }}
                   className="w-full px-3 py-2.5 rounded-xl bg-[#150D2E] border-2 border-[#8B5CF6]/50 text-white text-xs"
                 />
-              </div>
-              <div>
-                <label className="font-bold text-purple-300 block mb-1">Vérification Email *</label>
-                <input
-                  type="email"
-                  required
-                  placeholder="Confirmez l'email administrateur"
-                  value={adminUnlockConfirmEmail}
-                  onChange={e => setAdminUnlockConfirmEmail(e.target.value)}
-                  className="w-full px-3 py-2.5 rounded-xl bg-[#150D2E] border-2 border-[#8B5CF6]/50 text-white text-xs"
-                />
-                {adminUnlockConfirmEmail.length > 0 && (
-                  <span
-                    className={`text-[10px] font-bold block mt-1 ${
-                      adminUnlockEmail.trim().toLowerCase() ===
-                      adminUnlockConfirmEmail.trim().toLowerCase()
-                        ? 'text-emerald-400'
-                        : 'text-rose-400'
-                    }`}
-                  >
-                    {adminUnlockEmail.trim().toLowerCase() ===
-                    adminUnlockConfirmEmail.trim().toLowerCase()
-                      ? '✓ Emails identiques'
-                      : '✗ Les deux adresses email ne correspondent pas'}
+                {adminEmailSending && (
+                  <span className="text-[10px] text-purple-300 font-bold block mt-1">
+                    Envoi automatique du code à 6 chiffres par email...
                   </span>
                 )}
+                {!adminEmailSending &&
+                  adminEmailSentTo &&
+                  adminEmailSentTo === adminUnlockEmail.trim().toLowerCase() && (
+                    <span className="text-[10px] text-emerald-400 font-bold block mt-1">
+                      ✓ Code à 6 chiffres envoyé à {adminEmailSentTo}
+                    </span>
+                  )}
               </div>
+
+              <div>
+                <label className="font-bold text-purple-300 block mb-1">
+                  Code de vérification 6 chiffres reçu par email *
+                </label>
+                <input
+                  type="text"
+                  inputMode="numeric"
+                  autoComplete="one-time-code"
+                  maxLength={6}
+                  required
+                  placeholder="000000 (6 chiffres)"
+                  value={adminUnlockEmailCode}
+                  onChange={e =>
+                    setAdminUnlockEmailCode(e.target.value.replace(/[^0-9]/g, '').slice(0, 6))
+                  }
+                  className="w-full px-3 py-2.5 rounded-xl bg-[#150D2E] border-2 border-[#8B5CF6]/50 text-white font-mono text-center tracking-widest text-base font-bold"
+                />
+              </div>
+
               <div>
                 <label className="font-bold text-purple-300 block mb-1">
                   Code de sécurité (9 chiffres) *
@@ -6108,6 +6479,7 @@ export default function App() {
                   className="w-full px-3 py-2.5 rounded-xl bg-[#150D2E] border-2 border-[#8B5CF6]/50 text-white font-mono text-center tracking-widest text-lg font-bold"
                 />
               </div>
+
               <button
                 type="submit"
                 disabled={adminUnlockLoading}
@@ -6230,6 +6602,7 @@ export default function App() {
                 onClick={() => {
                   setAdminPin('');
                   setAdminEmail('');
+                  setAdminSessionToken('');
                   setScreen(sessionToken ? 'main' : 'splash');
                 }}
                 className="px-3 py-1.5 rounded-xl bg-[#150D2E] text-purple-200 border border-purple-500/30 text-xs font-bold"
