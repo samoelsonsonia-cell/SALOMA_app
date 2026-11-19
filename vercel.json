@@ -5,7 +5,7 @@
   "outputDirectory": "dist",
   "rewrites": [
     {
-      "source": "/api/(.*)",
+      "source": "/api/((?!admin/send-code$|admin/verify$).*)",
       "destination": "/api/index?__saloma_path=$1"
     },
     {

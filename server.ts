@@ -3214,13 +3214,29 @@ export function createSalomaApiApp() {
     }
   }
 
-  function createAdminEmailChallengeToken(email: string, userId: string): string {
+  const globalAdminOtpKey = '__saloma_admin_otp_store__';
+  const gOtp = globalThis as unknown as Record<
+    string,
+    Map<string, { email: string; code: string; expiresAt: number }> | undefined
+  >;
+  const adminOtpMemoryStore =
+    gOtp[globalAdminOtpKey] ||
+    (gOtp[globalAdminOtpKey] = new Map<string, { email: string; code: string; expiresAt: number }>());
+
+  function createAdminOtpChallengeToken(
+    email: string,
+    nonce: string,
+    code: string,
+    expiresAt: number
+  ): string {
+    const codeHash = crypto.createHash('sha256').update(`${email}:${code}`).digest('hex');
     return signAdminPayload(
       {
-        kind: 'admin-email-challenge',
+        kind: 'admin-otp-v2',
         email,
-        userId,
-        exp: Date.now() + 10 * 60 * 1000
+        nonce,
+        codeHash,
+        exp: expiresAt
       },
       getAdminHmacSecret()
     );
@@ -3238,77 +3254,159 @@ export function createSalomaApiApp() {
     );
   }
 
+  async function trySendAdminEmailResend(toEmail: string, code: string): Promise<boolean> {
+    const resendKey = stripWrappingQuotes(process.env.RESEND_API_KEY);
+    if (!resendKey) return false;
+    const fromEmail =
+      stripWrappingQuotes(process.env.RESEND_FROM_EMAIL) || 'SALOMA Admin <onboarding@resend.dev>';
+    try {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), 7000);
+      const resp = await fetch('https://api.resend.com/emails', {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${resendKey}`,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          from: fromEmail,
+          to: [toEmail],
+          subject: 'SALOMA Admin - Code de vérification à 6 chiffres',
+          html: `<p>Votre code de vérification administrateur SALOMA est : <strong>${code}</strong></p><p>Ce code expire dans 5 minutes.</p>`
+        }),
+        signal: controller.signal
+      });
+      clearTimeout(timer);
+      return resp.ok;
+    } catch {
+      return false;
+    }
+  }
+
   app.post('/api/admin/send-code', async (req: Request, res: Response) => {
     try {
       const configuredEmail = getConfiguredAdminEmail();
-      if (!configuredEmail) {
-        res.status(403).json({
-          error: "ADMIN_EMAIL non configuré dans les variables d'environnement du serveur."
+      const configuredPin = getConfiguredAdminPin();
+      if (!configuredEmail || !configuredPin) {
+        console.error('[SALOMA Admin] Configuration serveur manquante.');
+        res.status(400).json({
+          success: false,
+          ok: false,
+          message: 'Configuration serveur manquante',
+          error: 'Configuration serveur manquante'
         });
         return;
       }
 
       const cleanEmail = String(req.body?.email || '').trim().toLowerCase();
       if (!cleanEmail || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(cleanEmail)) {
-        res.status(400).json({ error: 'Adresse e-mail administrateur invalide.' });
+        res.status(400).json({
+          success: false,
+          ok: false,
+          message: 'Adresse e-mail administrateur invalide.',
+          error: 'Adresse e-mail administrateur invalide.'
+        });
         return;
       }
       if (cleanEmail !== configuredEmail) {
-        res.status(403).json({ error: 'Accès refusé : Email administrateur incorrect.' });
+        res.status(403).json({
+          success: false,
+          ok: false,
+          message: 'Accès refusé : Email administrateur incorrect.',
+          error: 'Accès refusé : Email administrateur incorrect.'
+        });
         return;
       }
 
-      const anonAcc = new Account(getAnonClient());
-      const token = await anonAcc.createEmailToken({
-        userId: ID.unique(),
-        email: cleanEmail
-      });
+      const code = String(crypto.randomInt(100000, 1000000));
+      const nonce = crypto.randomBytes(12).toString('hex');
+      const now = Date.now();
+      const expiresAt = now + 5 * 60 * 1000;
 
-      const challengeToken = createAdminEmailChallengeToken(cleanEmail, token.userId);
+      for (const [k, v] of adminOtpMemoryStore.entries()) {
+        if (v.expiresAt < now) adminOtpMemoryStore.delete(k);
+      }
+      adminOtpMemoryStore.set(nonce, { email: cleanEmail, code, expiresAt });
+
+      const challengeToken = createAdminOtpChallengeToken(cleanEmail, nonce, code, expiresAt);
+      const emailDelivered = await trySendAdminEmailResend(cleanEmail, code);
+
+      if (emailDelivered) {
+        res.json({
+          success: true,
+          ok: true,
+          email: cleanEmail,
+          challengeToken,
+          demoMode: false,
+          message: 'Code de vérification à 6 chiffres envoyé par email.'
+        });
+        return;
+      }
+
       res.json({
+        success: true,
         ok: true,
         email: cleanEmail,
         challengeToken,
-        message: 'Code de vérification à 6 chiffres envoyé par email.'
+        demoMode: true,
+        demoCode: code,
+        message: `Code démo : ${code}`
       });
     } catch (err) {
+      console.error('[SALOMA Admin] Erreur send-code:', err instanceof Error ? err.message : 'Erreur inconnue');
       res.status(400).json({
-        error: formatAppwriteErrorFr(err, "Impossible d'envoyer le code de vérification par email.")
+        success: false,
+        ok: false,
+        message: "Impossible de générer le code administrateur pour le moment.",
+        error: "Impossible de générer le code administrateur pour le moment."
       });
     }
   });
 
-  app.post('/api/admin/unlock', async (req: Request, res: Response) => {
+  async function handleAdminVerifyRoute(req: Request, res: Response) {
     try {
       const configuredEmail = getConfiguredAdminEmail();
       const configuredPin = getConfiguredAdminPin();
       if (!configuredEmail || !configuredPin) {
-        res.status(403).json({
-          error: "Variables ADMIN_EMAIL ou ADMIN_PIN non configurées dans l'environnement."
+        console.error('[SALOMA Admin] Configuration serveur manquante.');
+        res.status(400).json({
+          success: false,
+          ok: false,
+          message: 'Configuration serveur manquante',
+          error: 'Configuration serveur manquante'
         });
         return;
       }
 
       const cleanEmail = String(req.body?.email || '').trim().toLowerCase();
-      const cleanEmailCode = String(req.body?.emailCode || '').trim();
+      const cleanEmailCode = String(req.body?.emailCode || req.body?.otp || '').trim();
       const cleanCode = String(req.body?.code || req.body?.pin || '').trim();
       const challengeToken = String(req.body?.challengeToken || '').trim();
 
       if (!cleanEmail || !cleanEmailCode || !cleanCode) {
         res.status(400).json({
-          error: 'Veuillez saisir Email, Code 6 chiffres reçu par email et le Code à 9 chiffres.'
+          success: false,
+          ok: false,
+          message: 'Veuillez saisir Email, Code 6 chiffres et Code à 9 chiffres.',
+          error: 'Veuillez saisir Email, Code 6 chiffres et Code à 9 chiffres.'
         });
         return;
       }
       if (cleanEmail !== configuredEmail || !/^\d{9}$/.test(cleanCode) || cleanCode !== configuredPin) {
         res.status(403).json({
+          success: false,
+          ok: false,
+          message: 'Accès refusé : Email ou Code à 9 chiffres incorrect.',
           error: 'Accès refusé : Email ou Code à 9 chiffres incorrect.'
         });
         return;
       }
       if (!/^\d{6}$/.test(cleanEmailCode)) {
         res.status(403).json({
-          error: 'Accès refusé : Code de vérification email à 6 chiffres invalide.'
+          success: false,
+          ok: false,
+          message: 'Accès refusé : Le code à 6 chiffres est invalide.',
+          error: 'Accès refusé : Le code à 6 chiffres est invalide.'
         });
         return;
       }
@@ -3316,66 +3414,73 @@ export function createSalomaApiApp() {
       const challenge = verifyAdminSignedPayload<{
         kind?: string;
         email?: string;
-        userId?: string;
+        nonce?: string;
+        codeHash?: string;
         exp?: number;
       }>(challengeToken, getAdminHmacSecret());
 
       if (
         !challenge ||
-        challenge.kind !== 'admin-email-challenge' ||
+        challenge.kind !== 'admin-otp-v2' ||
         String(challenge.email || '').trim().toLowerCase() !== configuredEmail ||
-        !challenge.userId
+        !challenge.codeHash
       ) {
         res.status(403).json({
-          error: 'Code email expiré ou invalide. Veuillez renvoyer un nouveau code à 6 chiffres.'
+          success: false,
+          ok: false,
+          message: 'Code expiré ou invalide. Veuillez cliquer sur Envoyer pour générer un nouveau code.',
+          error: 'Code expiré ou invalide. Veuillez cliquer sur Envoyer pour générer un nouveau code.'
         });
         return;
       }
 
-      const anonAcc = new Account(getAnonClient());
-      let tempSess: { $id?: string; secret?: string } | null = null;
-      try {
-        tempSess = await anonAcc.createSession({
-          userId: challenge.userId,
-          secret: cleanEmailCode
-        });
-      } catch {
-        res.status(403).json({
-          error: 'Accès refusé : Code à 6 chiffres reçu par email incorrect ou expiré.'
-        });
-        return;
-      }
+      const expectedCodeHash = crypto
+        .createHash('sha256')
+        .update(`${cleanEmail}:${cleanEmailCode}`)
+        .digest('hex');
 
-      if (tempSess?.secret) {
-        try {
-          const tempAcc = new Account(getUserSessionClient(tempSess.secret));
-          await tempAcc.deleteSession({ sessionId: 'current' });
-        } catch {
-          // ignore cleanup failure
-        }
-      } else if (tempSess?.$id) {
-        try {
-          await adminUsers.deleteSession({
-            userId: challenge.userId,
-            sessionId: tempSess.$id
+      const stored = challenge.nonce ? adminOtpMemoryStore.get(challenge.nonce) : undefined;
+      if (stored) {
+        if (stored.expiresAt < Date.now() || stored.email !== cleanEmail || stored.code !== cleanEmailCode) {
+          res.status(403).json({
+            success: false,
+            ok: false,
+            message: 'Accès refusé : Code à 6 chiffres incorrect ou expiré.',
+            error: 'Accès refusé : Code à 6 chiffres incorrect ou expiré.'
           });
-        } catch {
-          // ignore cleanup failure
+          return;
         }
+        adminOtpMemoryStore.delete(challenge.nonce!);
+      } else if (challenge.codeHash !== expectedCodeHash) {
+        res.status(403).json({
+          success: false,
+          ok: false,
+          message: 'Accès refusé : Code à 6 chiffres incorrect ou expiré.',
+          error: 'Accès refusé : Code à 6 chiffres incorrect ou expiré.'
+        });
+        return;
       }
 
       const adminSessionToken = createAdminSessionToken(configuredEmail, configuredPin);
       res.json({
+        success: true,
         ok: true,
         email: configuredEmail,
         adminSessionToken
       });
     } catch (err) {
-      res.status(403).json({
-        error: formatAppwriteErrorFr(err, 'Accès refusé : Vérification administrateur échouée.')
+      console.error('[SALOMA Admin] Erreur verify:', err instanceof Error ? err.message : 'Erreur inconnue');
+      res.status(400).json({
+        success: false,
+        ok: false,
+        message: 'Accès refusé : Vérification administrateur échouée.',
+        error: 'Accès refusé : Vérification administrateur échouée.'
       });
     }
-  });
+  }
+
+  app.post('/api/admin/verify', handleAdminVerifyRoute);
+  app.post('/api/admin/unlock', handleAdminVerifyRoute);
 
   function requireAdminPin(req: Request, res: Response, next: NextFunction) {
     const configuredEmail = getConfiguredAdminEmail();

@@ -208,12 +208,13 @@ export async function apiRequest<T>(
 
   if (!res.ok || isHtmlFallback) {
     const status = isHtmlFallback && res.ok ? 404 : res.status;
-    if (status === 404 && !data?.error) {
+    const errMsg = data?.error || data?.message;
+    if (status === 404 && !errMsg) {
       const err: ApiError = new Error('Service API introuvable (404).');
       err.status = 404;
       throw err;
     }
-    const err: ApiError = new Error(data?.error || `Erreur serveur (${status})`);
+    const err: ApiError = new Error(errMsg || `Erreur serveur (${status})`);
     err.status = status;
     if (data?.turnstileRetry) {
       err.turnstileRetry = true;
