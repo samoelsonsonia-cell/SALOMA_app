@@ -2248,7 +2248,6 @@ export default function App() {
   const [adminUnlockInput1, setAdminUnlockInput1] = useState<string>('');
   const [adminUnlockError, setAdminUnlockError] = useState<string>('');
   const [adminUnlockLoading, setAdminUnlockLoading] = useState<boolean>(false);
-  const lastAutoSentAdminEmailRef = useRef<string>('');
 
   const [adminUsers, setAdminUsers] = useState<AppwriteUserRow[]>([]);
   const [adminTransactions, setAdminTransactions] = useState<AppwriteDepotRetraitRow[]>([]);
@@ -2288,11 +2287,13 @@ export default function App() {
   }, [adminEmailCooldown]);
 
   const sendAdminEmailCode = useCallback(
-    async (rawEmail: string, forceResend = false) => {
+    async (rawEmail: string) => {
       const cleanEmail = rawEmail.trim().toLowerCase();
-      if (!/^[^\s@]+@[^\s@]+\.[a-zA-Z]{2,}$/.test(cleanEmail)) return;
-      if (!forceResend && lastAutoSentAdminEmailRef.current === cleanEmail) return;
-      if (adminEmailSending) return;
+      if (!/^[^\s@]+@[^\s@]+\.[a-zA-Z]{2,}$/.test(cleanEmail)) {
+        setAdminUnlockError('Veuillez entrer un email administrateur valide.');
+        return;
+      }
+      if (adminEmailSending || adminEmailCooldown > 0) return;
       if (!(await ensureOnlineOrBlock())) return;
 
       setAdminUnlockError('');
@@ -2318,10 +2319,9 @@ export default function App() {
           setAdminDirectOtpUserId(directRes.userId);
           setAdminChallengeToken('');
         }
-        lastAutoSentAdminEmailRef.current = cleanEmail;
         setAdminEmailSentTo(cleanEmail);
-        setAdminEmailCooldown(45);
-        showToast(`Code à 6 chiffres envoyé à ${cleanEmail}`);
+        setAdminEmailCooldown(60);
+        showToast('Code envoyé - Vérifiez votre email');
       } catch (err) {
         setAdminEmailSentTo('');
         setAdminChallengeToken('');
@@ -2335,19 +2335,8 @@ export default function App() {
         setAdminEmailSending(false);
       }
     },
-    [adminEmailSending, ensureOnlineOrBlock, showToast]
+    [adminEmailCooldown, adminEmailSending, ensureOnlineOrBlock, showToast]
   );
-
-  useEffect(() => {
-    if (activeModal !== 'adminUnlock') return;
-    const cleanEmail = adminUnlockEmail.trim().toLowerCase();
-    if (!/^[^\s@]+@[^\s@]+\.[a-zA-Z]{2,}$/.test(cleanEmail)) return;
-    if (lastAutoSentAdminEmailRef.current === cleanEmail) return;
-    const t = setTimeout(() => {
-      void sendAdminEmailCode(cleanEmail, false);
-    }, 850);
-    return () => clearTimeout(t);
-  }, [activeModal, adminUnlockEmail, sendAdminEmailCode]);
 
   const fetchAdminOverview = useCallback(
     async (pin: string, email: string, tokenOverride?: string) => {
@@ -2504,6 +2493,10 @@ export default function App() {
       setAdminUnlockError('Le code de sécurité administrateur doit contenir exactement 9 chiffres.');
       return;
     }
+    if (!adminChallengeToken && !adminDirectOtpUserId) {
+      setAdminUnlockError('Veuillez d\'abord cliquer sur "Envoyer" pour recevoir le code à 6 chiffres par email.');
+      return;
+    }
 
     setAdminUnlockLoading(true);
     try {
@@ -2545,7 +2538,6 @@ export default function App() {
       setAdminChallengeToken('');
       setAdminDirectOtpUserId('');
       setAdminEmailSentTo('');
-      lastAutoSentAdminEmailRef.current = '';
       setAdminUnlockInput1('');
       setActiveModal(null);
       setScreen('admin');
@@ -2703,7 +2695,6 @@ export default function App() {
       setAdminChallengeToken('');
       setAdminDirectOtpUserId('');
       setAdminEmailSentTo('');
-      lastAutoSentAdminEmailRef.current = '';
       setAdminUnlockInput1('');
       setAdminUnlockError('');
       setActiveModal('adminUnlock');
@@ -6373,7 +6364,6 @@ export default function App() {
                   setAdminChallengeToken('');
                   setAdminDirectOtpUserId('');
                   setAdminEmailSentTo('');
-                  lastAutoSentAdminEmailRef.current = '';
                   setAdminUnlockInput1('');
                   setAdminUnlockError('');
                   setActiveModal(null);
@@ -6390,57 +6380,49 @@ export default function App() {
             )}
             <form onSubmit={handleAdminUnlock} className="space-y-3 text-xs">
               <div>
-                <div className="flex items-center justify-between mb-1">
-                  <label className="font-bold text-purple-300">Email Administrateur *</label>
-                  {/^[^\s@]+@[^\s@]+\.[a-zA-Z]{2,}$/.test(adminUnlockEmail.trim()) && (
-                    <button
-                      type="button"
-                      disabled={adminEmailSending || adminEmailCooldown > 0}
-                      onClick={() => void sendAdminEmailCode(adminUnlockEmail, true)}
-                      className="text-[10px] font-bold text-[#A78BFA] hover:text-white underline disabled:opacity-50"
-                    >
-                      {adminEmailSending
-                        ? 'Envoi...'
-                        : adminEmailCooldown > 0
-                        ? `Renvoyer (${adminEmailCooldown}s)`
-                        : adminEmailSentTo === adminUnlockEmail.trim().toLowerCase()
-                        ? 'Renvoyer le code'
-                        : 'Envoyer le code'}
-                    </button>
-                  )}
+                <label className="font-bold text-purple-300 block mb-1">
+                  Email Administrateur *
+                </label>
+                <div className="flex items-stretch gap-1.5">
+                  <input
+                    type="email"
+                    required
+                    placeholder="admin@saloma.mg"
+                    value={adminUnlockEmail}
+                    onChange={e => {
+                      const nextVal = e.target.value;
+                      setAdminUnlockEmail(nextVal);
+                      if (nextVal.trim().toLowerCase() !== adminEmailSentTo) {
+                        setAdminEmailSentTo('');
+                        setAdminChallengeToken('');
+                        setAdminDirectOtpUserId('');
+                      }
+                    }}
+                    className="flex-1 min-w-0 px-3 py-2.5 rounded-xl bg-[#150D2E] border-2 border-[#8B5CF6]/50 text-white text-xs"
+                  />
+                  <button
+                    type="button"
+                    disabled={adminEmailSending || adminEmailCooldown > 0}
+                    onClick={() => void sendAdminEmailCode(adminUnlockEmail)}
+                    className="shrink-0 px-3.5 py-2.5 rounded-xl bg-gradient-to-r from-[#7C3AED] to-[#8B5CF6] text-white font-black text-xs border border-purple-300/40 whitespace-nowrap disabled:opacity-50 disabled:cursor-not-allowed transition"
+                  >
+                    {adminEmailSending
+                      ? 'Envoi...'
+                      : adminEmailCooldown > 0
+                      ? `Renvoyer dans ${adminEmailCooldown}s`
+                      : 'Envoyer'}
+                  </button>
                 </div>
-                <input
-                  type="email"
-                  required
-                  placeholder="admin@saloma.mg"
-                  value={adminUnlockEmail}
-                  onChange={e => {
-                    const nextVal = e.target.value;
-                    setAdminUnlockEmail(nextVal);
-                    if (nextVal.trim().toLowerCase() !== adminEmailSentTo) {
-                      setAdminEmailSentTo('');
-                      setAdminChallengeToken('');
-                      setAdminDirectOtpUserId('');
-                      lastAutoSentAdminEmailRef.current = '';
-                    }
-                  }}
-                  onBlur={() => {
-                    if (/^[^\s@]+@[^\s@]+\.[a-zA-Z]{2,}$/.test(adminUnlockEmail.trim())) {
-                      void sendAdminEmailCode(adminUnlockEmail, false);
-                    }
-                  }}
-                  className="w-full px-3 py-2.5 rounded-xl bg-[#150D2E] border-2 border-[#8B5CF6]/50 text-white text-xs"
-                />
                 {adminEmailSending && (
-                  <span className="text-[10px] text-purple-300 font-bold block mt-1">
-                    Envoi automatique du code à 6 chiffres par email...
+                  <span className="text-[11px] text-purple-300 font-bold block mt-1.5">
+                    Envoi du code à 6 chiffres en cours...
                   </span>
                 )}
                 {!adminEmailSending &&
                   adminEmailSentTo &&
                   adminEmailSentTo === adminUnlockEmail.trim().toLowerCase() && (
-                    <span className="text-[10px] text-emerald-400 font-bold block mt-1">
-                      ✓ Code à 6 chiffres envoyé à {adminEmailSentTo}
+                    <span className="text-[11px] text-emerald-400 font-bold block mt-1.5">
+                      ✓ Code envoyé - Vérifiez votre email
                     </span>
                   )}
               </div>
