@@ -971,12 +971,25 @@ const TABLES = {
   PROBLEMES: 'problemes'
 };
 
-const ADMIN_EMAIL =
-  String(process.env.ADMIN_EMAIL || 'samoelsonsonia@gmail.com')
-    .trim()
-    .toLowerCase() || 'samoelsonsonia@gmail.com';
-const envAdminPin = String(process.env.ADMIN_PIN || '').trim();
-let currentAdminPin = /^\d{9}$/.test(envAdminPin) ? envAdminPin : '888888888';
+function stripWrappingQuotes(raw: unknown): string {
+  const s = String(raw || '').trim();
+  if ((s.startsWith('"') && s.endsWith('"')) || (s.startsWith("'") && s.endsWith("'"))) {
+    return s.slice(1, -1).trim();
+  }
+  return s;
+}
+
+function getConfiguredAdminEmail(): string {
+  return stripWrappingQuotes(process.env.ADMIN_EMAIL).trim().toLowerCase();
+}
+
+let sessionOverriddenAdminPin = '';
+function getConfiguredAdminPin(): string {
+  if (/^\d{9}$/.test(sessionOverriddenAdminPin)) {
+    return sessionOverriddenAdminPin;
+  }
+  return stripWrappingQuotes(process.env.ADMIN_PIN).trim();
+}
 
 function getAdminClient() {
   const client = new Client()
@@ -3168,7 +3181,9 @@ export function createSalomaApiApp() {
   function getAdminHmacSecret(pinOverride?: string): string {
     return crypto
       .createHash('sha256')
-      .update(`${pinOverride || currentAdminPin}:${APPWRITE_PROJECT_ID}:${ADMIN_EMAIL}:saloma-admin-sec-v2`)
+      .update(
+        `${pinOverride || getConfiguredAdminPin()}:${APPWRITE_PROJECT_ID}:${getConfiguredAdminEmail()}:saloma-admin-sec-v2`
+      )
       .digest('hex');
   }
 
@@ -3225,12 +3240,20 @@ export function createSalomaApiApp() {
 
   app.post('/api/admin/send-code', async (req: Request, res: Response) => {
     try {
+      const configuredEmail = getConfiguredAdminEmail();
+      if (!configuredEmail) {
+        res.status(403).json({
+          error: "ADMIN_EMAIL non configuré dans les variables d'environnement du serveur."
+        });
+        return;
+      }
+
       const cleanEmail = String(req.body?.email || '').trim().toLowerCase();
       if (!cleanEmail || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(cleanEmail)) {
         res.status(400).json({ error: 'Adresse e-mail administrateur invalide.' });
         return;
       }
-      if (cleanEmail !== ADMIN_EMAIL) {
+      if (cleanEmail !== configuredEmail) {
         res.status(403).json({ error: 'Accès refusé : Email administrateur incorrect.' });
         return;
       }
@@ -3257,6 +3280,15 @@ export function createSalomaApiApp() {
 
   app.post('/api/admin/unlock', async (req: Request, res: Response) => {
     try {
+      const configuredEmail = getConfiguredAdminEmail();
+      const configuredPin = getConfiguredAdminPin();
+      if (!configuredEmail || !configuredPin) {
+        res.status(403).json({
+          error: "Variables ADMIN_EMAIL ou ADMIN_PIN non configurées dans l'environnement."
+        });
+        return;
+      }
+
       const cleanEmail = String(req.body?.email || '').trim().toLowerCase();
       const cleanEmailCode = String(req.body?.emailCode || '').trim();
       const cleanCode = String(req.body?.code || req.body?.pin || '').trim();
@@ -3268,7 +3300,7 @@ export function createSalomaApiApp() {
         });
         return;
       }
-      if (cleanEmail !== ADMIN_EMAIL || !/^\d{9}$/.test(cleanCode) || cleanCode !== currentAdminPin) {
+      if (cleanEmail !== configuredEmail || !/^\d{9}$/.test(cleanCode) || cleanCode !== configuredPin) {
         res.status(403).json({
           error: 'Accès refusé : Email ou Code à 9 chiffres incorrect.'
         });
@@ -3291,7 +3323,7 @@ export function createSalomaApiApp() {
       if (
         !challenge ||
         challenge.kind !== 'admin-email-challenge' ||
-        challenge.email !== ADMIN_EMAIL ||
+        String(challenge.email || '').trim().toLowerCase() !== configuredEmail ||
         !challenge.userId
       ) {
         res.status(403).json({
@@ -3332,10 +3364,10 @@ export function createSalomaApiApp() {
         }
       }
 
-      const adminSessionToken = createAdminSessionToken(ADMIN_EMAIL, currentAdminPin);
+      const adminSessionToken = createAdminSessionToken(configuredEmail, configuredPin);
       res.json({
         ok: true,
-        email: ADMIN_EMAIL,
+        email: configuredEmail,
         adminSessionToken
       });
     } catch (err) {
@@ -3346,10 +3378,19 @@ export function createSalomaApiApp() {
   });
 
   function requireAdminPin(req: Request, res: Response, next: NextFunction) {
+    const configuredEmail = getConfiguredAdminEmail();
+    const configuredPin = getConfiguredAdminPin();
     const pin = String(req.headers['x-admin-pin'] || '').trim();
     const email = String(req.headers['x-admin-email'] || '').trim().toLowerCase();
     const adminToken = String(req.headers['x-admin-token'] || '').trim();
-    if (!email || email !== ADMIN_EMAIL || !/^\d{9}$/.test(pin) || pin !== currentAdminPin) {
+    if (
+      !configuredEmail ||
+      !configuredPin ||
+      !email ||
+      email !== configuredEmail ||
+      !/^\d{9}$/.test(pin) ||
+      pin !== configuredPin
+    ) {
       res.status(403).json({
         error: 'Accès refusé. Email administrateur ou code à 9 chiffres incorrect.'
       });
@@ -3365,7 +3406,7 @@ export function createSalomaApiApp() {
     if (
       !verifiedSess ||
       verifiedSess.kind !== 'admin-session' ||
-      verifiedSess.email !== ADMIN_EMAIL ||
+      String(verifiedSess.email || '').trim().toLowerCase() !== configuredEmail ||
       verifiedSess.pinHash !== expectedPinHash
     ) {
       res.status(403).json({
@@ -3804,8 +3845,8 @@ export function createSalomaApiApp() {
         res.status(400).json({ error: 'Le nouveau code doit comporter exactement 9 chiffres.' });
         return;
       }
-      currentAdminPin = newPin;
-      const adminSessionToken = createAdminSessionToken(ADMIN_EMAIL, newPin);
+      sessionOverriddenAdminPin = newPin;
+      const adminSessionToken = createAdminSessionToken(getConfiguredAdminEmail(), newPin);
       res.json({ ok: true, adminSessionToken });
     } catch (err) {
       res.status(400).json({ error: formatAppwriteErrorFr(err, 'Erreur modification code PIN.') });

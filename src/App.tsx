@@ -88,8 +88,6 @@ import {
   directAppwriteVerifyEmailOtp,
   directAppwriteResendEmailOtp,
   directAppwriteLogout,
-  directAppwriteSendAdminEmailCode,
-  directAppwriteVerifyAdminEmailCode,
   subscribeToNotificationsStream,
   type ApiError
 } from './lib/appwrite';
@@ -2241,7 +2239,6 @@ export default function App() {
   const [adminUnlockEmail, setAdminUnlockEmail] = useState<string>('');
   const [adminUnlockEmailCode, setAdminUnlockEmailCode] = useState<string>('');
   const [adminChallengeToken, setAdminChallengeToken] = useState<string>('');
-  const [adminDirectOtpUserId, setAdminDirectOtpUserId] = useState<string>('');
   const [adminEmailSending, setAdminEmailSending] = useState<boolean>(false);
   const [adminEmailSentTo, setAdminEmailSentTo] = useState<string>('');
   const [adminEmailCooldown, setAdminEmailCooldown] = useState<number>(0);
@@ -2299,33 +2296,21 @@ export default function App() {
       setAdminUnlockError('');
       setAdminEmailSending(true);
       try {
-        try {
-          const res = await apiRequest<{
-            ok: boolean;
-            challengeToken: string;
-            email: string;
-          }>('/api/admin/send-code', {
-            method: 'POST',
-            body: { email: cleanEmail }
-          });
-          setAdminChallengeToken(res.challengeToken || '');
-          setAdminDirectOtpUserId('');
-        } catch (err) {
-          if (!isApiNotFoundError(err)) throw err;
-          if (cleanEmail !== 'samoelsonsonia@gmail.com') {
-            throw new Error('Accès refusé : Email administrateur incorrect.');
-          }
-          const directRes = await directAppwriteSendAdminEmailCode(cleanEmail);
-          setAdminDirectOtpUserId(directRes.userId);
-          setAdminChallengeToken('');
-        }
+        const res = await apiRequest<{
+          ok: boolean;
+          challengeToken: string;
+          email: string;
+        }>('/api/admin/send-code', {
+          method: 'POST',
+          body: { email: cleanEmail }
+        });
+        setAdminChallengeToken(res.challengeToken || '');
         setAdminEmailSentTo(cleanEmail);
         setAdminEmailCooldown(60);
         showToast('Code envoyé - Vérifiez votre email');
       } catch (err) {
         setAdminEmailSentTo('');
         setAdminChallengeToken('');
-        setAdminDirectOtpUserId('');
         setAdminUnlockError(
           err instanceof Error
             ? err.message
@@ -2493,41 +2478,28 @@ export default function App() {
       setAdminUnlockError('Le code de sécurité administrateur doit contenir exactement 9 chiffres.');
       return;
     }
-    if (!adminChallengeToken && !adminDirectOtpUserId) {
+    if (!adminChallengeToken) {
       setAdminUnlockError('Veuillez d\'abord cliquer sur "Envoyer" pour recevoir le code à 6 chiffres par email.');
       return;
     }
 
     setAdminUnlockLoading(true);
     try {
-      let verifiedEmail = cleanEmail;
-      let issuedAdminToken = '';
-      try {
-        const res = await apiRequest<{
-          ok: boolean;
-          email: string;
-          adminSessionToken?: string;
-        }>('/api/admin/unlock', {
-          method: 'POST',
-          body: {
-            email: cleanEmail,
-            emailCode: cleanEmailCode,
-            code: cleanCode,
-            challengeToken: adminChallengeToken
-          }
-        });
-        verifiedEmail = (res.email || cleanEmail).trim().toLowerCase();
-        issuedAdminToken = res.adminSessionToken || '';
-      } catch (err) {
-        if (!isApiNotFoundError(err)) throw err;
-        if (cleanEmail !== 'samoelsonsonia@gmail.com' || cleanCode !== '888888888') {
-          throw new Error('Accès refusé : Email ou Code à 9 chiffres incorrect.');
+      const res = await apiRequest<{
+        ok: boolean;
+        email: string;
+        adminSessionToken?: string;
+      }>('/api/admin/unlock', {
+        method: 'POST',
+        body: {
+          email: cleanEmail,
+          emailCode: cleanEmailCode,
+          code: cleanCode,
+          challengeToken: adminChallengeToken
         }
-        if (!adminDirectOtpUserId) {
-          throw new Error('Veuillez d’abord envoyer et copier le code à 6 chiffres reçu par email.');
-        }
-        await directAppwriteVerifyAdminEmailCode(adminDirectOtpUserId, cleanEmailCode);
-      }
+      });
+      const verifiedEmail = (res.email || cleanEmail).trim().toLowerCase();
+      const issuedAdminToken = res.adminSessionToken || '';
 
       setAdminPin(cleanCode);
       setAdminEmail(verifiedEmail);
@@ -2536,7 +2508,6 @@ export default function App() {
       setAdminUnlockEmail('');
       setAdminUnlockEmailCode('');
       setAdminChallengeToken('');
-      setAdminDirectOtpUserId('');
       setAdminEmailSentTo('');
       setAdminUnlockInput1('');
       setActiveModal(null);
@@ -2693,7 +2664,6 @@ export default function App() {
       setAdminUnlockEmail('');
       setAdminUnlockEmailCode('');
       setAdminChallengeToken('');
-      setAdminDirectOtpUserId('');
       setAdminEmailSentTo('');
       setAdminUnlockInput1('');
       setAdminUnlockError('');
@@ -6362,7 +6332,6 @@ export default function App() {
                   setAdminUnlockEmail('');
                   setAdminUnlockEmailCode('');
                   setAdminChallengeToken('');
-                  setAdminDirectOtpUserId('');
                   setAdminEmailSentTo('');
                   setAdminUnlockInput1('');
                   setAdminUnlockError('');
@@ -6387,7 +6356,7 @@ export default function App() {
                   <input
                     type="email"
                     required
-                    placeholder="admin@saloma.mg"
+                    placeholder="Email administrateur"
                     value={adminUnlockEmail}
                     onChange={e => {
                       const nextVal = e.target.value;
@@ -6395,7 +6364,6 @@ export default function App() {
                       if (nextVal.trim().toLowerCase() !== adminEmailSentTo) {
                         setAdminEmailSentTo('');
                         setAdminChallengeToken('');
-                        setAdminDirectOtpUserId('');
                       }
                     }}
                     className="flex-1 min-w-0 px-3 py-2.5 rounded-xl bg-[#150D2E] border-2 border-[#8B5CF6]/50 text-white text-xs"

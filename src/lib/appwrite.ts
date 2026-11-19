@@ -551,35 +551,3 @@ export async function directAppwriteLogout(): Promise<void> {
   }
   clearFallbackCookieHeader();
 }
-
-export async function directAppwriteSendAdminEmailCode(
-  email: string
-): Promise<{ userId: string }> {
-  const cleanEmail = email.trim().toLowerCase();
-  const tokenRes = await directAppwriteFetch<{ userId: string }>('/account/tokens/email', {
-    method: 'POST',
-    body: {
-      userId: 'unique()',
-      email: cleanEmail
-    }
-  });
-  return { userId: tokenRes.userId };
-}
-
-export async function directAppwriteVerifyAdminEmailCode(
-  userId: string,
-  code: string
-): Promise<void> {
-  await directAppwriteFetch('/account/sessions/token', {
-    method: 'POST',
-    body: {
-      userId,
-      secret: code.trim()
-    }
-  });
-  try {
-    await directAppwriteFetch('/account/sessions/current', { method: 'DELETE' });
-  } catch {
-    // ignore temp session cleanup
-  }
-}
