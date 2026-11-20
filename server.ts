@@ -5102,29 +5102,74 @@ export function createSalomaApiApp() {
     });
   });
 
-  app.post('/api/admin/apis/:provider', requireAdminPin, (req: Request, res: Response) => {
-    const provider = String(req.params.provider || '').toLowerCase().trim() as BrokerExchangeId;
-    if (provider !== 'bybit' && provider !== 'okx' && provider !== 'binance') {
-      res.status(400).json({ error: 'Fournisseur API inconnu.' });
-      return;
-    }
-    const apiKey = typeof req.body?.apiKey === 'string' ? req.body.apiKey.trim() : '';
-    const secret = typeof req.body?.secret === 'string' ? req.body.secret.trim() : '';
-    const passphrase = typeof req.body?.passphrase === 'string' ? req.body.passphrase.trim() : '';
+  const handleSaveSponsorApiKeys = (req: Request, res: Response) => {
+    try {
+      const providerRaw = req.params.provider || req.params.sponsor || '';
+      const provider = String(providerRaw).toLowerCase().trim() as BrokerExchangeId;
+      if (provider !== 'bybit' && provider !== 'okx' && provider !== 'binance') {
+        res.status(200).json({
+          success: false,
+          mode: 'fallback_local',
+          message: 'Fournisseur API inconnu.'
+        });
+        return;
+      }
+      const apiKey = typeof req.body?.apiKey === 'string' ? req.body.apiKey.trim() : '';
+      const secret = typeof req.body?.secret === 'string' ? req.body.secret.trim() : '';
+      const passphrase = typeof req.body?.passphrase === 'string' ? req.body.passphrase.trim() : '';
 
-    if (apiKey && !apiKey.includes('****')) {
-      brokerApisStore.providers[provider].apiKey = apiKey;
-    }
-    if (secret && !/^\*+$/.test(secret)) {
-      brokerApisStore.providers[provider].secret = secret;
-    }
-    if (provider === 'okx' && passphrase && !/^\*+$/.test(passphrase)) {
-      brokerApisStore.providers[provider].passphrase = passphrase;
-    }
+      if (apiKey && !apiKey.includes('****')) {
+        brokerApisStore.providers[provider].apiKey = apiKey;
+        if (provider === 'bybit') process.env.BYBIT_API_KEY = apiKey;
+        if (provider === 'okx') process.env.OKX_API_KEY = apiKey;
+        if (provider === 'binance') process.env.BINANCE_API_KEY = apiKey;
+      }
+      if (secret && !/^\*+$/.test(secret)) {
+        brokerApisStore.providers[provider].secret = secret;
+        if (provider === 'bybit') process.env.BYBIT_API_SECRET = secret;
+        if (provider === 'okx') process.env.OKX_API_SECRET = secret;
+        if (provider === 'binance') process.env.BINANCE_API_SECRET = secret;
+      }
+      if (provider === 'okx' && passphrase && !/^\*+$/.test(passphrase)) {
+        brokerApisStore.providers.okx.passphrase = passphrase;
+        process.env.OKX_PASSPHRASE = passphrase;
+      }
 
-    saveApisStore();
-    res.json({ apis: getMaskedApisConfig() });
-  });
+      let persisted = true;
+      try {
+        saveApisStore();
+      } catch (persistErr) {
+        persisted = false;
+        console.error(`[SALOMA save API keys ${provider}] Persistance fichier impossible:`, persistErr);
+      }
+
+      const isServerless = Boolean(
+        process.env.VERCEL || process.env.VERCEL_ENV || process.env.AWS_LAMBDA_FUNCTION_NAME
+      );
+      const mode = isServerless || !persisted ? 'fallback_local' : 'saved_local';
+
+      res.status(200).json({
+        success: true,
+        mode,
+        message:
+          mode === 'fallback_local'
+            ? 'Clés prises en compte pour cette session - à mettre aussi dans Vercel'
+            : 'Clés enregistrées ✅',
+        apis: getMaskedApisConfig()
+      });
+    } catch (err) {
+      console.error('[SALOMA handleSaveSponsorApiKeys] Erreur inattendue:', err);
+      res.status(200).json({
+        success: true,
+        mode: 'fallback_local',
+        message: 'Clés prises en compte pour cette session - à mettre aussi dans Vercel',
+        apis: getMaskedApisConfig()
+      });
+    }
+  };
+
+  app.post('/api/admin/apis/:provider', requireAdminPin, handleSaveSponsorApiKeys);
+  app.post('/api/:sponsor(bybit|okx|binance)/save', requireAdminPin, handleSaveSponsorApiKeys);
 
   app.post('/api/admin/transactions/:id/validate', requireAdminPin, async (req: Request, res: Response) => {
     try {

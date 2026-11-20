@@ -5,7 +5,7 @@
   "outputDirectory": "dist",
   "rewrites": [
     {
-      "source": "/api/((?!admin/send-code$|admin/verify$|bybit/status$|okx/status$|binance/status$).*)",
+      "source": "/api/((?!admin/send-code$|admin/verify$|admin/apis/(?:bybit|okx|binance)$|bybit/(?:status|save)$|okx/status$|binance/status$).*)",
       "destination": "/api/index?__saloma_path=$1"
     },
     {

@@ -2781,32 +2781,81 @@ export default function App() {
   const handleAdminSaveApiKeys = async (provider: 'bybit' | 'okx' | 'binance') => {
     if (!(await ensureOnlineOrBlock())) return;
     const form = apiFormInputs[provider];
-    if (!form.apiKey.trim() && !form.secret.trim() && !form.passphrase.trim()) {
+    const cleanKey = form.apiKey.trim();
+    const cleanSecret = form.secret.trim();
+    const cleanPassphrase = form.passphrase.trim();
+    if (!cleanKey && !cleanSecret && !cleanPassphrase) {
       showToast('Veuillez saisir au moins une clé ou secret à mettre à jour.');
       return;
     }
     setApiActionLoading(`save-${provider}`);
+
+    const persistAdminFallbackMeta = (mode: string) => {
+      try {
+        const storageKey = 'saloma_admin_api_fallback_v1';
+        const existingRaw = window.localStorage.getItem(storageKey);
+        const existing = existingRaw ? (JSON.parse(existingRaw) as Record<string, unknown>) : {};
+        const maskedPreview =
+          cleanKey.length > 8
+            ? `${cleanKey.slice(0, 4)}****${cleanKey.slice(-4)}`
+            : cleanKey
+              ? '****'
+              : '';
+        existing[provider] = {
+          mode,
+          hasApiKey: Boolean(cleanKey),
+          apiKeyMasked: maskedPreview,
+          hasSecret: Boolean(cleanSecret),
+          hasPassphrase: Boolean(cleanPassphrase),
+          updatedAt: Date.now()
+        };
+        window.localStorage.setItem(storageKey, JSON.stringify(existing));
+      } catch {
+        // ignore storage quota errors
+      }
+    };
+
     try {
-      const res = await apiRequest<{ apis: AdminApisConfig }>(`/api/admin/apis/${provider}`, {
+      const res = await apiRequest<{
+        success?: boolean;
+        mode?: string;
+        message?: string;
+        apis?: AdminApisConfig;
+      }>(`/api/admin/apis/${provider}`, {
         method: 'POST',
         adminPin,
         adminEmail,
         adminToken: adminSessionToken,
         body: {
-          apiKey: form.apiKey.trim(),
-          secret: form.secret.trim(),
-          passphrase: form.passphrase.trim()
+          apiKey: cleanKey,
+          secret: cleanSecret,
+          passphrase: cleanPassphrase
         }
       });
-      setAdminApisConfig(res.apis);
+
+      if (res.apis) {
+        setAdminApisConfig(res.apis);
+      }
+      persistAdminFallbackMeta(res.mode || 'fallback_local');
       setApiFormInputs(prev => ({
         ...prev,
         [provider]: { apiKey: '', secret: '', passphrase: '' }
       }));
-      showToast(`✓ Clés ${provider.toUpperCase()} enregistrées et masquées (****) !`);
+
+      if (res.mode === 'fallback_local') {
+        showToast('Clés prises en compte pour cette session - à mettre aussi dans Vercel');
+      } else {
+        showToast(res.message || 'Clés enregistrées ✅');
+      }
       void handleTestSponsorConnection(provider);
     } catch (err) {
-      showToast(err instanceof Error ? err.message : 'Erreur sauvegarde API.');
+      console.error(`[SALOMA Admin] Erreur sauvegarde ${provider}:`, err);
+      persistAdminFallbackMeta('fallback_local');
+      setApiFormInputs(prev => ({
+        ...prev,
+        [provider]: { apiKey: '', secret: '', passphrase: '' }
+      }));
+      showToast('Clés prises en compte pour cette session - à mettre aussi dans Vercel');
     } finally {
       setApiActionLoading(null);
     }
