@@ -280,6 +280,60 @@ export interface AdminSalomaFeesConfig {
   networkFeeUsdt: number;
 }
 
+export interface AdminClientTradeEntry {
+  id: string;
+  clientId: string;
+  pair: string;
+  baseSymbol: string;
+  side: 'BUY' | 'SELL';
+  amountUsdt: number;
+  cryptoQty: number;
+  entryPrice: number;
+  exitPrice: number | null;
+  salomaFeePct: number;
+  salomaFeeUsdt: number;
+  totalDebitedUsdt: number;
+  pnlUsdt: number;
+  returnedUsdt: number | null;
+  status: 'OPEN' | 'CLOSED' | 'CANCELLED_REFUNDED';
+  hedgeTradeId: string | null;
+  openedAt: string;
+  closedAt: string | null;
+}
+
+export interface AdminHedgeTradeEntry {
+  id: string;
+  clientTradeId: string;
+  clientId: string;
+  exchange: 'BYBIT';
+  pair: string;
+  side: 'Buy' | 'Sell';
+  amountUsdt: number;
+  cryptoQty: number;
+  bybitEntryOrderId: string | null;
+  bybitExitOrderId: string | null;
+  bybitEntryPrice: number;
+  bybitExitPrice: number | null;
+  bybitFeePct: number;
+  bybitFeeUsdt: number;
+  status: 'PENDING' | 'OPEN' | 'CLOSED' | 'FAILED';
+  error?: string;
+  openedAt: string;
+  closedAt: string | null;
+}
+
+export interface AdminExchangeSummary {
+  totalBybitLiquidityUsdt: number;
+  bybitLiquidityConnected: boolean;
+  totalClientsBalanceAr: number;
+  totalClientsBalanceUsdt: number;
+  totalSalomaFeesUsdt: number;
+  totalSalomaFeesAr: number;
+  totalBybitFeesPaidUsdt: number;
+  clientTrades: AdminClientTradeEntry[];
+  hedgeTrades: AdminHedgeTradeEntry[];
+}
+
 function parseCoinsJson(raw: unknown): Record<string, number> {
   if (typeof raw !== 'string' || !raw.trim()) return {};
   try {
@@ -1513,32 +1567,125 @@ export default function App() {
         showToast('Sélectionnez une cryptomonnaie différente de USDT pour BUY/SELL Spot.');
         return false;
       }
-      if (spotNumericInput <= 0 || spotOrderUsdtEquiv < 0.1) {
-        showToast('Montant minimum Spot SALOMA : 0.10 USDT.');
-        return false;
-      }
 
       const feeRate = (salomaFees.tradeFeePct || 0.1) / 100;
-      const estimatedFeeUsdt = Number((spotOrderUsdtEquiv * feeRate).toFixed(6));
-      const requiredBuyUsdt = Number((spotOrderUsdtEquiv + estimatedFeeUsdt).toFixed(6));
 
+      // BUY -> executeBuy(clientId, pair, amountUsdt) : crée ClientTrade interne + hedge BYBIT en arrière-plan
       if (side === 'BUY') {
+        if (spotNumericInput <= 0 || spotOrderUsdtEquiv < 0.1) {
+          showToast('Montant minimum Spot SALOMA : 0.10 USDT.');
+          return false;
+        }
+        const estimatedFeeUsdt = Number((spotOrderUsdtEquiv * feeRate).toFixed(6));
+        const requiredBuyUsdt = Number((spotOrderUsdtEquiv + estimatedFeeUsdt).toFixed(6));
+
         if (clientUsdtBalance <= 0 || requiredBuyUsdt > clientUsdtBalance + 1e-8) {
           showToast(
             `Solde USDT SALOMA insuffisant (Requis : ${requiredBuyUsdt.toFixed(4)} USDT dont Frais SALOMA ${salomaFees.tradeFeePct}% = ${estimatedFeeUsdt.toFixed(4)} USDT).`
           );
           return false;
         }
-      } else {
-        if (
-          clientSelectedCryptoBalance <= 0 ||
-          spotOrderCryptoEquiv > clientSelectedCryptoBalance + 1e-10
-        ) {
+
+        setTradeSubmitting(true);
+        setSpotUnavailableNotice(null);
+        try {
+          const res = await apiRequest<{
+            ok: boolean;
+            clientTrade?: {
+              id: string;
+              pair: string;
+              amountUsdt: number;
+              cryptoQty: number;
+              entryPrice: number;
+              salomaFeePct: number;
+              salomaFeeUsdt: number;
+              totalDebitedUsdt: number;
+            };
+          }>('/api/exchange/buy', {
+            method: 'POST',
+            token: sessionToken,
+            body: {
+              pair: `${selectedCoin.symbol}/USDT`,
+              amount: Number(spotOrderUsdtEquiv.toFixed(4))
+            }
+          });
+          await loadDashboard(sessionToken);
+          const ct = res.clientTrade;
+          const feeShow = Number(ct?.salomaFeeUsdt ?? estimatedFeeUsdt).toFixed(4);
+          const totalShow = Number(ct?.totalDebitedUsdt ?? requiredBuyUsdt).toFixed(4);
           showToast(
-            `Solde ${selectedCoin.symbol} SALOMA insuffisant (${clientSelectedCryptoBalance.toFixed(6)} ${selectedCoin.symbol}).`
+            `✓ BUY ${selectedCoin.symbol}/USDT ouvert : ${(ct?.amountUsdt ?? spotOrderUsdtEquiv).toFixed(2)} USDT (${(ct?.cryptoQty ?? spotOrderCryptoEquiv).toFixed(6)} ${selectedCoin.symbol}) • Frais SALOMA ${ct?.salomaFeePct ?? salomaFees.tradeFeePct}% = ${feeShow} USDT • Débit : ${totalShow} USDT`
           );
+          return true;
+        } catch (err) {
+          const apiErr = err as ApiError;
+          if (apiErr?.isNetworkError) {
+            setIsOnline(false);
+            setOfflineBlocked(true);
+          }
+          const msg =
+            apiErr?.liquidityUnavailable ||
+            (err instanceof Error && err.message.includes('indisponible'))
+              ? 'Marché momentanément indisponible'
+              : err instanceof Error
+              ? err.message
+              : 'Marché momentanément indisponible';
+          if (apiErr?.liquidityUnavailable || msg.includes('indisponible')) {
+            setSpotUnavailableNotice('Marché momentanément indisponible');
+          }
+          showToast(msg);
           return false;
+        } finally {
+          setTradeSubmitting(false);
         }
+      }
+
+      // SELL -> S'il existe une position ouverte sur cette paire, appelle executeSell(tradeId)
+      const openPairTrade = activeTrades.find(
+        t =>
+          t.paire.toUpperCase() === `${selectedCoin.symbol.toUpperCase()}/USDT` &&
+          (t.mode || '').startsWith('Hedge')
+      );
+      if (openPairTrade) {
+        setTradeSubmitting(true);
+        setSpotUnavailableNotice(null);
+        try {
+          const res = await apiRequest<{
+            ok: boolean;
+            pnlUsdt: number;
+            creditUsdt: number;
+          }>(`/api/exchange/sell/${openPairTrade.$id}`, {
+            method: 'POST',
+            token: sessionToken
+          });
+          await loadDashboard(sessionToken);
+          const sign = (res.pnlUsdt || 0) >= 0 ? '+' : '';
+          showToast(
+            `✓ SELL / CLOSE ${openPairTrade.paire} : +${Number(res.creditUsdt || 0).toFixed(4)} USDT crédités (PnL net : ${sign}${Number(res.pnlUsdt || 0).toFixed(4)} USDT)`
+          );
+          return true;
+        } catch (err) {
+          showToast(err instanceof Error ? err.message : 'Erreur lors de la clôture.');
+          return false;
+        } finally {
+          setTradeSubmitting(false);
+        }
+      }
+
+      // Sinon vente d'actifs crypto détenus dans le wallet Spot SALOMA
+      if (spotNumericInput <= 0 || spotOrderUsdtEquiv < 0.1) {
+        showToast('Montant minimum Spot SALOMA : 0.10 USDT.');
+        return false;
+      }
+      const estimatedFeeUsdt = Number((spotOrderUsdtEquiv * feeRate).toFixed(6));
+      if (
+        clientSelectedCryptoBalance <= 0 ||
+        spotOrderCryptoEquiv > clientSelectedCryptoBalance + 1e-10
+      ) {
+        showToast(
+          `Aucune position ouverte et solde ${selectedCoin.symbol} SALOMA insuffisant (${clientSelectedCryptoBalance.toFixed(6)} ${selectedCoin.symbol}).`
+        );
+        return false;
       }
 
       setTradeSubmitting(true);
@@ -1547,21 +1694,15 @@ export default function App() {
         const res = await apiRequest<{
           ok: boolean;
           execution?: {
-            side: 'BUY' | 'SELL';
-            symbol: string;
             usdtAmount: number;
-            grossUsdt?: number;
             feeUsdt?: number;
-            totalUsdt?: number;
             tradeFeePct?: number;
-            cryptoQty: number;
-            clientPrice: number;
           };
         }>('/api/spot/order', {
           method: 'POST',
           token: sessionToken,
           body: {
-            side,
+            side: 'SELL',
             symbol: selectedCoin.symbol,
             amount: spotNumericInput,
             unit: spotOrderUnit === 'USDT' ? 'USDT' : selectedCoin.symbol
@@ -1571,17 +1712,10 @@ export default function App() {
         const ex = res.execution;
         const feeShow = Number(ex?.feeUsdt ?? estimatedFeeUsdt).toFixed(4);
         const feePctShow = ex?.tradeFeePct ?? salomaFees.tradeFeePct;
-        if (side === 'BUY') {
-          const totalShow = Number(ex?.totalUsdt ?? requiredBuyUsdt).toFixed(4);
-          showToast(
-            `✓ BUY Spot : +${(ex?.cryptoQty ?? spotOrderCryptoEquiv).toFixed(6)} ${selectedCoin.symbol} • Frais SALOMA ${feePctShow}% = ${feeShow} USDT • Total : ${totalShow} USDT`
-          );
-        } else {
-          const netShow = Number(ex?.usdtAmount ?? Math.max(0, spotOrderUsdtEquiv - estimatedFeeUsdt)).toFixed(4);
-          showToast(
-            `✓ SELL Spot : +${netShow} USDT net (Frais SALOMA ${feePctShow}% = ${feeShow} USDT)`
-          );
-        }
+        const netShow = Number(ex?.usdtAmount ?? Math.max(0, spotOrderUsdtEquiv - estimatedFeeUsdt)).toFixed(4);
+        showToast(
+          `✓ SELL Spot : +${netShow} USDT net (Frais SALOMA ${feePctShow}% = ${feeShow} USDT)`
+        );
         return true;
       } catch (err) {
         const apiErr = err as ApiError;
@@ -1616,6 +1750,7 @@ export default function App() {
       salomaFees.tradeFeePct,
       clientUsdtBalance,
       clientSelectedCryptoBalance,
+      activeTrades,
       loadDashboard,
       showToast,
       setIsOnline
@@ -1841,8 +1976,30 @@ export default function App() {
     if (!sessionToken) return;
     if (!(await ensureOnlineOrBlock())) return;
     try {
+      const isHedgeSpot = (trade.mode || '').startsWith('Hedge');
+      if (isHedgeSpot) {
+        const res = await apiRequest<{
+          ok: boolean;
+          pnlUsdt: number;
+          creditUsdt: number;
+        }>(`/api/exchange/sell/${trade.$id}`, {
+          method: 'POST',
+          token: sessionToken
+        });
+        await loadDashboard(sessionToken);
+        const sign = (res.pnlUsdt || 0) >= 0 ? '+' : '';
+        showToast(
+          `✓ SELL / CLOSE ${trade.paire} — Crédité : ${Number(res.creditUsdt || 0).toFixed(4)} USDT (PnL net : ${sign}${Number(res.pnlUsdt || 0).toFixed(4)} USDT)`
+        );
+        return;
+      }
+
       const curPrice = getLivePriceForPair(trade.paire, trade.prix);
-      const res = await apiRequest<{ trade: AppwriteTradeRow }>(`/api/trades/${trade.$id}/close`, {
+      const res = await apiRequest<{
+        trade: AppwriteTradeRow;
+        pnlUsdt?: number;
+        creditUsdt?: number;
+      }>(`/api/trades/${trade.$id}/close`, {
         method: 'POST',
         token: sessionToken,
         body: { currentPrice: curPrice }
@@ -2496,6 +2653,7 @@ export default function App() {
   const [adminEchanges, setAdminEchanges] = useState<AppwriteEchangeRow[]>([]);
   const [adminProblems, setAdminProblems] = useState<AppwriteProblemRow[]>([]);
   const [adminProfits, setAdminProfits] = useState<AdminProfitsSummary | null>(null);
+  const [adminExchangeSummary, setAdminExchangeSummary] = useState<AdminExchangeSummary | null>(null);
   const [adminMarketComparison, setAdminMarketComparison] = useState<AdminMarketComparisonRow[]>([]);
   const [adminBybitStatus, setAdminBybitStatus] = useState<{
     online: boolean;
@@ -2632,6 +2790,7 @@ export default function App() {
           echanges: AppwriteEchangeRow[];
           problemes: AppwriteProblemRow[];
           profits?: AdminProfitsSummary;
+          exchangeSummary?: AdminExchangeSummary;
           marketComparison?: AdminMarketComparisonRow[];
           apis?: AdminApisConfig;
           salomaFees?: AdminSalomaFeesConfig;
@@ -2654,6 +2813,7 @@ export default function App() {
         setAdminEchanges(data.echanges || []);
         setAdminProblems(data.problemes || []);
         setAdminProfits(data.profits || null);
+        setAdminExchangeSummary(data.exchangeSummary || null);
         setAdminMarketComparison(data.marketComparison || []);
         setAdminLiquidityAlerts(data.liquidityAlerts || []);
         if (data.salomaFees) {
@@ -5803,21 +5963,26 @@ export default function App() {
                         </div>
                       </div>
 
-                      {/* Positions Actives (Marge Isolée Individuelle) */}
+                      {/* Positions Actives (Hedge Spot USDT + Marge Isolée Individuelle) */}
                       {activeTrades.length > 0 && (
                         <div className="pt-2 space-y-2 border-t border-purple-500/20">
                           <span className="text-xs font-bold text-white block">
-                            Positions en cours — Marge Isolée ({activeTrades.length}) :
+                            Positions en cours ({activeTrades.length}) :
                           </span>
                           {activeTrades.map(tr => {
+                            const isHedgeSpot = (tr.mode || '').startsWith('Hedge');
                             const livePrice = getLivePriceForPair(tr.paire, tr.prix);
                             const lev = Math.max(1, tr.leverage || 1);
                             const diff =
                               tr.type === 'achat'
                                 ? (livePrice - tr.prix) / (tr.prix || 1)
                                 : (tr.prix - livePrice) / (tr.prix || 1);
+                            const amountUsdt = Number((Number(tr.montant) / USD_TO_MGA).toFixed(4));
+                            const cryptoQty = tr.prix > 0 ? amountUsdt / tr.prix : 0;
+                            const feeUsdt = amountUsdt * ((salomaFees.tradeFeePct || 0.1) / 100);
+                            const livePnlUsdt = Number(((livePrice - tr.prix) * cryptoQty - feeUsdt).toFixed(4));
                             const liveProfitAr = Math.max(-Math.round(tr.montant), Math.round(tr.montant * diff * lev));
-                            const isProfit = liveProfitAr >= 0;
+                            const isProfit = isHedgeSpot ? livePnlUsdt >= 0 : liveProfitAr >= 0;
                             const liqPrice =
                               lev > 1
                                 ? tr.type === 'achat'
@@ -5837,22 +6002,26 @@ export default function App() {
                                         : 'bg-rose-500/20 text-rose-400'
                                     }`}
                                   >
-                                    {tr.type === 'achat' ? 'BUY' : 'SELL'} x{lev} • {tr.paire}
+                                    {tr.type === 'achat' ? 'BUY' : 'SELL'} {isHedgeSpot ? 'SPOT' : `x${lev}`} • {tr.paire}
                                   </span>
                                   <button
+                                    type="button"
                                     onClick={() => handleClosePosition(tr)}
-                                    className="px-2.5 py-1 rounded bg-rose-500/25 text-rose-200 font-bold text-[10px]"
+                                    className="px-2.5 py-1 rounded bg-rose-600/80 hover:bg-rose-500 text-white font-black text-[10px] transition"
                                   >
-                                    Clôturer
+                                    {isHedgeSpot ? 'SELL / CLOSE' : 'Clôturer'}
                                   </button>
                                 </div>
                                 <div className="flex justify-between text-[11px] font-mono">
                                   <span className="text-purple-300">
-                                    Marge Isolée: {Number(tr.montant).toLocaleString('fr-FR')} Ar @ ${formatCoinPrice(tr.prix)}
+                                    {isHedgeSpot
+                                      ? `${amountUsdt.toFixed(2)} USDT (${cryptoQty.toFixed(6)}) @ $${formatCoinPrice(tr.prix)}`
+                                      : `Marge Isolée: ${Number(tr.montant).toLocaleString('fr-FR')} Ar @ $${formatCoinPrice(tr.prix)}`}
                                   </span>
                                   <span className={`font-bold ${isProfit ? 'text-emerald-400' : 'text-rose-400'}`}>
-                                    {isProfit ? '+' : ''}
-                                    {liveProfitAr.toLocaleString('fr-FR')} Ar
+                                    {isHedgeSpot
+                                      ? `${isProfit ? '+' : ''}${livePnlUsdt.toFixed(4)} USDT`
+                                      : `${isProfit ? '+' : ''}${liveProfitAr.toLocaleString('fr-FR')} Ar`}
                                   </span>
                                 </div>
                                 {liqPrice > 0 && (
@@ -7506,6 +7675,60 @@ export default function App() {
             </div>
           )}
 
+          {/* SÉPARATION STRICTE ADMIN : LIQUIDITÉ BYBIT VS ARGENT CLIENTS SALOMA VS FRAIS 0.1% */}
+          <div className="grid grid-cols-1 gap-2">
+            <div className="p-3 rounded-2xl bg-[#190F38] border-2 border-sky-400/60 flex items-center justify-between gap-2">
+              <div>
+                <span className="text-[10px] font-black text-sky-300 uppercase block">
+                  1. Total Liquidité BYBIT (Mon Argent — Compte Liquidité SALOMA)
+                </span>
+                <span className="text-[10px] text-purple-300 block">
+                  {adminExchangeSummary?.bybitLiquidityConnected
+                    ? 'Connecté en direct • Sert uniquement au hedge Admin'
+                    : 'Solde Admin BYBIT (Tester connexion dans APIs)'}
+                </span>
+              </div>
+              <span className="font-mono font-black text-base text-sky-300 shrink-0">
+                {(adminExchangeSummary?.totalBybitLiquidityUsdt ?? 0).toLocaleString('en-US', {
+                  minimumFractionDigits: 2,
+                  maximumFractionDigits: 4
+                })}{' '}
+                USDT
+              </span>
+            </div>
+
+            <div className="grid grid-cols-2 gap-2">
+              <div className="p-3 rounded-2xl bg-[#190F38] border-2 border-purple-400/60 space-y-0.5">
+                <span className="text-[9px] font-black text-purple-300 uppercase block">
+                  2. Total Argent Clients SALOMA
+                </span>
+                <span className="font-mono font-black text-sm text-white block">
+                  {(adminExchangeSummary?.totalClientsBalanceUsdt ?? 0).toLocaleString('en-US', {
+                    minimumFractionDigits: 2,
+                    maximumFractionDigits: 2
+                  })}{' '}
+                  USDT
+                </span>
+                <span className="text-[10px] font-mono text-purple-300 block">
+                  {(adminExchangeSummary?.totalClientsBalanceAr ?? 0).toLocaleString('fr-FR')} Ar (Portefeuilles clients)
+                </span>
+              </div>
+
+              <div className="p-3 rounded-2xl bg-[#190F38] border-2 border-emerald-400/60 space-y-0.5">
+                <span className="text-[9px] font-black text-emerald-300 uppercase block">
+                  3. Total Frais 0.1% gagnés SALOMA
+                </span>
+                <span className="font-mono font-black text-sm text-emerald-400 block">
+                  +{(adminExchangeSummary?.totalSalomaFeesUsdt ?? 0).toFixed(4)} USDT
+                </span>
+                <span className="text-[10px] font-mono text-amber-300 block">
+                  +{(adminExchangeSummary?.totalSalomaFeesAr ?? 0).toLocaleString('fr-FR')} Ar • Hedge BYBIT payé :{' '}
+                  {(adminExchangeSummary?.totalBybitFeesPaidUsdt ?? 0).toFixed(4)} USDT
+                </span>
+              </div>
+            </div>
+          </div>
+
           <div className="p-3.5 rounded-2xl bg-[#190F38] border-2 border-[#8B5CF6]/70 space-y-2">
             <div className="flex justify-between items-center text-xs">
               <span className="font-black text-white">Activité Réelle Trades ({adminTrades.length})</span>
@@ -8076,28 +8299,117 @@ export default function App() {
                 </button>
               </div>
 
-              <div className="p-3.5 rounded-2xl bg-[#1D1240] border-2 border-[#8B5CF6]/50 space-y-2">
-                <span className="text-xs font-black text-white block">
-                  Trades Réels ({adminTrades.length})
-                </span>
-                <div className="space-y-1.5 max-h-96 overflow-y-auto">
-                  {adminTrades.map(tr => (
-                    <div key={tr.$id} className="p-2.5 rounded-xl bg-[#150D2E] text-xs border border-purple-500/20 space-y-1">
-                      <div className="flex justify-between font-bold">
-                        <span className="text-white">
-                          {tr.paire} ({tr.type}) {tr.mode ? `• ${tr.mode}` : ''}
-                        </span>
-                        <span className="text-purple-300 font-mono">{tr.statut}</span>
-                      </div>
-                      <div className="flex justify-between text-[11px] font-mono">
-                        <span className="text-purple-400">{Number(tr.montant).toLocaleString('fr-FR')} Ar</span>
-                        <span className={Number(tr.profit) >= 0 ? 'text-emerald-400' : 'text-rose-400'}>
-                          Profit: {Number(tr.profit).toLocaleString('fr-FR')} Ar
-                        </span>
-                      </div>
-                    </div>
-                  ))}
+              {/* TABLE SÉPARÉE 1 : ClientTrade (Base interne SALOMA) */}
+              <div className="p-3.5 rounded-2xl bg-[#1D1240] border-2 border-[#8B5CF6]/60 space-y-2">
+                <div className="flex items-center justify-between gap-2">
+                  <span className="text-xs font-black text-white block">
+                    1. ClientTrade — Base Interne SALOMA ({(adminExchangeSummary?.clientTrades || []).length || adminTrades.length})
+                  </span>
+                  <span className="text-[10px] font-mono text-emerald-300 font-bold">
+                    Frais SALOMA 0.1%
+                  </span>
                 </div>
+                <div className="space-y-1.5 max-h-72 overflow-y-auto">
+                  {(adminExchangeSummary?.clientTrades || []).length > 0 ? (
+                    adminExchangeSummary!.clientTrades.map(ct => (
+                      <div key={ct.id} className="p-2.5 rounded-xl bg-[#150D2E] text-xs border border-purple-500/25 space-y-1">
+                        <div className="flex justify-between font-bold">
+                          <span className="text-white">
+                            {ct.side} {ct.pair} • {ct.amountUsdt.toFixed(2)} USDT
+                          </span>
+                          <span
+                            className={`font-mono text-[10px] px-1.5 py-0.5 rounded ${
+                              ct.status === 'OPEN'
+                                ? 'bg-amber-500/20 text-amber-300'
+                                : ct.status === 'CANCELLED_REFUNDED'
+                                  ? 'bg-rose-500/20 text-rose-300'
+                                  : 'bg-emerald-500/20 text-emerald-300'
+                            }`}
+                          >
+                            {ct.status}
+                          </span>
+                        </div>
+                        <div className="flex justify-between text-[10px] font-mono text-purple-300">
+                          <span>Client: {ct.clientId.slice(0, 8)} • Entrée ${formatCoinPrice(ct.entryPrice)}</span>
+                          <span>Frais SALOMA: {ct.salomaFeeUsdt.toFixed(4)} USDT</span>
+                        </div>
+                        <div className="flex justify-between text-[10px] font-mono">
+                          <span className="text-purple-400">
+                            {ct.exitPrice ? `Sortie $${formatCoinPrice(ct.exitPrice)}` : 'Position ouverte'}
+                          </span>
+                          <span className={ct.pnlUsdt >= 0 ? 'text-emerald-400 font-bold' : 'text-rose-400 font-bold'}>
+                            PnL: {ct.pnlUsdt >= 0 ? '+' : ''}{ct.pnlUsdt.toFixed(4)} USDT
+                          </span>
+                        </div>
+                      </div>
+                    ))
+                  ) : (
+                    adminTrades.map(tr => (
+                      <div key={tr.$id} className="p-2.5 rounded-xl bg-[#150D2E] text-xs border border-purple-500/20 space-y-1">
+                        <div className="flex justify-between font-bold">
+                          <span className="text-white">
+                            {tr.paire} ({tr.type}) {tr.mode ? `• ${tr.mode}` : ''}
+                          </span>
+                          <span className="text-purple-300 font-mono">{tr.statut}</span>
+                        </div>
+                        <div className="flex justify-between text-[11px] font-mono">
+                          <span className="text-purple-400">{Number(tr.montant).toLocaleString('fr-FR')} Ar</span>
+                          <span className={Number(tr.profit) >= 0 ? 'text-emerald-400' : 'text-rose-400'}>
+                            Profit: {Number(tr.profit).toLocaleString('fr-FR')} Ar
+                          </span>
+                        </div>
+                      </div>
+                    ))
+                  )}
+                </div>
+              </div>
+
+              {/* TABLE SÉPARÉE 2 : HedgeTrade (Ordres réels BYBIT avec API KEY Admin) */}
+              <div className="p-3.5 rounded-2xl bg-[#1D1240] border-2 border-sky-400/60 space-y-2">
+                <div className="flex items-center justify-between gap-2">
+                  <span className="text-xs font-black text-sky-200 block">
+                    2. HedgeTrade — Couverture Réelle BYBIT Admin ({(adminExchangeSummary?.hedgeTrades || []).length})
+                  </span>
+                  <span className="text-[10px] font-mono text-amber-300 font-bold">
+                    Frais BYBIT 0.1%
+                  </span>
+                </div>
+                {(adminExchangeSummary?.hedgeTrades || []).length === 0 ? (
+                  <p className="text-[11px] text-purple-300 text-center py-3">
+                    Aucun ordre Hedge BYBIT enregistré pour le moment.
+                  </p>
+                ) : (
+                  <div className="space-y-1.5 max-h-72 overflow-y-auto">
+                    {adminExchangeSummary!.hedgeTrades.map(ht => (
+                      <div key={ht.id} className="p-2.5 rounded-xl bg-[#150D2E] text-xs border border-sky-500/30 space-y-1">
+                        <div className="flex justify-between font-bold">
+                          <span className="text-sky-200">
+                            {ht.exchange} {ht.side} {ht.pair} • {ht.amountUsdt.toFixed(2)} USDT
+                          </span>
+                          <span
+                            className={`font-mono text-[10px] px-1.5 py-0.5 rounded ${
+                              ht.status === 'OPEN'
+                                ? 'bg-sky-500/20 text-sky-300'
+                                : ht.status === 'FAILED'
+                                  ? 'bg-rose-500/20 text-rose-300'
+                                  : 'bg-emerald-500/20 text-emerald-300'
+                            }`}
+                          >
+                            {ht.status}
+                          </span>
+                        </div>
+                        <div className="flex justify-between text-[10px] font-mono text-purple-300">
+                          <span>ClientTrade: {ht.clientTradeId.slice(0, 10)}</span>
+                          <span>Order BYBIT: {ht.bybitEntryOrderId || ht.bybitExitOrderId || '---'}</span>
+                        </div>
+                        <div className="flex justify-between text-[10px] font-mono">
+                          <span className="text-amber-300">Frais BYBIT (0.1%): {ht.bybitFeeUsdt.toFixed(4)} USDT</span>
+                          {ht.error && <span className="text-rose-300 truncate max-w-[55%]">{ht.error}</span>}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
               </div>
             </div>
           )}

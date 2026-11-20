@@ -19,6 +19,14 @@ import {
   Role
 } from 'node-appwrite';
 import { findCoinNetwork } from './src/services/priceAggregator';
+import {
+  executeBuy,
+  executeSell,
+  recordInstantSpotExchangePair,
+  isHedgeTradeRecorded,
+  getSeparatedTradesSnapshot,
+  type SalomaWalletAdapter
+} from './salomaExchange';
 
 const PORT = 3000;
 const USD_TO_MGA = 4750;
@@ -2272,6 +2280,127 @@ function requireVerified(req: AuthedRequest, res: Response, next: NextFunction) 
 
 export function createSalomaApiApp() {
   const app = express();
+  const salomaWalletAdapter: SalomaWalletAdapter = {
+    usdToMgaRate: USD_TO_MGA,
+    getSalomaPriceUsd: (baseSym: string) => getSalomaPriceUsd(baseSym),
+    getBybitSpotPriceUsd: (baseSym: string) =>
+      marketCache.coins[baseSym.toUpperCase().trim()]?.bybitPrice || getSalomaPriceUsd(baseSym),
+    getTradeFeePct: () => getPublicSalomaFees().tradeFeePct,
+    getClientUsdtBalance: async (clientId: string) => {
+      const wallet = await getOrCreateWalletRow(clientId);
+      const coins = parseCoinsJson(wallet.coins_json);
+      return Math.max(0, Number(coins.USDT || 0));
+    },
+    debitClientUsdt: async (clientId: string, amountUsdt: number) => {
+      const wallet = await getOrCreateWalletRow(clientId);
+      const soldeDisp = Number(wallet.solde_disponible) || 0;
+      const soldeBloque = Number(wallet.solde_bloque) || 0;
+      const compteTrade = getCompteTradeArFromWallet(wallet as unknown as Record<string, unknown>);
+      const coins = parseCoinsJson(wallet.coins_json);
+      coins.USDT = Math.max(0, Number(((coins.USDT || 0) - amountUsdt).toFixed(6)));
+      const nextTotal = Number((soldeDisp + compteTrade + soldeBloque).toFixed(2));
+      const updated = await adminDb.updateRow({
+        databaseId: APPWRITE_DATABASE_ID,
+        tableId: TABLES.WALLETS,
+        rowId: wallet.$id,
+        data: {
+          solde_total: nextTotal,
+          date_maj: new Date().toISOString(),
+          coins_json: encodeCoinsWithTradeAr(coins, compteTrade)
+        }
+      });
+      return serializeWallet(updated as unknown as Record<string, unknown>);
+    },
+    creditClientUsdt: async (clientId: string, amountUsdt: number) => {
+      const wallet = await getOrCreateWalletRow(clientId);
+      if (amountUsdt <= 0) {
+        return serializeWallet(wallet as unknown as Record<string, unknown>);
+      }
+      const soldeDisp = Number(wallet.solde_disponible) || 0;
+      const soldeBloque = Number(wallet.solde_bloque) || 0;
+      const compteTrade = getCompteTradeArFromWallet(wallet as unknown as Record<string, unknown>);
+      const coins = parseCoinsJson(wallet.coins_json);
+      coins.USDT = Number(((coins.USDT || 0) + amountUsdt).toFixed(6));
+      const nextTotal = Number((soldeDisp + compteTrade + soldeBloque).toFixed(2));
+      const updated = await adminDb.updateRow({
+        databaseId: APPWRITE_DATABASE_ID,
+        tableId: TABLES.WALLETS,
+        rowId: wallet.$id,
+        data: {
+          solde_total: nextTotal,
+          date_maj: new Date().toISOString(),
+          coins_json: encodeCoinsWithTradeAr(coins, compteTrade)
+        }
+      });
+      return serializeWallet(updated as unknown as Record<string, unknown>);
+    },
+    createInternalTradeRow: async trade => {
+      const amountArEquiv = Math.max(1, Math.round(trade.amountUsdt * USD_TO_MGA));
+      const row = await adminDb.createRow({
+        databaseId: APPWRITE_DATABASE_ID,
+        tableId: TABLES.TRADES,
+        rowId: ID.unique(),
+        data: {
+          user_id: trade.clientId,
+          paire: trade.pair,
+          type: 'achat',
+          montant: amountArEquiv,
+          prix: trade.entryPrice,
+          profit: 0,
+          statut: 'en_cours',
+          date_creation: trade.openedAt,
+          date_cloture: '',
+          leverage: 1,
+          close_price: trade.entryPrice,
+          mode: 'Hedge Spot'
+        }
+      });
+      return String(row.$id);
+    },
+    updateInternalTradeRow: async (tradeId, patch) => {
+      try {
+        await adminDb.updateRow({
+          databaseId: APPWRITE_DATABASE_ID,
+          tableId: TABLES.TRADES,
+          rowId: tradeId,
+          data: {
+            statut: patch.statut,
+            ...(patch.profitAr !== undefined ? { profit: patch.profitAr } : {}),
+            ...(patch.closePrice !== undefined ? { close_price: patch.closePrice } : {}),
+            ...(patch.dateCloture !== undefined ? { date_cloture: patch.dateCloture } : {}),
+            ...(patch.mode !== undefined ? { mode: patch.mode.slice(0, 48) } : {})
+          }
+        });
+      } catch (err) {
+        console.error('[SALOMA updateInternalTradeRow] Appwrite update error:', err);
+      }
+    },
+    getInternalTradeRow: async tradeId => {
+      try {
+        const row = await adminDb.getRow({
+          databaseId: APPWRITE_DATABASE_ID,
+          tableId: TABLES.TRADES,
+          rowId: tradeId
+        });
+        return row as unknown as Record<string, unknown>;
+      } catch {
+        return null;
+      }
+    },
+    createClientNotification: async (clientId, title, message, type = 'info') =>
+      createNotification(clientId, title, message, type),
+    onBybitLiquidityAlert: params => {
+      recordSponsorLiquidityAlert({
+        sponsor: 'BYBIT',
+        side: params.side,
+        asset: params.asset,
+        pair: params.pair,
+        requiredAmount: params.requiredAmount,
+        availableAmount: params.availableAmount,
+        reason: params.reason
+      });
+    }
+  };
   const jsonParser = express.json({ limit: '1mb' });
   app.use((req: Request, res: Response, next: NextFunction) => {
     if (typeof req.body === 'string') {
@@ -3563,6 +3692,22 @@ export function createSalomaApiApp() {
         };
       }
 
+      // Enregistrer la séparation ClientTrade + HedgeTrade dans le registre interne
+      recordInstantSpotExchangePair({
+        clientTradeId: String(trade.$id || `spot-${Date.now()}`),
+        clientId: userId,
+        pair: `${baseSym}/USDT`,
+        baseSymbol: baseSym,
+        side,
+        amountUsdt: usdtAmount,
+        cryptoQty,
+        clientPrice,
+        bybitPrice: marketCache.coins[baseSym]?.bybitPrice || clientPrice,
+        salomaFeePct: tradeFeePct,
+        salomaFeeUsdt,
+        bybitOrderId: sponsorResult.orderId
+      });
+
       const notif = await createNotification(
         userId,
         side === 'BUY' ? `Achat ${baseSym} réussi` : `Vente ${baseSym} réussie`,
@@ -3591,6 +3736,83 @@ export function createSalomaApiApp() {
       });
     } catch (err) {
       res.status(400).json({ error: formatAppwriteErrorFr(err, 'Erreur exécution ordre Spot.') });
+    }
+  });
+
+  // ========================================================
+  // 4B. EXCHANGE INTERNE SALOMA : executeBuy / executeSell (ClientTrade + HedgeTrade BYBIT)
+  // ========================================================
+
+  app.post('/api/exchange/buy', requireAuth, requireVerified, async (req: AuthedRequest, res: Response) => {
+    try {
+      try {
+        await refreshMarketPrices();
+      } catch {
+        // keep latest cached prices
+      }
+      const clientId = req.authUser?.$id;
+      if (!clientId) {
+        res.status(401).json({ error: 'Session expirée ou manquante. Veuillez vous connecter.' });
+        return;
+      }
+
+      const rawPair = String(req.body?.pair || req.body?.symbol || 'BTC/USDT').trim();
+      const amountUsdt = Number(req.body?.amount ?? req.body?.amountUsdt);
+
+      const result = await executeBuy(salomaWalletAdapter, clientId, rawPair, amountUsdt);
+      if (!result.ok) {
+        res.status(result.liquidityUnavailable ? 503 : 400).json({
+          ok: false,
+          liquidityUnavailable: Boolean(result.liquidityUnavailable),
+          refunded: Boolean(result.refunded),
+          error: result.error
+        });
+        return;
+      }
+
+      // Ne jamais exposer HedgeTrade ni BYBIT côté client
+      res.status(201).json({
+        ok: true,
+        clientTrade: result.clientTrade,
+        wallet: result.wallet
+      });
+    } catch (err) {
+      res.status(400).json({ error: formatAppwriteErrorFr(err, 'Erreur ouverture position BUY.') });
+    }
+  });
+
+  app.post('/api/exchange/sell/:id', requireAuth, requireVerified, async (req: AuthedRequest, res: Response) => {
+    try {
+      try {
+        await refreshMarketPrices();
+      } catch {
+        // keep latest cached prices
+      }
+      const clientId = req.authUser?.$id;
+      if (!clientId) {
+        res.status(401).json({ error: 'Session expirée ou manquante. Veuillez vous connecter.' });
+        return;
+      }
+
+      const tradeId = String(req.params.id || '').trim();
+      const result = await executeSell(salomaWalletAdapter, tradeId, clientId);
+      if (!result.ok) {
+        res.status(result.statusCode || 400).json({
+          ok: false,
+          error: result.error
+        });
+        return;
+      }
+
+      res.json({
+        ok: true,
+        clientTrade: result.clientTrade,
+        pnlUsdt: result.pnlUsdt,
+        creditUsdt: result.creditUsdt,
+        wallet: result.wallet
+      });
+    } catch (err) {
+      res.status(400).json({ error: formatAppwriteErrorFr(err, 'Erreur clôture SELL.') });
     }
   });
 
@@ -3704,6 +3926,24 @@ export function createSalomaApiApp() {
       }
       if (trade.statut !== 'en_cours') {
         res.status(400).json({ error: 'Ce trade est déjà clôturé.' });
+        return;
+      }
+
+      // Si le trade est un ClientTrade hedgé sur BYBIT (Hedge Spot / executeBuy), déléguer à executeSell()
+      if (isHedgeTradeRecorded(tradeId) || String(trade.mode || '').startsWith('Hedge')) {
+        const sellResult = await executeSell(salomaWalletAdapter, tradeId, userId);
+        if (!sellResult.ok) {
+          res.status(sellResult.statusCode || 400).json({ error: sellResult.error });
+          return;
+        }
+        const closedDbRow = (await salomaWalletAdapter.getInternalTradeRow(tradeId)) || trade;
+        res.json({
+          trade: closedDbRow,
+          clientTrade: sellResult.clientTrade,
+          wallet: sellResult.wallet,
+          pnlUsdt: sellResult.pnlUsdt,
+          creditUsdt: sellResult.creditUsdt
+        });
         return;
       }
 
@@ -4900,12 +5140,14 @@ export function createSalomaApiApp() {
   app.get('/api/admin/overview', requireAdminPin, async (_req: Request, res: Response) => {
     try {
       await refreshMarketPrices();
-      const [usersRes, txRes, tradesRes, echangesRes, probRes] = await Promise.all([
+      const [usersRes, walletsRes, txRes, tradesRes, echangesRes, probRes, bybitLiveBal] = await Promise.all([
         adminDb.listRows({ databaseId: APPWRITE_DATABASE_ID, tableId: TABLES.USERS, queries: [Query.orderDesc('$createdAt'), Query.limit(100)] }),
+        adminDb.listRows({ databaseId: APPWRITE_DATABASE_ID, tableId: TABLES.WALLETS, queries: [Query.limit(100)] }),
         adminDb.listRows({ databaseId: APPWRITE_DATABASE_ID, tableId: TABLES.DEPOTS_RETRAITS, queries: [Query.orderDesc('$createdAt'), Query.limit(100)] }),
         adminDb.listRows({ databaseId: APPWRITE_DATABASE_ID, tableId: TABLES.TRADES, queries: [Query.orderDesc('$createdAt'), Query.limit(100)] }),
         adminDb.listRows({ databaseId: APPWRITE_DATABASE_ID, tableId: TABLES.ECHANGES, queries: [Query.orderDesc('$createdAt'), Query.limit(100)] }),
-        adminDb.listRows({ databaseId: APPWRITE_DATABASE_ID, tableId: TABLES.PROBLEMES, queries: [Query.orderDesc('$createdAt'), Query.limit(100)] })
+        adminDb.listRows({ databaseId: APPWRITE_DATABASE_ID, tableId: TABLES.PROBLEMES, queries: [Query.orderDesc('$createdAt'), Query.limit(100)] }),
+        checkSponsorConnectionStatus('bybit')
       ]);
 
       const nowMs = Date.now();
@@ -4941,6 +5183,7 @@ export function createSalomaApiApp() {
 
       const tradeFeeRate = getSalomaTradeFeeRate();
       for (const tr of tradesRes.rows) {
+        if (String(tr.statut || '') === 'annule') continue;
         const tsMs = Date.parse(String(tr.date_creation || tr.$createdAt || '')) || nowMs;
         const margin = Number(tr.montant) || 0;
         const feeAr = Math.round(margin * tradeFeeRate);
@@ -4964,6 +5207,74 @@ export function createSalomaApiApp() {
         addProfit(tsMs, 'retraitAr', Math.round(feeAr));
       }
 
+      // SÉPARATION STRICTE DES FONDS :
+      // 1. Total Argent Clients dans SALOMA (Portefeuilles clients uniquement, JAMAIS mélangé avec Bybit)
+      let totalClientsBalanceAr = 0;
+      for (const w of walletsRes.rows) {
+        const serialized = serializeWallet(w as unknown as Record<string, unknown>);
+        const fiatTotalAr = Number(serialized.solde_total) || 0;
+        const coins = parseCoinsJson(w.coins_json);
+        let cryptoAr = 0;
+        for (const [sym, qty] of Object.entries(coins)) {
+          if (qty > 0) {
+            cryptoAr += qty * getSalomaPriceUsd(sym) * USD_TO_MGA;
+          }
+        }
+        totalClientsBalanceAr += fiatTotalAr + cryptoAr;
+      }
+      totalClientsBalanceAr = Math.round(totalClientsBalanceAr);
+      const totalClientsBalanceUsdt = Number((totalClientsBalanceAr / USD_TO_MGA).toFixed(4));
+
+      // 2. Total Liquidité BYBIT (Compte Admin / Liquidité SALOMA uniquement)
+      const totalBybitLiquidityUsdt = bybitLiveBal.connected
+        ? Number((Number(bybitLiveBal.usdtBalance) || 0).toFixed(4))
+        : 0;
+
+      // 3. Total Frais 0.1% gagnés par SALOMA + Séparation ClientTrade / HedgeTrade
+      const separated = getSeparatedTradesSnapshot();
+      const ledgerIds = new Set(separated.clientTrades.map(c => c.id));
+      const mergedClientTrades = [...separated.clientTrades];
+      for (const tr of tradesRes.rows) {
+        const id = String(tr.$id || '');
+        if (!id || ledgerIds.has(id)) continue;
+        const pair = String(tr.paire || 'BTC/USDT');
+        const baseSym = pair.split('/')[0]?.toUpperCase().trim() || 'BTC';
+        const entryPrice = Number(tr.prix) || 1;
+        const amountUsdt = Number(((Number(tr.montant) || 0) / USD_TO_MGA).toFixed(4));
+        const feeUsdt = Number((amountUsdt * tradeFeeRate).toFixed(6));
+        const statut = String(tr.statut || '');
+        mergedClientTrades.push({
+          id,
+          clientId: String(tr.user_id || ''),
+          pair,
+          baseSymbol: baseSym,
+          side: String(tr.type || '') === 'vente' ? 'SELL' : 'BUY',
+          amountUsdt,
+          cryptoQty: Number((amountUsdt / entryPrice).toFixed(8)),
+          entryPrice,
+          exitPrice: statut === 'en_cours' ? null : Number(tr.close_price || entryPrice),
+          salomaFeePct: Number((tradeFeeRate * 100).toFixed(2)),
+          salomaFeeUsdt: feeUsdt,
+          totalDebitedUsdt: Number((amountUsdt + feeUsdt).toFixed(6)),
+          pnlUsdt: Number(((Number(tr.profit) || 0) / USD_TO_MGA).toFixed(4)),
+          returnedUsdt: null,
+          status:
+            statut === 'annule'
+              ? 'CANCELLED_REFUNDED'
+              : statut === 'en_cours'
+                ? 'OPEN'
+                : 'CLOSED',
+          hedgeTradeId: null,
+          openedAt: String(tr.date_creation || tr.$createdAt || ''),
+          closedAt: tr.date_cloture ? String(tr.date_cloture) : null
+        });
+      }
+
+      const totalSalomaFeesAr = Math.round(profits.total.tradeAr);
+      const totalSalomaFeesUsdt = Number(
+        Math.max(separated.totalLedgerSalomaFeesUsdt, totalSalomaFeesAr / USD_TO_MGA).toFixed(4)
+      );
+
       const marketComparison = buildAdminMarketComparison();
 
       res.json({
@@ -4973,6 +5284,17 @@ export function createSalomaApiApp() {
         echanges: echangesRes.rows,
         problemes: probRes.rows,
         profits,
+        exchangeSummary: {
+          totalBybitLiquidityUsdt,
+          bybitLiquidityConnected: bybitLiveBal.connected,
+          totalClientsBalanceAr,
+          totalClientsBalanceUsdt,
+          totalSalomaFeesUsdt,
+          totalSalomaFeesAr,
+          totalBybitFeesPaidUsdt: separated.totalBybitFeesPaidUsdt,
+          clientTrades: mergedClientTrades.slice(0, 100),
+          hedgeTrades: separated.hedgeTrades.slice(0, 100)
+        },
         marketComparison,
         apis: getMaskedApisConfig(),
         salomaFees: {
