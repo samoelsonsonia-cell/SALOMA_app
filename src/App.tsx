@@ -2731,6 +2731,7 @@ export default function App() {
           connected: boolean;
           usdtBalance: number;
           source?: string;
+          error?: string;
           message?: string;
           liquidityAlerts?: AdminLiquidityAlert[];
         }>(`/api/${provider}/status`, {
@@ -2745,7 +2746,7 @@ export default function App() {
             connected: Boolean(res.connected),
             usdtBalance: Number(res.usdtBalance) || 0,
             source: res.source,
-            message: res.message,
+            message: res.error || res.message,
             loading: false,
             tested: true
           }
@@ -7803,11 +7804,25 @@ export default function App() {
                     </thead>
                     <tbody className="divide-y divide-purple-500/20 bg-[#150D2E]">
                       {adminMarketComparison.map(row => {
-                        const sp = row.sponsorPrice ?? row.bybitPrice;
-                        const cp = row.clientPrice ?? row.salomaPrice;
+                        const sp = Number((row.sponsorPrice ?? row.bybitPrice).toFixed(8));
                         const mPct = row.marginPct ?? 0.1;
-                        const estFee = row.estimatedFee ?? sp * 0.001;
-                        const netProfit = row.estimatedNetProfit ?? cp - sp - estFee;
+                        const sponsorFeePct = row.bybitHiddenFeePct ?? 0.1;
+                        const cp = Number(
+                          (row.clientPrice ?? row.salomaPrice ?? sp * (1 + mPct / 100)).toFixed(8)
+                        );
+                        const estFee = Number(
+                          (row.estimatedFee ?? (row.symbol === 'USDT' ? 0 : sp * (sponsorFeePct / 100))).toFixed(8)
+                        );
+                        const rawNet =
+                          row.symbol === 'USDT' || Math.abs(mPct - sponsorFeePct) < 1e-9
+                            ? 0
+                            : Number(
+                                (row.estimatedNetProfit !== undefined
+                                  ? row.estimatedNetProfit
+                                  : cp - sp - estFee
+                                ).toFixed(8)
+                              );
+                        const netProfit = Math.abs(rawNet) < 1e-8 ? 0 : rawNet;
                         return (
                           <tr key={row.symbol}>
                             <td className="px-2 py-1.5 font-bold text-white">{row.symbol}</td>
@@ -7828,10 +7843,8 @@ export default function App() {
                                 netProfit >= 0 ? 'text-emerald-300' : 'text-rose-400'
                               }`}
                             >
-                              {netProfit >= 0 ? '+' : ''}$
-                              {Math.abs(netProfit) < 0.0001
-                                ? netProfit.toFixed(8)
-                                : formatCoinPrice(Math.abs(netProfit))}
+                              {netProfit > 0 ? '+' : netProfit < 0 ? '-' : ''}$
+                              {Math.abs(netProfit).toFixed(8)}
                             </td>
                           </tr>
                         );
@@ -8227,9 +8240,13 @@ export default function App() {
                 const parsedMargin = Number(String(marginStr).replace(',', '.'));
                 const safeMarginPct = Number.isFinite(parsedMargin) ? Math.min(5, Math.max(0, parsedMargin)) : 0.1;
                 const sampleSponsorPrice = 0.00008;
-                const sampleClientPrice = sampleSponsorPrice * (1 + safeMarginPct / 100);
-                const sampleFeeEst = sampleSponsorPrice * 0.001;
-                const sampleNetProfit = sampleClientPrice - sampleSponsorPrice - sampleFeeEst;
+                const sampleClientPrice = Number((sampleSponsorPrice * (1 + safeMarginPct / 100)).toFixed(8));
+                const sampleFeeEst = Number((sampleSponsorPrice * 0.001).toFixed(8));
+                const rawSampleNet =
+                  Math.abs(safeMarginPct - 0.1) < 1e-9
+                    ? 0
+                    : Number((sampleClientPrice - sampleSponsorPrice - sampleFeeEst).toFixed(8));
+                const sampleNetProfit = Math.abs(rawSampleNet) < 1e-8 ? 0 : rawSampleNet;
 
                 return (
                   <div
@@ -8352,7 +8369,7 @@ export default function App() {
                         <span className="text-right text-amber-300">${sampleFeeEst.toFixed(8)}</span>
                         <span className="text-purple-300">Profit net estimé:</span>
                         <span className={`text-right font-bold ${sampleNetProfit >= 0 ? 'text-emerald-300' : 'text-rose-400'}`}>
-                          {sampleNetProfit >= 0 ? '+' : ''}${sampleNetProfit.toFixed(8)}
+                          {sampleNetProfit > 0 ? '+' : sampleNetProfit < 0 ? '-' : ''}${Math.abs(sampleNetProfit).toFixed(8)}
                         </span>
                       </div>
                     </div>
