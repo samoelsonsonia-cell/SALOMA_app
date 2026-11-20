@@ -39,12 +39,14 @@ const APPWRITE_FALLBACK_COOKIE_KEY = 'saloma_appwrite_fallback_cookies';
 export interface ApiError extends Error {
   status?: number;
   turnstileRetry?: boolean;
+  liquidityUnavailable?: boolean;
   isNetworkError?: boolean;
 }
 
 export function isApiNotFoundError(err: unknown): boolean {
   if (!err || typeof err !== 'object') return false;
   const e = err as ApiError;
+  if (e.liquidityUnavailable) return false;
   if (e.status === 404 || (typeof e.status === 'number' && e.status >= 500)) return true;
   const msg = String(e.message || '');
   return (
@@ -219,6 +221,9 @@ export async function apiRequest<T>(
     err.status = status;
     if (data?.turnstileRetry) {
       err.turnstileRetry = true;
+    }
+    if (data?.liquidityUnavailable) {
+      err.liquidityUnavailable = true;
     }
     throw err;
   }

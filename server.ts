@@ -22,10 +22,7 @@ import { findCoinNetwork } from './src/services/priceAggregator';
 const PORT = 3000;
 const USD_TO_MGA = 4750;
 const SALOMA_SPREAD_RATE = 0; // PRIX SALOMA = PRIX EXACT BYBIT / OKX / BINANCE (1:1 temps réel)
-const BYBIT_HIDDEN_FEE_RATE = 0.001; // 0.1% Exchange execution fee strictly hidden from clients (analana frais en interne)
-const SALOMA_TRADE_FEE_RATE = 0.001; // 0.1% on Trade
-const SALOMA_EXCHANGE_FEE_RATE = 0.001; // 0.1% on Exchange (corrigé = Trade)
-const SALOMA_WITHDRAW_FEE_RATE = 0.0015; // 0.15% on Withdraw seul + frais réseau
+const BYBIT_HIDDEN_FEE_RATE = 0.001; // 0.1% Sponsor execution fee recovered inside Prix_Client = Prix_Bybit * (1 + Marge%)
 const TRADE_AR_KEY = '_trade_ar';
 const APIS_CONFIG_FILE = path.resolve(process.cwd(), '.saloma-apis.json');
 const TEST_TURNSTILE_SITE_KEY = '1x00000000000000000000AA';
@@ -37,12 +34,42 @@ interface ExchangeApiEntry {
   apiKey: string;
   secret: string;
   passphrase?: string;
+  marginPct: number;
+}
+
+export interface SalomaFeesConfig {
+  bybitRecoveryMarginPct: number; // % Marge récupération frais Bybit (défaut 0.1%, cachée dans prix client)
+  tradeFeePct: number;            // Frais Trade % (défaut 0.1%, affiché au client)
+  exchangeFeePct: number;         // Frais Échange % (défaut 0.1%, affiché au client)
+  withdrawFeePct: number;         // Frais Retrait % (défaut 0.15%, affiché au client)
+  networkFeeUsdt: number;         // Frais Réseau USDT (défaut 0.50 USDT, affiché séparément au client)
 }
 
 interface BrokerApisStore {
   primaryApi: BrokerExchangeId;
   providers: Record<BrokerExchangeId, ExchangeApiEntry>;
+  salomaFees: SalomaFeesConfig;
 }
+
+function clampMarginPct(raw: unknown, fallback = 0.1): number {
+  const num = Number(raw);
+  if (!Number.isFinite(num)) return fallback;
+  return Number(Math.min(5, Math.max(0, num)).toFixed(2));
+}
+
+function clampNetworkFeeUsdt(raw: unknown, fallback = 0.5): number {
+  const num = Number(raw);
+  if (!Number.isFinite(num)) return fallback;
+  return Number(Math.min(100, Math.max(0, num)).toFixed(4));
+}
+
+const DEFAULT_SALOMA_FEES: SalomaFeesConfig = {
+  bybitRecoveryMarginPct: 0.1,
+  tradeFeePct: 0.1,
+  exchangeFeePct: 0.1,
+  withdrawFeePct: 0.15,
+  networkFeeUsdt: 0.5
+};
 
 const DEFAULT_APIS_STORE: BrokerApisStore = {
   primaryApi: 'bybit',
@@ -50,20 +77,24 @@ const DEFAULT_APIS_STORE: BrokerApisStore = {
     bybit: {
       enabled: true,
       apiKey: process.env.BYBIT_API_KEY || '',
-      secret: process.env.BYBIT_API_SECRET || ''
+      secret: process.env.BYBIT_API_SECRET || '',
+      marginPct: 0.1
     },
     okx: {
       enabled: false,
       apiKey: process.env.OKX_API_KEY || '',
       secret: process.env.OKX_API_SECRET || '',
-      passphrase: process.env.OKX_API_PASSPHRASE || ''
+      passphrase: process.env.OKX_PASSPHRASE || process.env.OKX_API_PASSPHRASE || '',
+      marginPct: 0.1
     },
     binance: {
       enabled: false,
       apiKey: process.env.BINANCE_API_KEY || '',
-      secret: process.env.BINANCE_API_SECRET || ''
+      secret: process.env.BINANCE_API_SECRET || '',
+      marginPct: 0.1
     }
-  }
+  },
+  salomaFees: { ...DEFAULT_SALOMA_FEES }
 };
 
 function loadApisStore(): BrokerApisStore {
@@ -76,25 +107,42 @@ function loadApisStore(): BrokerApisStore {
           parsed.primaryApi === 'okx' || parsed.primaryApi === 'binance' || parsed.primaryApi === 'bybit'
             ? parsed.primaryApi
             : 'bybit';
+        const bybitMargin = clampMarginPct(parsed.providers.bybit?.marginPct, 0.1);
+        const okxMargin = clampMarginPct(parsed.providers.okx?.marginPct, 0.1);
+        const binanceMargin = clampMarginPct(parsed.providers.binance?.marginPct, 0.1);
+        const primaryMargin =
+          primary === 'okx' ? okxMargin : primary === 'binance' ? binanceMargin : bybitMargin;
+        const rawFees = parsed.salomaFees || ({} as Partial<SalomaFeesConfig>);
+        const recoveryMargin = clampMarginPct(rawFees.bybitRecoveryMarginPct, primaryMargin);
         return {
           primaryApi: primary,
           providers: {
             bybit: {
               enabled: Boolean(parsed.providers.bybit?.enabled ?? true),
               apiKey: String(parsed.providers.bybit?.apiKey || ''),
-              secret: String(parsed.providers.bybit?.secret || '')
+              secret: String(parsed.providers.bybit?.secret || ''),
+              marginPct: bybitMargin
             },
             okx: {
               enabled: Boolean(parsed.providers.okx?.enabled ?? false),
               apiKey: String(parsed.providers.okx?.apiKey || ''),
               secret: String(parsed.providers.okx?.secret || ''),
-              passphrase: String(parsed.providers.okx?.passphrase || '')
+              passphrase: String(parsed.providers.okx?.passphrase || ''),
+              marginPct: okxMargin
             },
             binance: {
               enabled: Boolean(parsed.providers.binance?.enabled ?? false),
               apiKey: String(parsed.providers.binance?.apiKey || ''),
-              secret: String(parsed.providers.binance?.secret || '')
+              secret: String(parsed.providers.binance?.secret || ''),
+              marginPct: binanceMargin
             }
+          },
+          salomaFees: {
+            bybitRecoveryMarginPct: recoveryMargin,
+            tradeFeePct: clampMarginPct(rawFees.tradeFeePct, DEFAULT_SALOMA_FEES.tradeFeePct),
+            exchangeFeePct: clampMarginPct(rawFees.exchangeFeePct, DEFAULT_SALOMA_FEES.exchangeFeePct),
+            withdrawFeePct: clampMarginPct(rawFees.withdrawFeePct, DEFAULT_SALOMA_FEES.withdrawFeePct),
+            networkFeeUsdt: clampNetworkFeeUsdt(rawFees.networkFeeUsdt, DEFAULT_SALOMA_FEES.networkFeeUsdt)
           }
         };
       }
@@ -113,6 +161,27 @@ function saveApisStore() {
   } catch (err) {
     console.error('Failed to persist broker APIs config:', err);
   }
+}
+
+function getPublicSalomaFees() {
+  return {
+    tradeFeePct: clampMarginPct(brokerApisStore.salomaFees?.tradeFeePct, 0.1),
+    exchangeFeePct: clampMarginPct(brokerApisStore.salomaFees?.exchangeFeePct, 0.1),
+    withdrawFeePct: clampMarginPct(brokerApisStore.salomaFees?.withdrawFeePct, 0.15),
+    networkFeeUsdt: clampNetworkFeeUsdt(brokerApisStore.salomaFees?.networkFeeUsdt, 0.5)
+  };
+}
+
+function getSalomaTradeFeeRate(): number {
+  return getPublicSalomaFees().tradeFeePct / 100;
+}
+
+function getSalomaExchangeFeeRate(): number {
+  return getPublicSalomaFees().exchangeFeePct / 100;
+}
+
+function getSalomaWithdrawFeeRate(): number {
+  return getPublicSalomaFees().withdrawFeePct / 100;
 }
 
 function maskSecretValue(val: string | undefined, length = 12): string {
@@ -142,6 +211,7 @@ function getMaskedApisConfig() {
         label: labels[id],
         enabled: entry.enabled,
         isPrimary: brokerApisStore.primaryApi === id,
+        marginPct: clampMarginPct(entry.marginPct, 0.1),
         hasApiKey: Boolean(entry.apiKey.trim()),
         apiKeyMasked: maskApiKeyPreview(entry.apiKey),
         hasSecret: Boolean(entry.secret.trim()),
@@ -161,6 +231,763 @@ function getActiveExchangeUpper(): 'BYBIT' | 'OKX' | 'BINANCE' {
   if (brokerApisStore.primaryApi === 'okx') return 'OKX';
   if (brokerApisStore.primaryApi === 'binance') return 'BINANCE';
   return 'BYBIT';
+}
+
+function getActiveSponsorMarginPct(): number {
+  const entry = brokerApisStore.providers[brokerApisStore.primaryApi];
+  const fallback = clampMarginPct(brokerApisStore.salomaFees?.bybitRecoveryMarginPct, 0.1);
+  return clampMarginPct(entry?.marginPct, fallback);
+}
+
+function resolveSponsorCredentials(provider: BrokerExchangeId): {
+  apiKey: string;
+  secret: string;
+  passphrase: string;
+  source: 'vercel_env' | 'admin_saved' | 'none';
+} {
+  const saved = brokerApisStore.providers[provider];
+  if (provider === 'bybit') {
+    const envKey = String(process.env.BYBIT_API_KEY || '').trim();
+    const envSecret = String(process.env.BYBIT_API_SECRET || '').trim();
+    if (envKey && envSecret) {
+      return { apiKey: envKey, secret: envSecret, passphrase: '', source: 'vercel_env' };
+    }
+    const adminKey = String(saved?.apiKey || '').trim();
+    const adminSecret = String(saved?.secret || '').trim();
+    if (adminKey && adminSecret) {
+      return { apiKey: adminKey, secret: adminSecret, passphrase: '', source: 'admin_saved' };
+    }
+    return { apiKey: '', secret: '', passphrase: '', source: 'none' };
+  }
+
+  if (provider === 'okx') {
+    const envKey = String(process.env.OKX_API_KEY || '').trim();
+    const envSecret = String(process.env.OKX_API_SECRET || '').trim();
+    const envPass = String(process.env.OKX_PASSPHRASE || process.env.OKX_API_PASSPHRASE || '').trim();
+    if (envKey && envSecret && envPass) {
+      return { apiKey: envKey, secret: envSecret, passphrase: envPass, source: 'vercel_env' };
+    }
+    const adminKey = String(saved?.apiKey || '').trim();
+    const adminSecret = String(saved?.secret || '').trim();
+    const adminPass = String(saved?.passphrase || '').trim();
+    if (adminKey && adminSecret && adminPass) {
+      return { apiKey: adminKey, secret: adminSecret, passphrase: adminPass, source: 'admin_saved' };
+    }
+    return { apiKey: '', secret: '', passphrase: '', source: 'none' };
+  }
+
+  // binance
+  const envKey = String(process.env.BINANCE_API_KEY || '').trim();
+  const envSecret = String(process.env.BINANCE_API_SECRET || '').trim();
+  if (envKey && envSecret) {
+    return { apiKey: envKey, secret: envSecret, passphrase: '', source: 'vercel_env' };
+  }
+  const adminKey = String(saved?.apiKey || '').trim();
+  const adminSecret = String(saved?.secret || '').trim();
+  if (adminKey && adminSecret) {
+    return { apiKey: adminKey, secret: adminSecret, passphrase: '', source: 'admin_saved' };
+  }
+  return { apiKey: '', secret: '', passphrase: '', source: 'none' };
+}
+
+async function checkSponsorConnectionStatus(provider: BrokerExchangeId): Promise<{
+  sponsor: 'BYBIT' | 'OKX' | 'BINANCE';
+  connected: boolean;
+  usdtBalance: number;
+  source: 'vercel_env' | 'admin_saved' | 'none';
+  message?: string;
+}> {
+  const sponsorUpper = provider.toUpperCase() as 'BYBIT' | 'OKX' | 'BINANCE';
+  const creds = resolveSponsorCredentials(provider);
+  if (!creds.apiKey || !creds.secret || (provider === 'okx' && !creds.passphrase)) {
+    return {
+      sponsor: sponsorUpper,
+      connected: false,
+      usdtBalance: 0,
+      source: 'none',
+      message: 'Clés API manquantes (Vercel ou Admin).'
+    };
+  }
+
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 7000);
+  try {
+    if (provider === 'bybit') {
+      const fetchBybitAccount = async (accountType: 'UNIFIED' | 'SPOT') => {
+        const ts = String(Date.now());
+        const recvWindow = '5000';
+        const qs = `accountType=${accountType}`;
+        const prehash = `${ts}${creds.apiKey}${recvWindow}${qs}`;
+        const sign = crypto.createHmac('sha256', creds.secret).update(prehash).digest('hex');
+        const r = await fetch(`https://api.bybit.com/v5/account/wallet-balance?${qs}`, {
+          method: 'GET',
+          headers: {
+            'X-BAPI-API-KEY': creds.apiKey,
+            'X-BAPI-TIMESTAMP': ts,
+            'X-BAPI-RECV-WINDOW': recvWindow,
+            'X-BAPI-SIGN': sign
+          },
+          signal: controller.signal
+        });
+        const data = (await r.json()) as {
+          retCode?: number;
+          retMsg?: string;
+          result?: {
+            list?: Array<{
+              totalWalletBalance?: string;
+              coin?: Array<{ coin?: string; walletBalance?: string; equity?: string }>;
+            }>;
+          };
+        };
+        return { ok: r.ok, data };
+      };
+
+      let attempt = await fetchBybitAccount('UNIFIED');
+      if (attempt.data?.retCode !== 0) {
+        const fallbackSpot = await fetchBybitAccount('SPOT');
+        if (fallbackSpot.data?.retCode === 0) {
+          attempt = fallbackSpot;
+        }
+      }
+
+      if (!attempt.ok || attempt.data?.retCode !== 0) {
+        return {
+          sponsor: 'BYBIT',
+          connected: false,
+          usdtBalance: 0,
+          source: creds.source,
+          message: attempt.data?.retMsg || 'Erreur authentification Bybit.'
+        };
+      }
+
+      const list = attempt.data?.result?.list || [];
+      let usdt = 0;
+      for (const acc of list) {
+        const usdtCoin = (acc.coin || []).find(c => String(c.coin || '').toUpperCase() === 'USDT');
+        if (usdtCoin) {
+          usdt += Number(usdtCoin.walletBalance || usdtCoin.equity || 0) || 0;
+        } else if (acc.totalWalletBalance) {
+          usdt += Number(acc.totalWalletBalance) || 0;
+        }
+      }
+      return {
+        sponsor: 'BYBIT',
+        connected: true,
+        usdtBalance: Number(usdt.toFixed(4)),
+        source: creds.source
+      };
+    }
+
+    if (provider === 'okx') {
+      const ts = new Date().toISOString();
+      const requestPath = '/api/v5/account/balance';
+      const prehash = `${ts}GET${requestPath}`;
+      const sign = crypto.createHmac('sha256', creds.secret).update(prehash).digest('base64');
+      const r = await fetch(`https://www.okx.com${requestPath}`, {
+        method: 'GET',
+        headers: {
+          'OK-ACCESS-KEY': creds.apiKey,
+          'OK-ACCESS-SIGN': sign,
+          'OK-ACCESS-TIMESTAMP': ts,
+          'OK-ACCESS-PASSPHRASE': creds.passphrase
+        },
+        signal: controller.signal
+      });
+      const data = (await r.json()) as {
+        code?: string;
+        msg?: string;
+        data?: Array<{
+          totalEq?: string;
+          details?: Array<{ ccy?: string; cashBal?: string; eq?: string }>;
+        }>;
+      };
+      if (!r.ok || data?.code !== '0') {
+        return {
+          sponsor: 'OKX',
+          connected: false,
+          usdtBalance: 0,
+          source: creds.source,
+          message: data?.msg || 'Erreur authentification OKX.'
+        };
+      }
+      const first = data?.data?.[0];
+      const usdtRow = (first?.details || []).find(d => String(d.ccy || '').toUpperCase() === 'USDT');
+      const usdt = usdtRow
+        ? Number(usdtRow.cashBal || usdtRow.eq || 0) || 0
+        : Number(first?.totalEq || 0) || 0;
+      return {
+        sponsor: 'OKX',
+        connected: true,
+        usdtBalance: Number(usdt.toFixed(4)),
+        source: creds.source
+      };
+    }
+
+    // binance
+    const ts = Date.now();
+    const qs = `timestamp=${ts}&recvWindow=5000`;
+    const sig = crypto.createHmac('sha256', creds.secret).update(qs).digest('hex');
+    const r = await fetch(`https://api.binance.com/api/v3/account?${qs}&signature=${sig}`, {
+      method: 'GET',
+      headers: {
+        'X-MBX-APIKEY': creds.apiKey
+      },
+      signal: controller.signal
+    });
+    const data = (await r.json()) as {
+      code?: number;
+      msg?: string;
+      balances?: Array<{ asset?: string; free?: string; locked?: string }>;
+    };
+    if (!r.ok || !Array.isArray(data?.balances)) {
+      return {
+        sponsor: 'BINANCE',
+        connected: false,
+        usdtBalance: 0,
+        source: creds.source,
+        message: data?.msg || 'Erreur authentification Binance.'
+      };
+    }
+    const usdtEntry = data.balances.find(b => String(b.asset || '').toUpperCase() === 'USDT');
+    const usdt = usdtEntry ? (Number(usdtEntry.free || 0) || 0) + (Number(usdtEntry.locked || 0) || 0) : 0;
+    return {
+      sponsor: 'BINANCE',
+      connected: true,
+      usdtBalance: Number(usdt.toFixed(4)),
+      source: creds.source
+    };
+  } catch (err) {
+    return {
+      sponsor: sponsorUpper,
+      connected: false,
+      usdtBalance: 0,
+      source: creds.source,
+      message: err instanceof Error ? err.message : 'Erreur réseau lors du test API.'
+    };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+interface SponsorLiquidityAlert {
+  id: string;
+  sponsor: 'BYBIT' | 'OKX' | 'BINANCE';
+  side: 'BUY' | 'SELL';
+  asset: string;
+  pair: string;
+  requiredAmount: number;
+  availableAmount: number;
+  message: string;
+  reason: string;
+  timestamp: string;
+  active: boolean;
+}
+
+const sponsorLiquidityAlerts: SponsorLiquidityAlert[] = [];
+
+function recordSponsorLiquidityAlert(params: {
+  sponsor: 'BYBIT' | 'OKX' | 'BINANCE';
+  side: 'BUY' | 'SELL';
+  asset: string;
+  pair: string;
+  requiredAmount: number;
+  availableAmount: number;
+  reason: string;
+}) {
+  const sponsorTitle = params.sponsor === 'BYBIT' ? 'Bybit' : params.sponsor;
+  const alertMessage = `Liquidité ${sponsorTitle} insuffisante - Recharger le compte sponsor`;
+  const existing = sponsorLiquidityAlerts.find(
+    a => a.active && a.sponsor === params.sponsor && a.asset === params.asset && a.side === params.side
+  );
+  const nowIso = new Date().toISOString();
+  if (existing) {
+    existing.requiredAmount = Math.max(existing.requiredAmount, params.requiredAmount);
+    existing.availableAmount = params.availableAmount;
+    existing.message = alertMessage;
+    existing.reason = params.reason;
+    existing.timestamp = nowIso;
+    existing.pair = params.pair;
+    return existing;
+  }
+  const alert: SponsorLiquidityAlert = {
+    id: `liq-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+    sponsor: params.sponsor,
+    side: params.side,
+    asset: params.asset,
+    pair: params.pair,
+    requiredAmount: Number(params.requiredAmount.toFixed(8)),
+    availableAmount: Number(params.availableAmount.toFixed(8)),
+    message: alertMessage,
+    reason: params.reason,
+    timestamp: nowIso,
+    active: true
+  };
+  sponsorLiquidityAlerts.unshift(alert);
+  if (sponsorLiquidityAlerts.length > 20) {
+    sponsorLiquidityAlerts.length = 20;
+  }
+  return alert;
+}
+
+function getActiveLiquidityAlerts(): SponsorLiquidityAlert[] {
+  return sponsorLiquidityAlerts.filter(a => a.active);
+}
+
+function clearSponsorLiquidityAlert(alertId?: string) {
+  for (const a of sponsorLiquidityAlerts) {
+    if (!alertId || a.id === alertId) {
+      a.active = false;
+    }
+  }
+}
+
+function formatOrderQty(val: number, maxDecimals = 6): string {
+  if (!Number.isFinite(val) || val <= 0) return '0';
+  return Number(val.toFixed(maxDecimals)).toString();
+}
+
+async function checkSponsorAssetBalance(
+  provider: BrokerExchangeId,
+  assetRaw: string
+): Promise<{
+  connected: boolean;
+  available: number;
+  source: 'vercel_env' | 'admin_saved' | 'none';
+  reason?: string;
+}> {
+  const asset = assetRaw.toUpperCase().trim();
+  const creds = resolveSponsorCredentials(provider);
+  if (!creds.apiKey || !creds.secret || (provider === 'okx' && !creds.passphrase)) {
+    return {
+      connected: false,
+      available: 0,
+      source: 'none',
+      reason: 'Compte sponsor non connecté (clés API manquantes).'
+    };
+  }
+
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 7000);
+  try {
+    if (provider === 'bybit') {
+      const fetchBybitCoin = async (accountType: 'UNIFIED' | 'SPOT') => {
+        const ts = String(Date.now());
+        const recvWindow = '5000';
+        const qs = `accountType=${accountType}&coin=${encodeURIComponent(asset)}`;
+        const prehash = `${ts}${creds.apiKey}${recvWindow}${qs}`;
+        const sign = crypto.createHmac('sha256', creds.secret).update(prehash).digest('hex');
+        const r = await fetch(`https://api.bybit.com/v5/account/wallet-balance?${qs}`, {
+          method: 'GET',
+          headers: {
+            'X-BAPI-API-KEY': creds.apiKey,
+            'X-BAPI-TIMESTAMP': ts,
+            'X-BAPI-RECV-WINDOW': recvWindow,
+            'X-BAPI-SIGN': sign
+          },
+          signal: controller.signal
+        });
+        const data = (await r.json()) as {
+          retCode?: number;
+          retMsg?: string;
+          result?: {
+            list?: Array<{
+              coin?: Array<{
+                coin?: string;
+                walletBalance?: string;
+                availableToWithdraw?: string;
+                free?: string;
+                equity?: string;
+              }>;
+            }>;
+          };
+        };
+        return { ok: r.ok, data };
+      };
+
+      let attempt = await fetchBybitCoin('UNIFIED');
+      if (attempt.data?.retCode !== 0) {
+        const spotAttempt = await fetchBybitCoin('SPOT');
+        if (spotAttempt.data?.retCode === 0) attempt = spotAttempt;
+      }
+      if (!attempt.ok || attempt.data?.retCode !== 0) {
+        return {
+          connected: false,
+          available: 0,
+          source: creds.source,
+          reason: attempt.data?.retMsg || 'Erreur lecture solde sponsor Bybit.'
+        };
+      }
+      let avail = 0;
+      for (const acc of attempt.data?.result?.list || []) {
+        const entry = (acc.coin || []).find(c => String(c.coin || '').toUpperCase() === asset);
+        if (entry) {
+          avail += Number(entry.availableToWithdraw || entry.free || entry.walletBalance || entry.equity || 0) || 0;
+        }
+      }
+      return { connected: true, available: Number(avail.toFixed(8)), source: creds.source };
+    }
+
+    if (provider === 'okx') {
+      const ts = new Date().toISOString();
+      const requestPath = `/api/v5/account/balance?ccy=${encodeURIComponent(asset)}`;
+      const prehash = `${ts}GET${requestPath}`;
+      const sign = crypto.createHmac('sha256', creds.secret).update(prehash).digest('base64');
+      const r = await fetch(`https://www.okx.com${requestPath}`, {
+        method: 'GET',
+        headers: {
+          'OK-ACCESS-KEY': creds.apiKey,
+          'OK-ACCESS-SIGN': sign,
+          'OK-ACCESS-TIMESTAMP': ts,
+          'OK-ACCESS-PASSPHRASE': creds.passphrase
+        },
+        signal: controller.signal
+      });
+      const data = (await r.json()) as {
+        code?: string;
+        msg?: string;
+        data?: Array<{
+          details?: Array<{ ccy?: string; availBal?: string; cashBal?: string; eq?: string }>;
+        }>;
+      };
+      if (!r.ok || data?.code !== '0') {
+        return {
+          connected: false,
+          available: 0,
+          source: creds.source,
+          reason: data?.msg || 'Erreur lecture solde sponsor OKX.'
+        };
+      }
+      const row = (data?.data?.[0]?.details || []).find(d => String(d.ccy || '').toUpperCase() === asset);
+      const avail = row ? Number(row.availBal || row.cashBal || row.eq || 0) || 0 : 0;
+      return { connected: true, available: Number(avail.toFixed(8)), source: creds.source };
+    }
+
+    // binance
+    const ts = Date.now();
+    const qs = `timestamp=${ts}&recvWindow=5000`;
+    const sig = crypto.createHmac('sha256', creds.secret).update(qs).digest('hex');
+    const r = await fetch(`https://api.binance.com/api/v3/account?${qs}&signature=${sig}`, {
+      method: 'GET',
+      headers: { 'X-MBX-APIKEY': creds.apiKey },
+      signal: controller.signal
+    });
+    const data = (await r.json()) as {
+      code?: number;
+      msg?: string;
+      balances?: Array<{ asset?: string; free?: string }>;
+    };
+    if (!r.ok || !Array.isArray(data?.balances)) {
+      return {
+        connected: false,
+        available: 0,
+        source: creds.source,
+        reason: data?.msg || 'Erreur lecture solde sponsor Binance.'
+      };
+    }
+    const entry = data.balances.find(b => String(b.asset || '').toUpperCase() === asset);
+    const avail = entry ? Number(entry.free || 0) || 0 : 0;
+    return { connected: true, available: Number(avail.toFixed(8)), source: creds.source };
+  } catch (err) {
+    return {
+      connected: false,
+      available: 0,
+      source: creds.source,
+      reason: err instanceof Error ? err.message : 'Erreur réseau vérification liquidité sponsor.'
+    };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function executeSingleSponsorSpotOrder(
+  provider: BrokerExchangeId,
+  side: 'BUY' | 'SELL',
+  baseSym: string,
+  orderAmount: number
+): Promise<{
+  ok: boolean;
+  insufficientLiquidity: boolean;
+  reason?: string;
+  orderId?: string;
+}> {
+  const sponsorUpper = provider.toUpperCase() as 'BYBIT' | 'OKX' | 'BINANCE';
+  const requiredAsset = side === 'BUY' ? 'USDT' : baseSym.toUpperCase();
+  const pair = `${baseSym.toUpperCase()}/USDT`;
+
+  const bal = await checkSponsorAssetBalance(provider, requiredAsset);
+  if (bal.source === 'none') {
+    recordSponsorLiquidityAlert({
+      sponsor: sponsorUpper,
+      side,
+      asset: requiredAsset,
+      pair,
+      requiredAmount: orderAmount,
+      availableAmount: 0,
+      reason: bal.reason || 'Clés API sponsor non configurées.'
+    });
+    return { ok: false, insufficientLiquidity: true, reason: bal.reason };
+  }
+
+  if (!bal.connected) {
+    recordSponsorLiquidityAlert({
+      sponsor: sponsorUpper,
+      side,
+      asset: requiredAsset,
+      pair,
+      requiredAmount: orderAmount,
+      availableAmount: 0,
+      reason: bal.reason || 'Compte sponsor inaccessible.'
+    });
+    return { ok: false, insufficientLiquidity: true, reason: bal.reason };
+  }
+
+  if (bal.available < orderAmount) {
+    recordSponsorLiquidityAlert({
+      sponsor: sponsorUpper,
+      side,
+      asset: requiredAsset,
+      pair,
+      requiredAmount: orderAmount,
+      availableAmount: bal.available,
+      reason: `Solde sponsor ${requiredAsset} (${bal.available}) inférieur au besoin (${orderAmount}).`
+    });
+    return {
+      ok: false,
+      insufficientLiquidity: true,
+      reason: `Solde ${requiredAsset} insuffisant`
+    };
+  }
+
+  const creds = resolveSponsorCredentials(provider);
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 8000);
+  try {
+    if (provider === 'bybit') {
+      const ts = String(Date.now());
+      const recvWindow = '5000';
+      const payload = {
+        category: 'spot',
+        symbol: `${baseSym.toUpperCase()}USDT`,
+        side: side === 'BUY' ? 'Buy' : 'Sell',
+        orderType: 'Market',
+        qty: side === 'BUY' ? formatOrderQty(orderAmount, 2) : formatOrderQty(orderAmount, 6),
+        marketUnit: side === 'BUY' ? 'quoteCoin' : 'baseCoin'
+      };
+      const rawBody = JSON.stringify(payload);
+      const sign = crypto
+        .createHmac('sha256', creds.secret)
+        .update(`${ts}${creds.apiKey}${recvWindow}${rawBody}`)
+        .digest('hex');
+
+      const r = await fetch('https://api.bybit.com/v5/order/create', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-BAPI-API-KEY': creds.apiKey,
+          'X-BAPI-TIMESTAMP': ts,
+          'X-BAPI-RECV-WINDOW': recvWindow,
+          'X-BAPI-SIGN': sign
+        },
+        body: rawBody,
+        signal: controller.signal
+      });
+      const data = (await r.json()) as {
+        retCode?: number;
+        retMsg?: string;
+        result?: { orderId?: string };
+      };
+      if (!r.ok || data?.retCode !== 0) {
+        const msg = String(data?.retMsg || 'Erreur ordre Bybit.');
+        const code = Number(data?.retCode);
+        const isLiqErr =
+          code === 170131 ||
+          code === 110007 ||
+          code === 170033 ||
+          code === 170132 ||
+          /insufficient|balance/i.test(msg);
+        if (isLiqErr) {
+          recordSponsorLiquidityAlert({
+            sponsor: 'BYBIT',
+            side,
+            asset: requiredAsset,
+            pair,
+            requiredAmount: orderAmount,
+            availableAmount: bal.available,
+            reason: msg
+          });
+        }
+        return { ok: false, insufficientLiquidity: isLiqErr, reason: msg };
+      }
+      return { ok: true, insufficientLiquidity: false, orderId: data.result?.orderId };
+    }
+
+    if (provider === 'okx') {
+      const ts = new Date().toISOString();
+      const requestPath = '/api/v5/trade/order';
+      const payload = {
+        instId: `${baseSym.toUpperCase()}-USDT`,
+        tdMode: 'cash',
+        side: side === 'BUY' ? 'buy' : 'sell',
+        ordType: 'market',
+        sz: side === 'BUY' ? formatOrderQty(orderAmount, 2) : formatOrderQty(orderAmount, 6),
+        tgtCcy: side === 'BUY' ? 'quote_ccy' : 'base_ccy'
+      };
+      const rawBody = JSON.stringify(payload);
+      const sign = crypto
+        .createHmac('sha256', creds.secret)
+        .update(`${ts}POST${requestPath}${rawBody}`)
+        .digest('base64');
+
+      const r = await fetch(`https://www.okx.com${requestPath}`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'OK-ACCESS-KEY': creds.apiKey,
+          'OK-ACCESS-SIGN': sign,
+          'OK-ACCESS-TIMESTAMP': ts,
+          'OK-ACCESS-PASSPHRASE': creds.passphrase
+        },
+        body: rawBody,
+        signal: controller.signal
+      });
+      const data = (await r.json()) as {
+        code?: string;
+        msg?: string;
+        data?: Array<{ ordId?: string; sCode?: string; sMsg?: string }>;
+      };
+      const first = data?.data?.[0];
+      if (!r.ok || data?.code !== '0' || (first?.sCode && first.sCode !== '0')) {
+        const msg = String(first?.sMsg || data?.msg || 'Erreur ordre OKX.');
+        const sCode = String(first?.sCode || '');
+        const isLiqErr =
+          sCode === '51008' ||
+          sCode === '51009' ||
+          sCode === '51020' ||
+          /insufficient|balance/i.test(msg);
+        if (isLiqErr) {
+          recordSponsorLiquidityAlert({
+            sponsor: 'OKX',
+            side,
+            asset: requiredAsset,
+            pair,
+            requiredAmount: orderAmount,
+            availableAmount: bal.available,
+            reason: msg
+          });
+        }
+        return { ok: false, insufficientLiquidity: isLiqErr, reason: msg };
+      }
+      return { ok: true, insufficientLiquidity: false, orderId: first?.ordId };
+    }
+
+    // binance
+    const ts = Date.now();
+    const qtyParam =
+      side === 'BUY'
+        ? `quoteOrderQty=${formatOrderQty(orderAmount, 2)}`
+        : `quantity=${formatOrderQty(orderAmount, 6)}`;
+    const qs = `symbol=${baseSym.toUpperCase()}USDT&side=${side}&type=MARKET&${qtyParam}&timestamp=${ts}&recvWindow=5000`;
+    const sig = crypto.createHmac('sha256', creds.secret).update(qs).digest('hex');
+
+    const r = await fetch(`https://api.binance.com/api/v3/order?${qs}&signature=${sig}`, {
+      method: 'POST',
+      headers: { 'X-MBX-APIKEY': creds.apiKey },
+      signal: controller.signal
+    });
+    const data = (await r.json()) as {
+      code?: number;
+      msg?: string;
+      orderId?: number;
+    };
+    if (!r.ok || data?.code) {
+      const msg = String(data?.msg || 'Erreur ordre Binance.');
+      const isLiqErr = Number(data?.code) === -2010 || /insufficient|balance/i.test(msg);
+      if (isLiqErr) {
+        recordSponsorLiquidityAlert({
+          sponsor: 'BINANCE',
+          side,
+          asset: requiredAsset,
+          pair,
+          requiredAmount: orderAmount,
+          availableAmount: bal.available,
+          reason: msg
+        });
+      }
+      return { ok: false, insufficientLiquidity: isLiqErr, reason: msg };
+    }
+    return {
+      ok: true,
+      insufficientLiquidity: false,
+      orderId: data.orderId ? String(data.orderId) : undefined
+    };
+  } catch (err) {
+    return {
+      ok: false,
+      insufficientLiquidity: false,
+      reason: err instanceof Error ? err.message : 'Erreur exécution ordre sponsor.'
+    };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+interface PendingGroupedSponsorItem {
+  amount: number;
+  resolve: (res: { ok: boolean; insufficientLiquidity: boolean; reason?: string; orderId?: string }) => void;
+}
+
+const pendingSponsorOrderBatches = new Map<
+  string,
+  {
+    provider: BrokerExchangeId;
+    side: 'BUY' | 'SELL';
+    baseSym: string;
+    items: PendingGroupedSponsorItem[];
+    timer: NodeJS.Timeout;
+  }
+>();
+
+function executeGroupedSponsorSpotOrder(
+  provider: BrokerExchangeId,
+  side: 'BUY' | 'SELL',
+  baseSym: string,
+  amount: number
+): Promise<{ ok: boolean; insufficientLiquidity: boolean; reason?: string; orderId?: string }> {
+  return new Promise(resolve => {
+    const key = `${provider}:${side}:${baseSym.toUpperCase()}`;
+    let batch = pendingSponsorOrderBatches.get(key);
+    if (!batch) {
+      const timer = setTimeout(async () => {
+        const current = pendingSponsorOrderBatches.get(key);
+        pendingSponsorOrderBatches.delete(key);
+        if (!current || current.items.length === 0) return;
+        const totalAmount = current.items.reduce((s, it) => s + it.amount, 0);
+        try {
+          const result = await executeSingleSponsorSpotOrder(
+            current.provider,
+            current.side,
+            current.baseSym,
+            totalAmount
+          );
+          for (const item of current.items) {
+            item.resolve(result);
+          }
+        } catch (err) {
+          const fallbackRes = {
+            ok: false,
+            insufficientLiquidity: true,
+            reason: err instanceof Error ? err.message : 'Erreur exécution ordre groupé.'
+          };
+          for (const item of current.items) {
+            item.resolve(fallbackRes);
+          }
+        }
+      }, 65);
+      batch = { provider, side, baseSym: baseSym.toUpperCase(), items: [], timer };
+      pendingSponsorOrderBatches.set(key, batch);
+    }
+    batch.items.push({ amount, resolve });
+  });
 }
 
 function getEnvTurnstileSiteKey(): string {
@@ -409,13 +1236,16 @@ const MARKET_DEFAULTS: Array<{ symbol: string; name: string; basePrice: number; 
 function roundByRef(val: number, reference: number): number {
   if (reference < 0.0001) return Number(val.toFixed(8));
   if (reference < 0.001) return Number(val.toFixed(7));
-  if (reference < 1) return Number(val.toFixed(4));
+  if (reference < 1) return Number(val.toFixed(5));
+  if (reference < 10) return Number(val.toFixed(4));
+  if (reference < 100) return Number(val.toFixed(3));
   return Number(val.toFixed(2));
 }
 
-function computeSalomaPrice(symbol: string, bybitPrice: number): number {
+function computeSalomaPrice(symbol: string, sponsorPrice: number): number {
   if (symbol === 'USDT') return 1.0;
-  return roundByRef(bybitPrice * (1 - SALOMA_SPREAD_RATE), bybitPrice);
+  const marginRate = getActiveSponsorMarginPct() / 100;
+  return roundByRef(sponsorPrice * (1 + marginRate), sponsorPrice);
 }
 
 let marketCache: { updatedAt: number; bybitOnline: boolean; latencyMs: number; coins: Record<string, BackendCoinPrice> } = {
@@ -438,6 +1268,44 @@ let marketCache: { updatedAt: number; bybitOnline: boolean; latencyMs: number; c
     ])
   )
 };
+
+function recomputeMarketSalomaPrices() {
+  for (const sym of Object.keys(marketCache.coins)) {
+    const cur = marketCache.coins[sym];
+    if (!cur) continue;
+    marketCache.coins[sym] = {
+      ...cur,
+      salomaPrice: computeSalomaPrice(sym, cur.bybitPrice)
+    };
+  }
+  marketCache.updatedAt = Date.now();
+}
+
+function buildAdminMarketComparison() {
+  const activeMarginPct = getActiveSponsorMarginPct();
+  return Object.values(marketCache.coins).map(c => {
+    const sponsorPrice = c.bybitPrice;
+    const clientPrice = c.salomaPrice;
+    const estimatedFee = c.symbol === 'USDT' ? 0 : Number((sponsorPrice * BYBIT_HIDDEN_FEE_RATE).toFixed(8));
+    const estimatedNetProfit =
+      c.symbol === 'USDT' ? 0 : Number((clientPrice - sponsorPrice - estimatedFee).toFixed(8));
+    return {
+      symbol: c.symbol,
+      name: c.name,
+      bybitPrice: sponsorPrice,
+      sponsorPrice,
+      marginPct: activeMarginPct,
+      salomaPrice: clientPrice,
+      clientPrice,
+      estimatedFee,
+      estimatedNetProfit,
+      spreadDiff: Number((clientPrice - sponsorPrice).toFixed(8)),
+      spreadPct: Number((((clientPrice - sponsorPrice) / (sponsorPrice || 1)) * 100).toFixed(3)),
+      bybitHiddenFeePct: Number((BYBIT_HIDDEN_FEE_RATE * 100).toFixed(2)),
+      change24h: c.change24h
+    };
+  });
+}
 
 let refreshMarketPromise: Promise<void> | null = null;
 const wsStatus: Record<BrokerExchangeId, boolean> = { bybit: false, okx: false, binance: false };
@@ -464,6 +1332,7 @@ function buildSnapshotPayload() {
     type: 'snapshot',
     activeExchange: getActiveExchangeUpper(),
     wsOnline: isAnyExchangeWsOnline() || marketCache.bybitOnline,
+    salomaFees: getPublicSalomaFees(),
     coins: Object.values(marketCache.coins).map(buildPublicCoin),
     updatedAt: marketCache.updatedAt || Date.now()
   };
@@ -1847,7 +2716,7 @@ export function createSalomaApiApp() {
           await createNotification(
             userId,
             'Position liquidée (Marge Isolée)',
-            `Position ${tr.paire} (x${lev}) liquidée individuellement via ${getActiveExchangeUpper()} à $${livePrice}`,
+            `Position ${tr.paire} (x${lev}) liquidée individuellement via Marché à $${livePrice}`,
             'warning'
           );
         }
@@ -1997,8 +2866,13 @@ export function createSalomaApiApp() {
       coins: snap.coins,
       activeExchange: snap.activeExchange,
       wsOnline: snap.wsOnline,
+      salomaFees: snap.salomaFees,
       updatedAt: snap.updatedAt
     });
+  });
+
+  app.get('/api/fees', (_req: Request, res: Response) => {
+    res.json({ salomaFees: getPublicSalomaFees() });
   });
 
   // ========================================================
@@ -2103,15 +2977,25 @@ export function createSalomaApiApp() {
         return;
       }
 
-      const salomaWithdrawFee = Number((montant * SALOMA_WITHDRAW_FEE_RATE).toFixed(8)); // 0.15%
-      const networkFee = coinNet ? coinNet.withdrawFee : fallbackCfg.fee;
+      const publicFees = getPublicSalomaFees();
+      const withdrawFeeRate = getSalomaWithdrawFeeRate();
+      const salomaWithdrawFee = Number((montant * withdrawFeeRate).toFixed(8));
+      const effectivePriceUsd = devise === 'USDT' ? 1 : (getSalomaPriceUsd(devise) || Number(req.body?.priceUsd || 0));
+      const configuredNetFeeUsdt = publicFees.networkFeeUsdt;
+      const fallbackCoinNetFee = coinNet ? coinNet.withdrawFee : fallbackCfg.fee;
+      const networkFee =
+        devise === 'USDT'
+          ? Number(configuredNetFeeUsdt.toFixed(6))
+          : effectivePriceUsd > 0
+          ? Number((configuredNetFeeUsdt / effectivePriceUsd).toFixed(8))
+          : fallbackCoinNetFee;
       const minWithdraw = coinNet ? coinNet.minWithdraw : fallbackCfg.minWithdraw;
       const resolvedChain = chainLabel || coinNet?.chain || fallbackCfg?.chain || devise;
       const totalFrais = Number((salomaWithdrawFee + networkFee).toFixed(8));
 
       if (Number.isNaN(montant) || montant <= totalFrais) {
         res.status(400).json({
-          error: `Le montant doit dépasser les frais totaux (0.15% SALOMA + ${networkFee} ${devise} réseau).`
+          error: `Le montant doit dépasser les frais (Frais SALOMA ${publicFees.withdrawFeePct}% + Frais Réseau ${networkFee} ${devise}).`
         });
         return;
       }
@@ -2135,7 +3019,6 @@ export function createSalomaApiApp() {
         coins[devise] = Number(((coins[devise] || 0) - montant).toFixed(8));
         deductAr = 0;
       } else {
-        const effectivePriceUsd = getSalomaPriceUsd(devise) || Number(req.body?.priceUsd || 0);
         if (effectivePriceUsd <= 0) {
           res.status(400).json({ error: `Solde ${devise} insuffisant dans votre WALLET.` });
           return;
@@ -2182,7 +3065,7 @@ export function createSalomaApiApp() {
           methode: 'Crypto',
           numero_compte,
           statut: 'en_attente',
-          preuve: `Crypto (${displayNetwork}) → ${numero_compte} • Frais SALOMA 0.15%: ${salomaWithdrawFee} ${devise} + Réseau: ${networkFee} ${devise} • Net: ${netReceived} ${devise} ${deductAr > 0 ? '[AR]' : '[COIN]'}`,
+          preuve: `Crypto (${displayNetwork}) → ${numero_compte} • Frais SALOMA ${publicFees.withdrawFeePct}%: ${salomaWithdrawFee} ${devise} + Frais Réseau: ${networkFee} ${devise} • Net: ${netReceived} ${devise} ${deductAr > 0 ? '[AR]' : '[COIN]'}`,
           date: new Date().toISOString(),
           devise,
           frais: totalFrais
@@ -2192,12 +3075,17 @@ export function createSalomaApiApp() {
       const notif = await createNotification(
         userId,
         'Retrait en cours',
-        'Retrait en cours',
+        `Retrait : Frais SALOMA ${publicFees.withdrawFeePct}% (${salomaWithdrawFee} ${devise}) + Frais Réseau ${networkFee} ${devise}`,
         'wallet'
       );
 
       res.status(201).json({
         transaction: txRow,
+        salomaWithdrawFee,
+        withdrawFeePct: publicFees.withdrawFeePct,
+        networkFee,
+        totalFrais,
+        netReceived,
         wallet: serializeWallet(updatedWallet as unknown as Record<string, unknown>),
         notification: notif
       });
@@ -2329,8 +3217,213 @@ export function createSalomaApiApp() {
   });
 
   // ========================================================
-  // 4. TRADES RÉELS BROKER PUR (COMPTE TRADE + MARGE ISOLÉE - FRAIS 0.1%)
+  // 4. MODÈLE CUSTODIAL SPOT SALOMA (UN SEUL WALLET CLIENT + ORDRE GROUPÉ SPONSOR)
+  //    + TRADES LEVIER/BOT (COMPTE TRADE + MARGE ISOLÉE)
   // ========================================================
+
+  app.post('/api/spot/order', requireAuth, requireVerified, async (req: AuthedRequest, res: Response) => {
+    try {
+      try {
+        await refreshMarketPrices();
+      } catch {
+        // use latest cached SALOMA price if upstream refresh lags transiently
+      }
+
+      const userId = req.authUser?.$id;
+      if (!userId) {
+        res.status(401).json({ error: 'Session expirée ou manquante. Veuillez vous connecter.' });
+        return;
+      }
+
+      const sideRaw = String(req.body?.side || 'BUY').toUpperCase().trim();
+      const side: 'BUY' | 'SELL' = sideRaw === 'SELL' ? 'SELL' : 'BUY';
+      const baseSym = String(req.body?.symbol || '')
+        .toUpperCase()
+        .replace(/\/USDT$/i, '')
+        .trim();
+      const rawAmount = Number(req.body?.amount);
+      const rawUnit = String(req.body?.unit || (side === 'BUY' ? 'USDT' : baseSym))
+        .toUpperCase()
+        .trim();
+
+      if (!baseSym || baseSym === 'USDT' || baseSym === 'AR') {
+        res.status(400).json({ error: 'Veuillez sélectionner une cryptomonnaie valide (hors USDT).' });
+        return;
+      }
+      if (!Number.isFinite(rawAmount) || rawAmount <= 0) {
+        res.status(400).json({ error: 'Veuillez saisir un montant valide.' });
+        return;
+      }
+
+      const clientPrice = getSalomaPriceUsd(baseSym);
+      if (!Number.isFinite(clientPrice) || clientPrice <= 0) {
+        res.status(503).json({
+          liquidityUnavailable: true,
+          error: 'Marché momentanément indisponible'
+        });
+        return;
+      }
+
+      let usdtAmount = 0;
+      let cryptoQty = 0;
+      if (rawUnit === 'USDT' || rawUnit === 'USD') {
+        usdtAmount = Number(rawAmount.toFixed(4));
+        cryptoQty = Number((usdtAmount / clientPrice).toFixed(8));
+      } else {
+        cryptoQty = Number(rawAmount.toFixed(8));
+        usdtAmount = Number((cryptoQty * clientPrice).toFixed(4));
+      }
+
+      if (usdtAmount < 0.1 || cryptoQty <= 0) {
+        res.status(400).json({ error: 'Montant minimum Spot SALOMA : 0.10 USDT.' });
+        return;
+      }
+
+      const publicFees = getPublicSalomaFees();
+      const tradeFeePct = publicFees.tradeFeePct;
+      const tradeFeeRate = tradeFeePct / 100;
+      const salomaFeeUsdt = Number((usdtAmount * tradeFeeRate).toFixed(6));
+      const totalDebitUsdt = Number((usdtAmount + salomaFeeUsdt).toFixed(6));
+      const netCreditUsdt = Number(Math.max(0, usdtAmount - salomaFeeUsdt).toFixed(6));
+
+      const wallet = await getOrCreateWalletRow(userId);
+      const soldeDisp = Number(wallet.solde_disponible) || 0;
+      const soldeBloque = Number(wallet.solde_bloque) || 0;
+      const compteTrade = getCompteTradeArFromWallet(wallet as unknown as Record<string, unknown>);
+      const coins = parseCoinsJson(wallet.coins_json);
+
+      // a) Vérifier d'abord le solde interne SALOMA du client (Trade + Frais SALOMA transparents)
+      if (side === 'BUY') {
+        const clientUsdt = Number(coins.USDT || 0);
+        if (totalDebitUsdt > clientUsdt + 1e-8) {
+          res.status(400).json({
+            error: `Solde USDT SALOMA insuffisant (Requis : ${totalDebitUsdt.toFixed(4)} USDT dont Frais SALOMA ${tradeFeePct}% = ${salomaFeeUsdt.toFixed(4)} USDT).`
+          });
+          return;
+        }
+      } else {
+        const clientCrypto = Number(coins[baseSym] || 0);
+        if (cryptoQty > clientCrypto + 1e-10) {
+          res.status(400).json({
+            error: `Solde ${baseSym} SALOMA insuffisant (Disponible : ${clientCrypto.toFixed(6)} ${baseSym}).`
+          });
+          return;
+        }
+      }
+
+      // b) Exécuter UN SEUL ordre groupé chez le sponsor principal (avant tout débit/crédit client)
+      const sponsorResult = await executeGroupedSponsorSpotOrder(
+        brokerApisStore.primaryApi,
+        side,
+        baseSym,
+        side === 'BUY' ? usdtAmount : cryptoQty
+      );
+
+      if (!sponsorResult.ok) {
+        res.status(503).json({
+          liquidityUnavailable: true,
+          error: 'Marché momentanément indisponible'
+        });
+        return;
+      }
+
+      // c) Mettre à jour le wallet interne SALOMA du client avec déduction transparente des frais SALOMA
+      if (side === 'BUY') {
+        coins.USDT = Math.max(0, Number(((coins.USDT || 0) - totalDebitUsdt).toFixed(6)));
+        coins[baseSym] = Number(((coins[baseSym] || 0) + cryptoQty).toFixed(8));
+      } else {
+        coins[baseSym] = Math.max(0, Number(((coins[baseSym] || 0) - cryptoQty).toFixed(8)));
+        coins.USDT = Number(((coins.USDT || 0) + netCreditUsdt).toFixed(6));
+      }
+
+      const nextTotal = Number((soldeDisp + compteTrade + soldeBloque).toFixed(2));
+      const updatedWallet = await adminDb.updateRow({
+        databaseId: APPWRITE_DATABASE_ID,
+        tableId: TABLES.WALLETS,
+        rowId: wallet.$id,
+        data: {
+          solde_total: nextTotal,
+          date_maj: new Date().toISOString(),
+          coins_json: encodeCoinsWithTradeAr(coins, compteTrade)
+        }
+      });
+
+      const nowIso = new Date().toISOString();
+      const amountArEquiv = Math.max(1, Math.round(usdtAmount * USD_TO_MGA));
+      const modeLabel =
+        side === 'BUY'
+          ? `Spot +${cryptoQty.toFixed(6)} ${baseSym} (Frais ${tradeFeePct}%)`
+          : `Spot +${netCreditUsdt.toFixed(4)} USDT (Frais ${tradeFeePct}%)`;
+
+      let trade: Record<string, unknown> | null = null;
+      try {
+        trade = (await adminDb.createRow({
+          databaseId: APPWRITE_DATABASE_ID,
+          tableId: TABLES.TRADES,
+          rowId: ID.unique(),
+          data: {
+            user_id: userId,
+            paire: `${baseSym}/USDT`,
+            type: side === 'BUY' ? 'achat' : 'vente',
+            montant: amountArEquiv,
+            prix: clientPrice,
+            profit: 0,
+            statut: 'termine',
+            date_creation: nowIso,
+            date_cloture: nowIso,
+            leverage: 1,
+            close_price: clientPrice,
+            mode: modeLabel.slice(0, 48)
+          }
+        })) as unknown as Record<string, unknown>;
+      } catch {
+        trade = {
+          $id: `spot-${Date.now()}`,
+          user_id: userId,
+          paire: `${baseSym}/USDT`,
+          type: side === 'BUY' ? 'achat' : 'vente',
+          montant: amountArEquiv,
+          prix: clientPrice,
+          profit: 0,
+          statut: 'termine',
+          date_creation: nowIso,
+          date_cloture: nowIso,
+          leverage: 1,
+          close_price: clientPrice,
+          mode: modeLabel
+        };
+      }
+
+      const notif = await createNotification(
+        userId,
+        side === 'BUY' ? `Achat ${baseSym} réussi` : `Vente ${baseSym} réussie`,
+        side === 'BUY'
+          ? `Trade : ${usdtAmount.toFixed(2)} USDT • Frais SALOMA ${tradeFeePct}% = ${salomaFeeUsdt.toFixed(4)} USDT • Total : ${totalDebitUsdt.toFixed(4)} USDT (+${cryptoQty.toFixed(6)} ${baseSym})`
+          : `Vente : ${cryptoQty.toFixed(6)} ${baseSym} • Frais SALOMA ${tradeFeePct}% = ${salomaFeeUsdt.toFixed(4)} USDT • Net : ${netCreditUsdt.toFixed(4)} USDT`,
+        'success'
+      );
+
+      res.status(201).json({
+        ok: true,
+        trade,
+        wallet: serializeWallet(updatedWallet as unknown as Record<string, unknown>),
+        notification: notif,
+        execution: {
+          side,
+          symbol: baseSym,
+          usdtAmount: side === 'BUY' ? usdtAmount : netCreditUsdt,
+          grossUsdt: usdtAmount,
+          feeUsdt: salomaFeeUsdt,
+          totalUsdt: side === 'BUY' ? totalDebitUsdt : netCreditUsdt,
+          tradeFeePct,
+          cryptoQty,
+          clientPrice
+        }
+      });
+    } catch (err) {
+      res.status(400).json({ error: formatAppwriteErrorFr(err, 'Erreur exécution ordre Spot.') });
+    }
+  });
 
   app.post('/api/trades', requireAuth, requireVerified, async (req: AuthedRequest, res: Response) => {
     try {
@@ -2344,9 +3437,8 @@ export function createSalomaApiApp() {
       const liveSalomaPrice = getSalomaPriceUsd(baseSym);
       const prix = liveSalomaPrice > 0 ? liveSalomaPrice : Number(req.body?.prix);
       const leverage = Math.min(500, Math.max(1, Math.round(Number(req.body?.leverage) || 1)));
-      const baseMode = String(req.body?.mode || 'Manuel');
-      const activeBroker = getActiveExchangeUpper();
-      const mode = baseMode.includes('[') ? baseMode : `${baseMode} [${activeBroker}]`;
+      const baseMode = String(req.body?.mode || 'Manuel').replace(/\s*\[(BYBIT|OKX|BINANCE)\]/gi, '').trim();
+      const mode = baseMode || 'Manuel';
 
       if (Number.isNaN(montant) || montant < 500) {
         res.status(400).json({ error: 'Montant minimum de trading : 500 Ar.' });
@@ -2363,18 +3455,20 @@ export function createSalomaApiApp() {
       const compteTrade = getCompteTradeArFromWallet(wallet as unknown as Record<string, unknown>);
       const coins = parseCoinsJson(wallet.coins_json);
 
-      if (montant > compteTrade) {
+      const publicFees = getPublicSalomaFees();
+      const tradeFeePct = publicFees.tradeFeePct;
+      const tradeFeeAr = Math.round(montant * (tradeFeePct / 100));
+      const totalRequiredAr = montant + tradeFeeAr;
+
+      if (totalRequiredAr > compteTrade) {
         res.status(400).json({
-          error: `Solde Compte Trade insuffisant (${Math.round(compteTrade).toLocaleString('fr-FR')} Ar). Convertissez depuis votre Wallet vers Compte Trade.`
+          error: `Solde Compte Trade insuffisant (Requis : ${totalRequiredAr.toLocaleString('fr-FR')} Ar dont Frais SALOMA ${tradeFeePct}% = ${tradeFeeAr.toLocaleString('fr-FR')} Ar).`
         });
         return;
       }
 
-      // SALOMA prend 0.1% sur TRADE (Marge Isolée)
-      const tradeFee = Number((montant * SALOMA_TRADE_FEE_RATE).toFixed(2));
-      const effectiveMargin = Number((montant - tradeFee).toFixed(2));
-
-      const nextCompteTrade = Number((compteTrade - montant).toFixed(2));
+      const effectiveMargin = Number(montant.toFixed(2));
+      const nextCompteTrade = Number((compteTrade - totalRequiredAr).toFixed(2));
       const nextBloque = Number((soldeBloque + effectiveMargin).toFixed(2));
       const nextTotal = Number((soldeDisp + nextCompteTrade + nextBloque).toFixed(2));
 
@@ -2412,8 +3506,9 @@ export function createSalomaApiApp() {
 
       res.status(201).json({
         trade,
-        tradeFee,
-        activeExchange: activeBroker,
+        tradeFee: tradeFeeAr,
+        tradeFeePct,
+        totalDebited: totalRequiredAr,
         wallet: serializeWallet(updatedWallet as unknown as Record<string, unknown>)
       });
     } catch (err) {
@@ -2454,10 +3549,8 @@ export function createSalomaApiApp() {
         trade.type === 'achat'
           ? (execClose - entryPrice) / entryPrice
           : (entryPrice - execClose) / entryPrice;
-      // Marge Isolée stricte + Récupération interne automatique des 0.1% frais Exchange (caché client)
-      const rawPayout = Math.max(0, montant + Math.round(montant * diff * lev));
-      const hiddenExchangeFee = Math.round(Math.max(montant, rawPayout) * BYBIT_HIDDEN_FEE_RATE);
-      const returned = Math.max(0, Math.round(rawPayout - hiddenExchangeFee));
+      // Marge Isolée stricte basée directement sur le Prix Client affiché
+      const returned = Math.max(0, Math.round(montant + montant * diff * lev));
       const profit = Math.max(-Math.round(montant), returned - Math.round(montant));
 
       const updatedTrade = await adminDb.updateRow({
@@ -2498,7 +3591,7 @@ export function createSalomaApiApp() {
       const notif = await createNotification(
         userId,
         'Trade clôturé',
-        `Trade clôturé (${getActiveExchangeUpper()}) - Profit: ${sign}${profit.toLocaleString('fr-FR')} Ar`,
+        `Trade clôturé - Profit: ${sign}${profit.toLocaleString('fr-FR')} Ar`,
         profit >= 0 ? 'success' : 'warning'
       );
 
@@ -2622,13 +3715,12 @@ export function createSalomaApiApp() {
         coins[de_devise] = Math.max(0, Number((curCoinBal - montant_envoye).toFixed(8)));
       }
 
+      const publicFees = getPublicSalomaFees();
+      const exchangeFeeRate = getSalomaExchangeFeeRate();
       const taux = Number((fromPriceUsd / toPriceUsd).toFixed(8));
       const brutRecu = montant_envoye * taux;
-      // Récupération interne automatique des 0.1% frais Exchange avant calcul SALOMA 0.1% (strictement caché client)
-      const hiddenExchangeFee = brutRecu * BYBIT_HIDDEN_FEE_RATE;
-      const afterExchangeRecovery = Math.max(0, brutRecu - hiddenExchangeFee);
-      const frais = Number((afterExchangeRecovery * SALOMA_EXCHANGE_FEE_RATE).toFixed(8)); // 0.1% SALOMA affiché client
-      const montant_recu = Number((afterExchangeRecovery - frais).toFixed(vers_devise === 'AR' ? 2 : 8));
+      const frais = Number((brutRecu * exchangeFeeRate).toFixed(vers_devise === 'AR' ? 2 : 8));
+      const montant_recu = Number(Math.max(0, brutRecu - frais).toFixed(vers_devise === 'AR' ? 2 : 8));
 
       if (vers_devise === 'AR') {
         soldeDisp = Number((soldeDisp + montant_recu).toFixed(2));
@@ -2703,6 +3795,7 @@ export function createSalomaApiApp() {
 
       res.status(201).json({
         echange,
+        exchangeFeePct: publicFees.exchangeFeePct,
         wallet: serializeWallet(updatedWallet as unknown as Record<string, unknown>),
         notification: notif
       });
@@ -3677,11 +4770,11 @@ export function createSalomaApiApp() {
         }
       };
 
+      const tradeFeeRate = getSalomaTradeFeeRate();
       for (const tr of tradesRes.rows) {
         const tsMs = Date.parse(String(tr.date_creation || tr.$createdAt || '')) || nowMs;
         const margin = Number(tr.montant) || 0;
-        const gross = margin / (1 - SALOMA_TRADE_FEE_RATE);
-        const feeAr = Math.round(gross * SALOMA_TRADE_FEE_RATE);
+        const feeAr = Math.round(margin * tradeFeeRate);
         addProfit(tsMs, 'tradeAr', feeAr);
       }
 
@@ -3702,16 +4795,7 @@ export function createSalomaApiApp() {
         addProfit(tsMs, 'retraitAr', Math.round(feeAr));
       }
 
-      const marketComparison = Object.values(marketCache.coins).map(c => ({
-        symbol: c.symbol,
-        name: c.name,
-        bybitPrice: c.bybitPrice,
-        salomaPrice: c.salomaPrice,
-        spreadDiff: Number((c.bybitPrice - c.salomaPrice).toFixed(8)),
-        spreadPct: Number(((1 - c.salomaPrice / (c.bybitPrice || 1)) * 100).toFixed(2)),
-        bybitHiddenFeePct: Number((BYBIT_HIDDEN_FEE_RATE * 100).toFixed(2)),
-        change24h: c.change24h
-      }));
+      const marketComparison = buildAdminMarketComparison();
 
       res.json({
         users: usersRes.rows.map(r => sanitizeUserRow(r as unknown as Record<string, unknown>)),
@@ -3722,6 +4806,11 @@ export function createSalomaApiApp() {
         profits,
         marketComparison,
         apis: getMaskedApisConfig(),
+        salomaFees: {
+          ...brokerApisStore.salomaFees,
+          bybitRecoveryMarginPct: getActiveSponsorMarginPct()
+        },
+        liquidityAlerts: getActiveLiquidityAlerts(),
         turnstile: getMaskedTurnstileConfig(),
         bybitStatus: {
           online: isAnyExchangeWsOnline() || marketCache.bybitOnline,
@@ -3736,13 +4825,53 @@ export function createSalomaApiApp() {
     }
   });
 
+  app.post('/api/admin/liquidity-alerts/clear', requireAdminPin, (req: Request, res: Response) => {
+    try {
+      const alertId = typeof req.body?.id === 'string' ? req.body.id.trim() : undefined;
+      clearSponsorLiquidityAlert(alertId || undefined);
+      res.json({ ok: true, liquidityAlerts: getActiveLiquidityAlerts() });
+    } catch (err) {
+      res.status(400).json({ error: formatAppwriteErrorFr(err, 'Erreur mise à jour alertes liquidité.') });
+    }
+  });
+
   // ========================================================
-  // 8B. ADMIN 3 APIS (BYBIT, OKX, BINANCE — SECRETS MASQUÉS)
+  // 8B. ADMIN 3 APIS (BYBIT, OKX, BINANCE — SECRETS MASQUÉS + STATUT TEMPS RÉEL)
   // ========================================================
 
   app.get('/api/admin/apis', requireAdminPin, (_req: Request, res: Response) => {
     res.json({ apis: getMaskedApisConfig() });
   });
+
+  const handleSponsorStatusRoute = async (req: Request, res: Response) => {
+    try {
+      const provider = String(req.params.sponsor || '').toLowerCase().trim() as BrokerExchangeId;
+      if (provider !== 'bybit' && provider !== 'okx' && provider !== 'binance') {
+        res.status(400).json({ connected: false, usdtBalance: 0, message: 'Sponsor inconnu (bybit, okx ou binance).' });
+        return;
+      }
+      const status = await checkSponsorConnectionStatus(provider);
+      if (status.connected) {
+        for (const a of sponsorLiquidityAlerts) {
+          if (a.active && a.sponsor === status.sponsor && a.asset === 'USDT' && status.usdtBalance >= a.requiredAmount) {
+            a.active = false;
+          }
+        }
+      }
+      res.json({ ...status, liquidityAlerts: getActiveLiquidityAlerts() });
+    } catch (err) {
+      res.json({
+        sponsor: String(req.params.sponsor || '').toUpperCase(),
+        connected: false,
+        usdtBalance: 0,
+        source: 'none',
+        message: err instanceof Error ? err.message : 'Erreur vérification statut API.'
+      });
+    }
+  };
+
+  app.get('/api/:sponsor(bybit|okx|binance)/status', requireAdminPin, handleSponsorStatusRoute);
+  app.post('/api/:sponsor(bybit|okx|binance)/status', requireAdminPin, handleSponsorStatusRoute);
 
   app.post('/api/admin/apis/primary', requireAdminPin, async (req: Request, res: Response) => {
     const provider = String(req.body?.primaryApi || '').toLowerCase().trim() as BrokerExchangeId;
@@ -3752,11 +4881,18 @@ export function createSalomaApiApp() {
     }
     brokerApisStore.primaryApi = provider;
     brokerApisStore.providers[provider].enabled = true;
+    brokerApisStore.salomaFees.bybitRecoveryMarginPct = clampMarginPct(
+      brokerApisStore.providers[provider].marginPct,
+      0.1
+    );
     saveApisStore();
+    recomputeMarketSalomaPrices();
     await refreshMarketPrices(true);
     broadcastWs(buildSnapshotPayload());
     res.json({
       apis: getMaskedApisConfig(),
+      salomaFees: brokerApisStore.salomaFees,
+      marketComparison: buildAdminMarketComparison(),
       bybitStatus: {
         online: isAnyExchangeWsOnline() || marketCache.bybitOnline,
         wsOnline: isAnyExchangeWsOnline(),
@@ -3765,6 +4901,90 @@ export function createSalomaApiApp() {
         primaryExchange: getActiveExchangeUpper()
       }
     });
+  });
+
+  app.post('/api/admin/fees', requireAdminPin, (req: Request, res: Response) => {
+    try {
+      const nextBybitMargin = Number(req.body?.bybitRecoveryMarginPct);
+      const nextTradeFee = Number(req.body?.tradeFeePct);
+      const nextExchangeFee = Number(req.body?.exchangeFeePct);
+      const nextWithdrawFee = Number(req.body?.withdrawFeePct);
+      const nextNetworkFee = Number(req.body?.networkFeeUsdt);
+
+      if (!Number.isFinite(nextBybitMargin) || nextBybitMargin < 0 || nextBybitMargin > 5) {
+        res.status(400).json({ error: '% Marge récupération frais Bybit doit être entre 0 et 5%.' });
+        return;
+      }
+      if (!Number.isFinite(nextTradeFee) || nextTradeFee < 0 || nextTradeFee > 5) {
+        res.status(400).json({ error: 'Frais Trade % doit être entre 0 et 5%.' });
+        return;
+      }
+      if (!Number.isFinite(nextExchangeFee) || nextExchangeFee < 0 || nextExchangeFee > 5) {
+        res.status(400).json({ error: 'Frais Échange % doit être entre 0 et 5%.' });
+        return;
+      }
+      if (!Number.isFinite(nextWithdrawFee) || nextWithdrawFee < 0 || nextWithdrawFee > 5) {
+        res.status(400).json({ error: 'Frais Retrait % doit être entre 0 et 5%.' });
+        return;
+      }
+      if (!Number.isFinite(nextNetworkFee) || nextNetworkFee < 0 || nextNetworkFee > 100) {
+        res.status(400).json({ error: 'Frais Réseau (USDT) doit être entre 0 et 100 USDT.' });
+        return;
+      }
+
+      const clampedMargin = clampMarginPct(nextBybitMargin, 0.1);
+      brokerApisStore.salomaFees = {
+        bybitRecoveryMarginPct: clampedMargin,
+        tradeFeePct: clampMarginPct(nextTradeFee, 0.1),
+        exchangeFeePct: clampMarginPct(nextExchangeFee, 0.1),
+        withdrawFeePct: clampMarginPct(nextWithdrawFee, 0.15),
+        networkFeeUsdt: clampNetworkFeeUsdt(nextNetworkFee, 0.5)
+      };
+      brokerApisStore.providers.bybit.marginPct = clampedMargin;
+      brokerApisStore.providers[brokerApisStore.primaryApi].marginPct = clampedMargin;
+      saveApisStore();
+      recomputeMarketSalomaPrices();
+      broadcastWs(buildSnapshotPayload());
+
+      res.json({
+        ok: true,
+        salomaFees: brokerApisStore.salomaFees,
+        apis: getMaskedApisConfig(),
+        marketComparison: buildAdminMarketComparison()
+      });
+    } catch (err) {
+      res.status(400).json({ error: formatAppwriteErrorFr(err, 'Erreur sauvegarde configuration frais.') });
+    }
+  });
+
+  app.post('/api/admin/apis/:provider/margin', requireAdminPin, (req: Request, res: Response) => {
+    try {
+      const provider = String(req.params.provider || '').toLowerCase().trim() as BrokerExchangeId;
+      if (provider !== 'bybit' && provider !== 'okx' && provider !== 'binance') {
+        res.status(400).json({ error: 'Fournisseur API inconnu.' });
+        return;
+      }
+      const rawMargin = Number(req.body?.marginPct);
+      if (!Number.isFinite(rawMargin) || rawMargin < 0 || rawMargin > 5) {
+        res.status(400).json({ error: 'La marge % doit être comprise entre 0% et 5%.' });
+        return;
+      }
+      const clamped = clampMarginPct(rawMargin, 0.1);
+      brokerApisStore.providers[provider].marginPct = clamped;
+      if (provider === brokerApisStore.primaryApi || provider === 'bybit') {
+        brokerApisStore.salomaFees.bybitRecoveryMarginPct = clamped;
+      }
+      saveApisStore();
+      recomputeMarketSalomaPrices();
+      broadcastWs(buildSnapshotPayload());
+      res.json({
+        apis: getMaskedApisConfig(),
+        salomaFees: brokerApisStore.salomaFees,
+        marketComparison: buildAdminMarketComparison()
+      });
+    } catch (err) {
+      res.status(400).json({ error: formatAppwriteErrorFr(err, 'Erreur mise à jour marge.') });
+    }
   });
 
   app.post('/api/admin/apis/:provider/toggle', requireAdminPin, async (req: Request, res: Response) => {
@@ -3795,9 +5015,13 @@ export function createSalomaApiApp() {
     }
 
     saveApisStore();
+    recomputeMarketSalomaPrices();
     await refreshMarketPrices(true);
     broadcastWs(buildSnapshotPayload());
-    res.json({ apis: getMaskedApisConfig() });
+    res.json({
+      apis: getMaskedApisConfig(),
+      marketComparison: buildAdminMarketComparison()
+    });
   });
 
   app.post('/api/admin/apis/:provider', requireAdminPin, (req: Request, res: Response) => {

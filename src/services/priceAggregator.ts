@@ -989,7 +989,7 @@ export const INITIAL_COINS: Coin[] = [
 export const INITIAL_API_PROVIDERS: ApiProviderStatus[] = [
   {
     id: 'bybit',
-    label: 'Bybit V5 WebSocket Live',
+    label: 'Flux Marché Temps Réel',
     enabled: true,
     online: true,
     latencyMs: 12,
@@ -1122,6 +1122,20 @@ export const SALOMA_TRADE_FEE_RATE = 0.001; // 0.1%
 export const SALOMA_EXCHANGE_FEE_RATE = 0.001; // 0.1%
 export const SALOMA_WITHDRAW_FEE_RATE = 0.0015; // 0.15% + frais réseau
 
+export interface PublicSalomaFees {
+  tradeFeePct: number;
+  exchangeFeePct: number;
+  withdrawFeePct: number;
+  networkFeeUsdt: number;
+}
+
+export const DEFAULT_PUBLIC_SALOMA_FEES: PublicSalomaFees = {
+  tradeFeePct: 0.1,
+  exchangeFeePct: 0.1,
+  withdrawFeePct: 0.15,
+  networkFeeUsdt: 0.5
+};
+
 export interface BackendPublicCoin {
   symbol: string;
   name: string;
@@ -1132,10 +1146,22 @@ export interface BackendPublicCoin {
   volume24hUsd: number;
 }
 
+export async function fetchSalomaFees(): Promise<PublicSalomaFees | null> {
+  try {
+    const res = await fetch('/api/fees');
+    if (!res.ok) return null;
+    const data = (await res.json()) as { salomaFees?: PublicSalomaFees };
+    return data.salomaFees || null;
+  } catch {
+    return null;
+  }
+}
+
 export async function fetchSalomaMarketPrices(): Promise<{
   coins: BackendPublicCoin[];
   activeExchange: 'BYBIT' | 'OKX' | 'BINANCE';
   wsOnline?: boolean;
+  salomaFees?: PublicSalomaFees;
   latencyMs: number;
   ok: boolean;
 }> {
@@ -1148,11 +1174,13 @@ export async function fetchSalomaMarketPrices(): Promise<{
       coins?: BackendPublicCoin[];
       activeExchange?: 'BYBIT' | 'OKX' | 'BINANCE';
       wsOnline?: boolean;
+      salomaFees?: PublicSalomaFees;
     };
     return {
       coins: Array.isArray(data.coins) ? data.coins : [],
       activeExchange: data.activeExchange || 'BYBIT',
       wsOnline: Boolean(data.wsOnline),
+      salomaFees: data.salomaFees,
       latencyMs,
       ok: Array.isArray(data.coins) && data.coins.length > 0
     };
@@ -1187,6 +1215,7 @@ export interface PriceStreamHandlers {
     coins: BackendPublicCoin[];
     activeExchange: 'BYBIT' | 'OKX' | 'BINANCE';
     wsOnline: boolean;
+    salomaFees?: PublicSalomaFees;
     updatedAt: number;
   }) => void;
   onTick: (payload: {
@@ -1239,6 +1268,7 @@ export function subscribeToPricesWebSocket(handlers: PriceStreamHandlers): () =>
           coin?: BackendPublicCoin;
           activeExchange?: 'BYBIT' | 'OKX' | 'BINANCE';
           wsOnline?: boolean;
+          salomaFees?: PublicSalomaFees;
           updatedAt?: number;
         };
         if (msg.type === 'snapshot' && Array.isArray(msg.coins)) {
@@ -1246,6 +1276,7 @@ export function subscribeToPricesWebSocket(handlers: PriceStreamHandlers): () =>
             coins: msg.coins,
             activeExchange: msg.activeExchange || 'BYBIT',
             wsOnline: Boolean(msg.wsOnline ?? true),
+            salomaFees: msg.salomaFees,
             updatedAt: msg.updatedAt || Date.now()
           });
         } else if (msg.type === 'tick' && msg.coin) {
@@ -1293,7 +1324,8 @@ export function subscribeToPricesWebSocket(handlers: PriceStreamHandlers): () =>
 export function formatCoinPrice(val: number): string {
   if (val < 0.0001) return val.toFixed(8);
   if (val < 0.001) return val.toFixed(7);
-  if (val < 1) return val.toFixed(4);
-  if (val < 100) return val.toFixed(2);
+  if (val < 1) return val.toFixed(5);
+  if (val < 10) return val.toFixed(4);
+  if (val < 100) return val.toFixed(3);
   return val.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 }

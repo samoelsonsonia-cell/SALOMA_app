@@ -67,6 +67,8 @@ import {
   Coin,
   BackendPublicCoin,
   ApiProviderStatus,
+  PublicSalomaFees,
+  DEFAULT_PUBLIC_SALOMA_FEES,
   INITIAL_COINS,
   INITIAL_API_PROVIDERS,
   getBlockchainFromNetwork,
@@ -225,7 +227,12 @@ export interface AdminMarketComparisonRow {
   symbol: string;
   name: string;
   bybitPrice: number;
+  sponsorPrice?: number;
+  marginPct?: number;
   salomaPrice: number;
+  clientPrice?: number;
+  estimatedFee?: number;
+  estimatedNetProfit?: number;
   spreadDiff: number;
   spreadPct: number;
   bybitHiddenFeePct: number;
@@ -237,6 +244,7 @@ export interface AdminApiProviderEntry {
   label: string;
   enabled: boolean;
   isPrimary: boolean;
+  marginPct?: number;
   hasApiKey: boolean;
   apiKeyMasked: string;
   hasSecret: boolean;
@@ -248,6 +256,28 @@ export interface AdminApiProviderEntry {
 export interface AdminApisConfig {
   primaryApi: 'bybit' | 'okx' | 'binance';
   providers: AdminApiProviderEntry[];
+}
+
+export interface AdminLiquidityAlert {
+  id: string;
+  sponsor: 'BYBIT' | 'OKX' | 'BINANCE';
+  side: 'BUY' | 'SELL';
+  asset: string;
+  pair: string;
+  requiredAmount: number;
+  availableAmount: number;
+  message: string;
+  reason: string;
+  timestamp: string;
+  active: boolean;
+}
+
+export interface AdminSalomaFeesConfig {
+  bybitRecoveryMarginPct: number;
+  tradeFeePct: number;
+  exchangeFeePct: number;
+  withdrawFeePct: number;
+  networkFeeUsdt: number;
 }
 
 function parseCoinsJson(raw: unknown): Record<string, number> {
@@ -390,6 +420,7 @@ export default function App() {
   const [isWsLive, setIsWsLive] = useState<boolean>(false);
   const isWsLiveRef = useRef<boolean>(false);
   const [coins, setCoins] = useState<Coin[]>(INITIAL_COINS);
+  const [salomaFees, setSalomaFees] = useState<PublicSalomaFees>(DEFAULT_PUBLIC_SALOMA_FEES);
   const apiProvidersRef = useRef(apiProviders);
   apiProvidersRef.current = apiProviders;
 
@@ -435,6 +466,14 @@ export default function App() {
     [selectedWalletCoin]
   );
 
+  const effectiveWalletNetworkFee = useMemo(() => {
+    const sym = selectedWalletCoin.symbol.toUpperCase();
+    if (sym === 'USDT') return Number((salomaFees.networkFeeUsdt || 0.5).toFixed(4));
+    const p = selectedWalletCoin.price || 0;
+    if (p > 0) return Number(((salomaFees.networkFeeUsdt || 0.5) / p).toFixed(8));
+    return activeNetwork.withdrawFee;
+  }, [selectedWalletCoin, salomaFees.networkFeeUsdt, activeNetwork.withdrawFee]);
+
   useEffect(() => {
     let mounted = true;
     const pendingTicks = new Map<string, BackendPublicCoin>();
@@ -449,10 +488,14 @@ export default function App() {
     };
 
     const runLiveSync = async () => {
-      const { coins: backendCoins, activeExchange, latencyMs, ok, wsOnline } = await fetchSalomaMarketPrices();
+      const { coins: backendCoins, activeExchange, latencyMs, ok, wsOnline, salomaFees: fetchedFees } =
+        await fetchSalomaMarketPrices();
       if (!mounted) return;
 
       setActiveBrokerExchange(activeExchange);
+      if (fetchedFees) {
+        setSalomaFees(fetchedFees);
+      }
       const liveNow = Boolean(wsOnline || isWsLiveRef.current || ok);
       setIsWsLive(liveNow);
       setApiProviders(prev =>
@@ -475,6 +518,9 @@ export default function App() {
       onSnapshot: payload => {
         if (!mounted) return;
         setActiveBrokerExchange(payload.activeExchange);
+        if (payload.salomaFees) {
+          setSalomaFees(payload.salomaFees);
+        }
         isWsLiveRef.current = true;
         setIsWsLive(true);
         setApiProviders(prev =>
@@ -1207,10 +1253,17 @@ export default function App() {
   const [tradeAmountCurrency, setTradeAmountCurrency] = useState<string>('ARIARY');
   const [tradeAmountInput, setTradeAmountInput] = useState<string>('5000');
   const [selectedTradePercent, setSelectedTradePercent] = useState<number | 'MAX' | null>(null);
+  const [spotOrderUnit, setSpotOrderUnit] = useState<'USDT' | 'CRYPTO'>('USDT');
+  const [spotAmountInput, setSpotAmountInput] = useState<string>('10');
+  const [selectedSpotPercent, setSelectedSpotPercent] = useState<number | 'MAX' | null>(null);
+  const [spotUnavailableNotice, setSpotUnavailableNotice] = useState<string | null>(null);
   const [tradeSubmitting, setTradeSubmitting] = useState<boolean>(false);
   const [autoBuyEnabled, setAutoBuyEnabled] = useState<boolean>(false);
   const [autoSellEnabled, setAutoSellEnabled] = useState<boolean>(false);
   const autoTradeBusyRef = useRef<boolean>(false);
+
+  const clientUsdtBalance = Number(coinsJson['USDT'] || 0);
+  const clientSelectedCryptoBalance = Number(coinsJson[selectedCoin.symbol.toUpperCase()] || 0);
 
   // --- AUTO STRATEGIE (BOTS BINANCE: Spot Grid Bot & DCA Bot) ---
   const [selectedBotType, setSelectedBotType] = useState<'SPOT_GRID' | 'DCA'>('SPOT_GRID');
@@ -1386,7 +1439,8 @@ export default function App() {
   const applyTradePercent = (pctValue: number | 'MAX') => {
     const pct = pctValue === 'MAX' ? 100 : Math.max(0, Math.min(100, pctValue));
     setSelectedTradePercent(pctValue);
-    const computedAr = (soldeCompteTradeAr * pct) / 100;
+    const feeRate = (salomaFees.tradeFeePct || 0.1) / 100;
+    const computedAr = Math.floor(((soldeCompteTradeAr * pct) / 100) / (1 + feeRate));
     setTradeAmountInput(
       formatConvertedCurrencyAmount(
         computedAr,
@@ -1421,17 +1475,173 @@ export default function App() {
     [coins]
   );
 
-  const handleExecuteTrade = useCallback(
-    async (side: 'BUY' | 'SELL', mode = 'Manuel'): Promise<boolean> => {
+  const spotNumericInput = useMemo(
+    () => parseDecimalValue(spotAmountInput),
+    [spotAmountInput, parseDecimalValue]
+  );
+
+  const spotOrderUsdtEquiv = useMemo(() => {
+    if (spotOrderUnit === 'USDT') return spotNumericInput;
+    return spotNumericInput * (selectedCoin.price || 0);
+  }, [spotOrderUnit, spotNumericInput, selectedCoin.price]);
+
+  const spotOrderCryptoEquiv = useMemo(() => {
+    if (spotOrderUnit === 'CRYPTO') return spotNumericInput;
+    const p = selectedCoin.price || 1;
+    return p > 0 ? spotNumericInput / p : 0;
+  }, [spotOrderUnit, spotNumericInput, selectedCoin.price]);
+
+  const applySpotPercent = (pctValue: number | 'MAX') => {
+    const pct = pctValue === 'MAX' ? 100 : Math.max(0, Math.min(100, pctValue));
+    setSelectedSpotPercent(pctValue);
+    const feeRate = (salomaFees.tradeFeePct || 0.1) / 100;
+    if (spotOrderUnit === 'USDT') {
+      const val = ((clientUsdtBalance * pct) / 100) / (1 + feeRate);
+      setSpotAmountInput(val > 0 ? String(Number(val.toFixed(4))) : '0');
+    } else {
+      const val = (clientSelectedCryptoBalance * pct) / 100;
+      setSpotAmountInput(val > 0 ? String(Number(val.toFixed(6))) : '0');
+    }
+  };
+
+  const handleExecuteSpotOrder = useCallback(
+    async (side: 'BUY' | 'SELL'): Promise<boolean> => {
       if (!sessionToken) return false;
       if (!(await ensureOnlineOrBlock())) return false;
 
-      if (soldeCompteTradeAr <= 0 || numericAmountAr > soldeCompteTradeAr) {
-        showToast('Solde Compte Trade insuffisant. Convertissez depuis votre Wallet vers Compte Trade.');
+      if (selectedCoin.symbol.toUpperCase() === 'USDT') {
+        showToast('Sélectionnez une cryptomonnaie différente de USDT pour BUY/SELL Spot.');
         return false;
       }
+      if (spotNumericInput <= 0 || spotOrderUsdtEquiv < 0.1) {
+        showToast('Montant minimum Spot SALOMA : 0.10 USDT.');
+        return false;
+      }
+
+      const feeRate = (salomaFees.tradeFeePct || 0.1) / 100;
+      const estimatedFeeUsdt = Number((spotOrderUsdtEquiv * feeRate).toFixed(6));
+      const requiredBuyUsdt = Number((spotOrderUsdtEquiv + estimatedFeeUsdt).toFixed(6));
+
+      if (side === 'BUY') {
+        if (clientUsdtBalance <= 0 || requiredBuyUsdt > clientUsdtBalance + 1e-8) {
+          showToast(
+            `Solde USDT SALOMA insuffisant (Requis : ${requiredBuyUsdt.toFixed(4)} USDT dont Frais SALOMA ${salomaFees.tradeFeePct}% = ${estimatedFeeUsdt.toFixed(4)} USDT).`
+          );
+          return false;
+        }
+      } else {
+        if (
+          clientSelectedCryptoBalance <= 0 ||
+          spotOrderCryptoEquiv > clientSelectedCryptoBalance + 1e-10
+        ) {
+          showToast(
+            `Solde ${selectedCoin.symbol} SALOMA insuffisant (${clientSelectedCryptoBalance.toFixed(6)} ${selectedCoin.symbol}).`
+          );
+          return false;
+        }
+      }
+
+      setTradeSubmitting(true);
+      setSpotUnavailableNotice(null);
+      try {
+        const res = await apiRequest<{
+          ok: boolean;
+          execution?: {
+            side: 'BUY' | 'SELL';
+            symbol: string;
+            usdtAmount: number;
+            grossUsdt?: number;
+            feeUsdt?: number;
+            totalUsdt?: number;
+            tradeFeePct?: number;
+            cryptoQty: number;
+            clientPrice: number;
+          };
+        }>('/api/spot/order', {
+          method: 'POST',
+          token: sessionToken,
+          body: {
+            side,
+            symbol: selectedCoin.symbol,
+            amount: spotNumericInput,
+            unit: spotOrderUnit === 'USDT' ? 'USDT' : selectedCoin.symbol
+          }
+        });
+        await loadDashboard(sessionToken);
+        const ex = res.execution;
+        const feeShow = Number(ex?.feeUsdt ?? estimatedFeeUsdt).toFixed(4);
+        const feePctShow = ex?.tradeFeePct ?? salomaFees.tradeFeePct;
+        if (side === 'BUY') {
+          const totalShow = Number(ex?.totalUsdt ?? requiredBuyUsdt).toFixed(4);
+          showToast(
+            `✓ BUY Spot : +${(ex?.cryptoQty ?? spotOrderCryptoEquiv).toFixed(6)} ${selectedCoin.symbol} • Frais SALOMA ${feePctShow}% = ${feeShow} USDT • Total : ${totalShow} USDT`
+          );
+        } else {
+          const netShow = Number(ex?.usdtAmount ?? Math.max(0, spotOrderUsdtEquiv - estimatedFeeUsdt)).toFixed(4);
+          showToast(
+            `✓ SELL Spot : +${netShow} USDT net (Frais SALOMA ${feePctShow}% = ${feeShow} USDT)`
+          );
+        }
+        return true;
+      } catch (err) {
+        const apiErr = err as ApiError;
+        if (apiErr?.isNetworkError) {
+          setIsOnline(false);
+          setOfflineBlocked(true);
+        }
+        const msg =
+          apiErr?.liquidityUnavailable ||
+          (err instanceof Error && err.message.includes('indisponible'))
+            ? 'Marché momentanément indisponible'
+            : err instanceof Error
+            ? err.message
+            : 'Marché momentanément indisponible';
+        if (apiErr?.liquidityUnavailable || msg.includes('indisponible')) {
+          setSpotUnavailableNotice('Marché momentanément indisponible');
+        }
+        showToast(msg);
+        return false;
+      } finally {
+        setTradeSubmitting(false);
+      }
+    },
+    [
+      sessionToken,
+      ensureOnlineOrBlock,
+      selectedCoin,
+      spotNumericInput,
+      spotOrderUnit,
+      spotOrderUsdtEquiv,
+      spotOrderCryptoEquiv,
+      salomaFees.tradeFeePct,
+      clientUsdtBalance,
+      clientSelectedCryptoBalance,
+      loadDashboard,
+      showToast,
+      setIsOnline
+    ]
+  );
+
+  const handleExecuteTrade = useCallback(
+    async (side: 'BUY' | 'SELL', mode = 'Manuel'): Promise<boolean> => {
+      if (tradingModeType === 'SPOT' && mode === 'Manuel') {
+        return handleExecuteSpotOrder(side);
+      }
+      if (!sessionToken) return false;
+      if (!(await ensureOnlineOrBlock())) return false;
+
+      const feeRate = (salomaFees.tradeFeePct || 0.1) / 100;
+      const estimatedFeeAr = Math.round(numericAmountAr * feeRate);
+      const totalRequiredAr = numericAmountAr + estimatedFeeAr;
+
       if (numericAmountAr < 500) {
         showToast('Montant minimum de trading : 500 Ar.');
+        return false;
+      }
+      if (soldeCompteTradeAr <= 0 || totalRequiredAr > soldeCompteTradeAr) {
+        showToast(
+          `Solde Compte Trade insuffisant (Requis : ${totalRequiredAr.toLocaleString('fr-FR')} Ar dont Frais SALOMA ${salomaFees.tradeFeePct}% = ${estimatedFeeAr.toLocaleString('fr-FR')} Ar).`
+        );
         return false;
       }
 
@@ -1452,7 +1662,7 @@ export default function App() {
         });
         await loadDashboard(sessionToken);
         showToast(
-          `${mode !== 'Manuel' ? `[AUTO] ` : ''}${side === 'BUY' ? 'BUY (Achat)' : 'SELL (Vente)'} x${lev} via ${activeBrokerExchange} ouvert à $${formatCoinPrice(selectedCoin.price)} (Frais 0.1%)`
+          `${mode !== 'Manuel' ? `[AUTO] ` : ''}${side === 'BUY' ? 'BUY' : 'SELL'} x${lev} • Frais SALOMA ${salomaFees.tradeFeePct}% = ${estimatedFeeAr.toLocaleString('fr-FR')} Ar`
         );
         return true;
       } catch (err) {
@@ -1467,14 +1677,15 @@ export default function App() {
       }
     },
     [
+      tradingModeType,
+      handleExecuteSpotOrder,
       sessionToken,
       ensureOnlineOrBlock,
+      salomaFees.tradeFeePct,
       soldeCompteTradeAr,
       numericAmountAr,
-      tradingModeType,
       numericLeverage,
       selectedCoin,
-      activeBrokerExchange,
       loadDashboard,
       showToast,
       setIsOnline
@@ -1493,6 +1704,27 @@ export default function App() {
       return;
     }
     if (!(await ensureOnlineOrBlock())) return;
+
+    if (tradingModeType === 'SPOT') {
+      if (side === 'BUY') {
+        if (spotOrderUsdtEquiv < 0.1 || spotOrderUsdtEquiv > clientUsdtBalance) {
+          showToast('Solde USDT SALOMA insuffisant pour AUTO BUY.');
+          return;
+        }
+        setAutoBuyEnabled(true);
+        showToast(`🤖 AUTO BUY Spot activé sur ${selectedCoin.symbol}/USDT`);
+        void handleExecuteSpotOrder('BUY');
+      } else {
+        if (spotOrderUsdtEquiv < 0.1 || spotOrderCryptoEquiv > clientSelectedCryptoBalance) {
+          showToast(`Solde ${selectedCoin.symbol} SALOMA insuffisant pour AUTO SELL.`);
+          return;
+        }
+        setAutoSellEnabled(true);
+        showToast(`🤖 AUTO SELL Spot activé sur ${selectedCoin.symbol}/USDT`);
+        void handleExecuteSpotOrder('SELL');
+      }
+      return;
+    }
 
     if (soldeCompteTradeAr <= 0 || numericAmountAr > soldeCompteTradeAr) {
       showToast('Solde Compte Trade insuffisant. Convertissez depuis votre Wallet vers Compte Trade.');
@@ -1530,13 +1762,19 @@ export default function App() {
       autoTradeBusyRef.current = true;
       try {
         if (autoBuyEnabled) {
-          const okBuy = await handleExecuteTrade('BUY', 'Auto Buy');
+          const okBuy =
+            tradingModeType === 'SPOT'
+              ? await handleExecuteSpotOrder('BUY')
+              : await handleExecuteTrade('BUY', 'Auto Buy');
           if (!okBuy) {
             setAutoBuyEnabled(false);
           }
         }
         if (autoSellEnabled) {
-          const okSell = await handleExecuteTrade('SELL', 'Auto Sell');
+          const okSell =
+            tradingModeType === 'SPOT'
+              ? await handleExecuteSpotOrder('SELL')
+              : await handleExecuteTrade('SELL', 'Auto Sell');
           if (!okSell) {
             setAutoSellEnabled(false);
           }
@@ -1554,6 +1792,8 @@ export default function App() {
     offlineBlocked,
     autoBuyEnabled,
     autoSellEnabled,
+    tradingModeType,
+    handleExecuteSpotOrder,
     handleExecuteTrade
   ]);
 
@@ -1837,10 +2077,13 @@ export default function App() {
     if (!(await ensureOnlineOrBlock())) return;
     const coinSym = selectedWalletCoin.symbol.toUpperCase();
     const amt = parseFloat(withdrawAmountInput);
-    const salomaWithdrawFee = (amt || 0) * 0.0015;
-    const totalFrais = salomaWithdrawFee + activeNetwork.withdrawFee;
+    const withdrawRate = (salomaFees.withdrawFeePct || 0.15) / 100;
+    const salomaWithdrawFee = (amt || 0) * withdrawRate;
+    const totalFrais = salomaWithdrawFee + effectiveWalletNetworkFee;
     if (isNaN(amt) || amt <= totalFrais) {
-      showToast(`Le montant doit dépasser 0.15% + frais réseau (${activeNetwork.withdrawFee} ${coinSym}).`);
+      showToast(
+        `Le montant doit dépasser les frais (Frais SALOMA ${salomaFees.withdrawFeePct}% + Frais Réseau ${effectiveWalletNetworkFee} ${coinSym}).`
+      );
       return;
     }
     if (amt < activeNetwork.minWithdraw) {
@@ -2261,12 +2504,49 @@ export default function App() {
     primaryExchange?: 'BYBIT' | 'OKX' | 'BINANCE';
   } | null>(null);
   const [adminApisConfig, setAdminApisConfig] = useState<AdminApisConfig | null>(null);
+  const [adminLiquidityAlerts, setAdminLiquidityAlerts] = useState<AdminLiquidityAlert[]>([]);
   const [apiFormInputs, setApiFormInputs] = useState<
     Record<'bybit' | 'okx' | 'binance', { apiKey: string; secret: string; passphrase: string }>
   >({
     bybit: { apiKey: '', secret: '', passphrase: '' },
     okx: { apiKey: '', secret: '', passphrase: '' },
     binance: { apiKey: '', secret: '', passphrase: '' }
+  });
+  const [apiMarginInputs, setApiMarginInputs] = useState<Record<'bybit' | 'okx' | 'binance', string>>({
+    bybit: '0.1',
+    okx: '0.1',
+    binance: '0.1'
+  });
+  const [adminFeeInputs, setAdminFeeInputs] = useState<{
+    bybitRecoveryMarginPct: string;
+    tradeFeePct: string;
+    exchangeFeePct: string;
+    withdrawFeePct: string;
+    networkFeeUsdt: string;
+  }>({
+    bybitRecoveryMarginPct: '0.1',
+    tradeFeePct: '0.1',
+    exchangeFeePct: '0.1',
+    withdrawFeePct: '0.15',
+    networkFeeUsdt: '0.50'
+  });
+  const [adminFeeSaving, setAdminFeeSaving] = useState<boolean>(false);
+  const [sponsorConnectionStatus, setSponsorConnectionStatus] = useState<
+    Record<
+      'bybit' | 'okx' | 'binance',
+      {
+        connected: boolean;
+        usdtBalance: number;
+        source?: string;
+        message?: string;
+        loading: boolean;
+        tested: boolean;
+      }
+    >
+  >({
+    bybit: { connected: false, usdtBalance: 0, loading: false, tested: false },
+    okx: { connected: false, usdtBalance: 0, loading: false, tested: false },
+    binance: { connected: false, usdtBalance: 0, loading: false, tested: false }
   });
   const [apiActionLoading, setApiActionLoading] = useState<string | null>(null);
 
@@ -2354,6 +2634,8 @@ export default function App() {
           profits?: AdminProfitsSummary;
           marketComparison?: AdminMarketComparisonRow[];
           apis?: AdminApisConfig;
+          salomaFees?: AdminSalomaFeesConfig;
+          liquidityAlerts?: AdminLiquidityAlert[];
           bybitStatus?: {
             online: boolean;
             latencyMs: number;
@@ -2373,7 +2655,36 @@ export default function App() {
         setAdminProblems(data.problemes || []);
         setAdminProfits(data.profits || null);
         setAdminMarketComparison(data.marketComparison || []);
-        if (data.apis) setAdminApisConfig(data.apis);
+        setAdminLiquidityAlerts(data.liquidityAlerts || []);
+        if (data.salomaFees) {
+          setAdminFeeInputs({
+            bybitRecoveryMarginPct: String(data.salomaFees.bybitRecoveryMarginPct ?? 0.1),
+            tradeFeePct: String(data.salomaFees.tradeFeePct ?? 0.1),
+            exchangeFeePct: String(data.salomaFees.exchangeFeePct ?? 0.1),
+            withdrawFeePct: String(data.salomaFees.withdrawFeePct ?? 0.15),
+            networkFeeUsdt: String(data.salomaFees.networkFeeUsdt ?? 0.5)
+          });
+          setSalomaFees({
+            tradeFeePct: Number(data.salomaFees.tradeFeePct ?? 0.1),
+            exchangeFeePct: Number(data.salomaFees.exchangeFeePct ?? 0.1),
+            withdrawFeePct: Number(data.salomaFees.withdrawFeePct ?? 0.15),
+            networkFeeUsdt: Number(data.salomaFees.networkFeeUsdt ?? 0.5)
+          });
+        }
+        if (data.apis) {
+          setAdminApisConfig(data.apis);
+          const nextMargins: Record<'bybit' | 'okx' | 'binance', string> = {
+            bybit: '0.1',
+            okx: '0.1',
+            binance: '0.1'
+          };
+          for (const prov of data.apis.providers || []) {
+            if (prov.id === 'bybit' || prov.id === 'okx' || prov.id === 'binance') {
+              nextMargins[prov.id] = String(prov.marginPct ?? 0.1);
+            }
+          }
+          setApiMarginInputs(nextMargins);
+        }
         setAdminBybitStatus(data.bybitStatus || null);
       } catch (err) {
         if (!isApiNotFoundError(err)) {
@@ -2385,6 +2696,86 @@ export default function App() {
     },
     [adminSessionToken]
   );
+
+  const handleClearLiquidityAlert = useCallback(
+    async (alertId?: string) => {
+      try {
+        const res = await apiRequest<{ ok: boolean; liquidityAlerts: AdminLiquidityAlert[] }>(
+          '/api/admin/liquidity-alerts/clear',
+          {
+            method: 'POST',
+            adminPin,
+            adminEmail,
+            adminToken: adminSessionToken,
+            body: alertId ? { id: alertId } : {}
+          }
+        );
+        setAdminLiquidityAlerts(res.liquidityAlerts || []);
+        showToast('Alerte liquidité marquée comme résolue');
+      } catch (err) {
+        showToast(err instanceof Error ? err.message : 'Erreur résolution alerte.');
+      }
+    },
+    [adminPin, adminEmail, adminSessionToken, showToast]
+  );
+
+  const handleTestSponsorConnection = useCallback(
+    async (provider: 'bybit' | 'okx' | 'binance') => {
+      setSponsorConnectionStatus(prev => ({
+        ...prev,
+        [provider]: { ...prev[provider], loading: true }
+      }));
+      try {
+        const res = await apiRequest<{
+          sponsor?: string;
+          connected: boolean;
+          usdtBalance: number;
+          source?: string;
+          message?: string;
+          liquidityAlerts?: AdminLiquidityAlert[];
+        }>(`/api/${provider}/status`, {
+          method: 'GET',
+          adminPin,
+          adminEmail,
+          adminToken: adminSessionToken
+        });
+        setSponsorConnectionStatus(prev => ({
+          ...prev,
+          [provider]: {
+            connected: Boolean(res.connected),
+            usdtBalance: Number(res.usdtBalance) || 0,
+            source: res.source,
+            message: res.message,
+            loading: false,
+            tested: true
+          }
+        }));
+        if (Array.isArray(res.liquidityAlerts)) {
+          setAdminLiquidityAlerts(res.liquidityAlerts);
+        }
+      } catch (err) {
+        setSponsorConnectionStatus(prev => ({
+          ...prev,
+          [provider]: {
+            connected: false,
+            usdtBalance: 0,
+            message: err instanceof Error ? err.message : 'Erreur test connexion.',
+            loading: false,
+            tested: true
+          }
+        }));
+      }
+    },
+    [adminPin, adminEmail, adminSessionToken]
+  );
+
+  useEffect(() => {
+    if (screen === 'admin' && adminTab === 'apis') {
+      void handleTestSponsorConnection('bybit');
+      void handleTestSponsorConnection('okx');
+      void handleTestSponsorConnection('binance');
+    }
+  }, [screen, adminTab, handleTestSponsorConnection]);
 
   const handleAdminSaveApiKeys = async (provider: 'bybit' | 'okx' | 'binance') => {
     if (!(await ensureOnlineOrBlock())) return;
@@ -2412,8 +2803,131 @@ export default function App() {
         [provider]: { apiKey: '', secret: '', passphrase: '' }
       }));
       showToast(`✓ Clés ${provider.toUpperCase()} enregistrées et masquées (****) !`);
+      void handleTestSponsorConnection(provider);
     } catch (err) {
       showToast(err instanceof Error ? err.message : 'Erreur sauvegarde API.');
+    } finally {
+      setApiActionLoading(null);
+    }
+  };
+
+  const handleAdminSaveFees = async () => {
+    if (!(await ensureOnlineOrBlock())) return;
+    const parseNum = (s: string) => Number(String(s || '').replace(',', '.'));
+    const bybitRecoveryMarginPct = parseNum(adminFeeInputs.bybitRecoveryMarginPct);
+    const tradeFeePct = parseNum(adminFeeInputs.tradeFeePct);
+    const exchangeFeePct = parseNum(adminFeeInputs.exchangeFeePct);
+    const withdrawFeePct = parseNum(adminFeeInputs.withdrawFeePct);
+    const networkFeeUsdt = parseNum(adminFeeInputs.networkFeeUsdt);
+
+    if (
+      !Number.isFinite(bybitRecoveryMarginPct) ||
+      bybitRecoveryMarginPct < 0 ||
+      bybitRecoveryMarginPct > 5 ||
+      !Number.isFinite(tradeFeePct) ||
+      tradeFeePct < 0 ||
+      tradeFeePct > 5 ||
+      !Number.isFinite(exchangeFeePct) ||
+      exchangeFeePct < 0 ||
+      exchangeFeePct > 5 ||
+      !Number.isFinite(withdrawFeePct) ||
+      withdrawFeePct < 0 ||
+      withdrawFeePct > 5
+    ) {
+      showToast('Les pourcentages (%) doivent être compris entre 0 et 5%.');
+      return;
+    }
+    if (!Number.isFinite(networkFeeUsdt) || networkFeeUsdt < 0 || networkFeeUsdt > 100) {
+      showToast('Frais Réseau (USDT) doit être compris entre 0 et 100 USDT.');
+      return;
+    }
+
+    setAdminFeeSaving(true);
+    try {
+      const res = await apiRequest<{
+        ok: boolean;
+        salomaFees: AdminSalomaFeesConfig;
+        apis: AdminApisConfig;
+        marketComparison?: AdminMarketComparisonRow[];
+      }>('/api/admin/fees', {
+        method: 'POST',
+        adminPin,
+        adminEmail,
+        adminToken: adminSessionToken,
+        body: {
+          bybitRecoveryMarginPct,
+          tradeFeePct,
+          exchangeFeePct,
+          withdrawFeePct,
+          networkFeeUsdt
+        }
+      });
+      if (res.salomaFees) {
+        setAdminFeeInputs({
+          bybitRecoveryMarginPct: String(res.salomaFees.bybitRecoveryMarginPct),
+          tradeFeePct: String(res.salomaFees.tradeFeePct),
+          exchangeFeePct: String(res.salomaFees.exchangeFeePct),
+          withdrawFeePct: String(res.salomaFees.withdrawFeePct),
+          networkFeeUsdt: String(res.salomaFees.networkFeeUsdt)
+        });
+        setSalomaFees({
+          tradeFeePct: res.salomaFees.tradeFeePct,
+          exchangeFeePct: res.salomaFees.exchangeFeePct,
+          withdrawFeePct: res.salomaFees.withdrawFeePct,
+          networkFeeUsdt: res.salomaFees.networkFeeUsdt
+        });
+        setApiMarginInputs(prev => ({
+          ...prev,
+          bybit: String(res.salomaFees.bybitRecoveryMarginPct)
+        }));
+      }
+      if (res.apis) setAdminApisConfig(res.apis);
+      if (res.marketComparison) setAdminMarketComparison(res.marketComparison);
+      showToast('✓ Frais SALOMA & Marge récupération Bybit mis à jour !');
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : 'Erreur sauvegarde frais Admin.');
+    } finally {
+      setAdminFeeSaving(false);
+    }
+  };
+
+  const handleAdminSaveApiMargin = async (provider: 'bybit' | 'okx' | 'binance') => {
+    if (!(await ensureOnlineOrBlock())) return;
+    const parsed = Number(String(apiMarginInputs[provider] || '').replace(',', '.'));
+    if (!Number.isFinite(parsed) || parsed < 0 || parsed > 5) {
+      showToast('La Marge % doit être comprise entre 0 et 5%.');
+      return;
+    }
+    setApiActionLoading(`margin-${provider}`);
+    try {
+      const res = await apiRequest<{
+        apis: AdminApisConfig;
+        salomaFees?: AdminSalomaFeesConfig;
+        marketComparison?: AdminMarketComparisonRow[];
+      }>(`/api/admin/apis/${provider}/margin`, {
+        method: 'POST',
+        adminPin,
+        adminEmail,
+        adminToken: adminSessionToken,
+        body: { marginPct: parsed }
+      });
+      setAdminApisConfig(res.apis);
+      if (res.marketComparison) {
+        setAdminMarketComparison(res.marketComparison);
+      }
+      if (res.salomaFees) {
+        setAdminFeeInputs(prev => ({
+          ...prev,
+          bybitRecoveryMarginPct: String(res.salomaFees!.bybitRecoveryMarginPct)
+        }));
+      }
+      const savedEntry = res.apis.providers.find(p => p.id === provider);
+      if (savedEntry) {
+        setApiMarginInputs(prev => ({ ...prev, [provider]: String(savedEntry.marginPct ?? parsed) }));
+      }
+      showToast(`✓ Marge ${provider.toUpperCase()} mise à jour (${parsed}%) !`);
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : 'Erreur mise à jour marge.');
     } finally {
       setApiActionLoading(null);
     }
@@ -2423,7 +2937,10 @@ export default function App() {
     if (!(await ensureOnlineOrBlock())) return;
     setApiActionLoading(`toggle-${provider}`);
     try {
-      const res = await apiRequest<{ apis: AdminApisConfig }>(`/api/admin/apis/${provider}/toggle`, {
+      const res = await apiRequest<{
+        apis: AdminApisConfig;
+        marketComparison?: AdminMarketComparisonRow[];
+      }>(`/api/admin/apis/${provider}/toggle`, {
         method: 'POST',
         adminPin,
         adminEmail,
@@ -2431,6 +2948,7 @@ export default function App() {
         body: { enabled: nextEnabled }
       });
       setAdminApisConfig(res.apis);
+      if (res.marketComparison) setAdminMarketComparison(res.marketComparison);
       showToast(`${provider.toUpperCase()} ${nextEnabled ? 'activée' : 'désactivée'}.`);
     } catch (err) {
       showToast(err instanceof Error ? err.message : 'Action impossible.');
@@ -2445,6 +2963,8 @@ export default function App() {
     try {
       const res = await apiRequest<{
         apis: AdminApisConfig;
+        salomaFees?: AdminSalomaFeesConfig;
+        marketComparison?: AdminMarketComparisonRow[];
         bybitStatus?: {
           online: boolean;
           latencyMs: number;
@@ -2459,7 +2979,17 @@ export default function App() {
         body: { primaryApi: provider }
       });
       setAdminApisConfig(res.apis);
+      if (res.marketComparison) setAdminMarketComparison(res.marketComparison);
       if (res.bybitStatus) setAdminBybitStatus(res.bybitStatus);
+      if (res.salomaFees) {
+        setAdminFeeInputs({
+          bybitRecoveryMarginPct: String(res.salomaFees.bybitRecoveryMarginPct),
+          tradeFeePct: String(res.salomaFees.tradeFeePct),
+          exchangeFeePct: String(res.salomaFees.exchangeFeePct),
+          withdrawFeePct: String(res.salomaFees.withdrawFeePct),
+          networkFeeUsdt: String(res.salomaFees.networkFeeUsdt)
+        });
+      }
       setActiveBrokerExchange(provider.toUpperCase() as 'BYBIT' | 'OKX' | 'BINANCE');
       showToast(`★ ${provider.toUpperCase()} définie comme API principale pour les ordres !`);
     } catch (err) {
@@ -3498,7 +4028,7 @@ export default function App() {
               <strong>2. Dépôts, Retraits & KYC :</strong> Toute demande de dépôt ou de retrait est enregistrée avec le statut initial « en_attente » pour vérification et validation sécurisée. Le niveau KYC 2 est requis avant tout retrait.
             </p>
             <p>
-              <strong>3. Modèle Broker Pur, Frais & Marge Isolée :</strong> Des frais transparents de 0,1% s'appliquent sur le Trading, 0,1% sur l'Échange, et 0,15% + frais réseau sur le Retrait seul. SALOMA agit uniquement comme pont d'exécution vers l'exchange actif avec marge isolée par position.
+              <strong>3. Exécution Marché &amp; Marge Isolée :</strong> SALOMA affiche directement le prix final en temps réel sur le Trading et l&apos;Échange, avec marge isolée individuelle par position. Les transferts blockchain externes affichent leurs paramètres réseau avant confirmation.
             </p>
           </div>
 
@@ -3561,7 +4091,7 @@ export default function App() {
               <strong>5. HISTORIQUE :</strong> Vous pouvez effacer votre historique Trade, Portefeuille et Earn à tout moment.
             </p>
             <p>
-              <strong>6. PARTAGE :</strong> Nous ne vendons JAMAIS vos données. Aucun partage avec Bybit, Binance, OKX ou autre plateforme sans votre accord.
+              <strong>6. PARTAGE :</strong> Nous ne vendons JAMAIS vos données. Aucun partage avec nos partenaires de marché ou toute autre plateforme sans votre accord.
             </p>
             <p>
               <strong>7. VOS DROITS :</strong> Vous pouvez demander la suppression de votre compte et de vos données à tout moment en contactant l&apos;Admin.
@@ -4455,7 +4985,7 @@ export default function App() {
                       <ArrowRightLeft className="w-3.5 h-3.5 text-[#8B5CF6]" />
                       Échange Instantané SALOMA
                     </span>
-                    <span className="text-[10px] font-mono font-bold text-amber-300">Frais 0.1%</span>
+                    <span className="text-[10px] font-mono font-bold text-emerald-300">Prix final inclus</span>
                   </div>
 
                   {/* TU DONNES */}
@@ -4533,8 +5063,9 @@ export default function App() {
                         {(() => {
                           const amt = parseDecimalValue(swapAmountInput);
                           if (amt <= 0 || !fromCurrencyObj.priceUsd || !toCurrencyObj.priceUsd) return '0.0000';
-                          const outAmt = ((amt * fromCurrencyObj.priceUsd) / toCurrencyObj.priceUsd) * 0.999;
-                          return outAmt < 1 ? outAmt.toFixed(6) : outAmt.toFixed(4);
+                          const brutOut = (amt * fromCurrencyObj.priceUsd) / toCurrencyObj.priceUsd;
+                          const netOut = brutOut * (1 - (salomaFees.exchangeFeePct || 0.1) / 100);
+                          return netOut < 1 ? netOut.toFixed(6) : netOut.toFixed(4);
                         })()}
                       </div>
                       <select
@@ -4557,7 +5088,7 @@ export default function App() {
                         )}{' '}
                         {toCurrencyObj.symbol === 'AR' ? 'Ar' : toCurrencyObj.symbol}
                       </span>
-                      <span className="text-emerald-400">Net après 0.1%</span>
+                      <span className="text-amber-300">Frais SALOMA : {salomaFees.exchangeFeePct}%</span>
                     </div>
                   </div>
 
@@ -4573,18 +5104,20 @@ export default function App() {
                   </button>
                 </div>
 
-                {/* TABLEAU FRAIS SALOMA 0.1% */}
+                {/* RÉCAPITULATIF ÉCHANGE */}
                 <div className="p-3.5 rounded-2xl bg-[#1D1240] border-2 border-[#8B5CF6]/50 space-y-2">
                   <span className="text-xs font-black text-white flex items-center gap-1.5">
                     <Activity className="w-3.5 h-3.5 text-purple-400" />
-                    Tableau : Frais SALOMA (0.1%) & Total après frais
+                    Récapitulatif de l&apos;Échange
                   </span>
                   {(() => {
-                    const amt = parseFloat(swapAmountInput) || 0;
+                    const amt = parseDecimalValue(swapAmountInput);
                     const taux = fromCurrencyObj.priceUsd / (toCurrencyObj.priceUsd || 1);
-                    const brut = amt * taux;
-                    const fee = brut * 0.001;
-                    const net = brut - fee;
+                    const brutRecu = amt * taux;
+                    const exchangeFeeAmt = brutRecu * ((salomaFees.exchangeFeePct || 0.1) / 100);
+                    const netRecu = Math.max(0, brutRecu - exchangeFeeAmt);
+                    const outDec = toCurrencyObj.symbol === 'AR' ? 2 : 6;
+                    const outLabel = toCurrencyObj.symbol === 'AR' ? 'Ar' : toCurrencyObj.symbol;
                     return (
                       <div className="overflow-hidden rounded-xl border border-purple-500/30 text-xs">
                         <table className="w-full text-left">
@@ -4596,15 +5129,30 @@ export default function App() {
                               </td>
                             </tr>
                             <tr>
-                              <td className="px-3 py-2 text-purple-300">Frais SALOMA (0.1%)</td>
+                              <td className="px-3 py-2 text-purple-300">Taux appliqué</td>
+                              <td className="px-3 py-2 text-right font-mono font-bold text-purple-200">
+                                1 {fromCurrencyObj.symbol === 'AR' ? 'Ar' : fromCurrencyObj.symbol} ≈{' '}
+                                {taux.toFixed(outDec)} {outLabel}
+                              </td>
+                            </tr>
+                            <tr>
+                              <td className="px-3 py-2 text-purple-300">Montant brut</td>
+                              <td className="px-3 py-2 text-right font-mono font-bold text-purple-100">
+                                {brutRecu.toFixed(outDec)} {outLabel}
+                              </td>
+                            </tr>
+                            <tr>
+                              <td className="px-3 py-2 text-amber-300 font-bold">
+                                Frais SALOMA ({salomaFees.exchangeFeePct}%)
+                              </td>
                               <td className="px-3 py-2 text-right font-mono font-bold text-amber-300">
-                                {fee.toFixed(6)} {toCurrencyObj.symbol === 'AR' ? 'Ar' : toCurrencyObj.symbol}
+                                -{exchangeFeeAmt.toFixed(outDec)} {outLabel}
                               </td>
                             </tr>
                             <tr className="bg-[#1F1042]/70 font-bold">
-                              <td className="px-3 py-2 text-white">Total reçu après frais</td>
+                              <td className="px-3 py-2 text-white">Total Net reçu</td>
                               <td className="px-3 py-2 text-right font-mono text-emerald-400">
-                                {net.toFixed(6)} {toCurrencyObj.symbol === 'AR' ? 'Ar' : toCurrencyObj.symbol}
+                                {netRecu.toFixed(outDec)} {outLabel}
                               </td>
                             </tr>
                           </tbody>
@@ -4733,44 +5281,56 @@ export default function App() {
                   </div>
                 </div>
 
-                {/* 2. PRIX ACTUEL + COMPTE TRADE + BROKER PUR MARGE ISOLÉE */}
+                {/* 2. PRIX ACTUEL SALOMA + WALLET INTERNE SALOMA */}
                 <div className="p-3 rounded-2xl bg-[#1D1240] border-2 border-[#8B5CF6]/50 space-y-2">
-                  <div className="flex items-center justify-between">
+                  <div className="flex items-center justify-between gap-2">
                     <div>
                       <div className="flex items-center gap-1.5">
-                        <span className="text-[10px] font-bold text-purple-300 uppercase">Prix Actuel SALOMA</span>
+                        <span className="text-[10px] font-bold text-purple-300 uppercase">Prix SALOMA</span>
                         <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-emerald-500/20 border border-emerald-400/60 text-emerald-300 text-[9px] font-black">
                           <span className={`w-1.5 h-1.5 rounded-full bg-emerald-400 ${isWsLive ? 'animate-pulse' : 'opacity-60'}`} />
-                          LIVE {activeBrokerExchange}
+                          LIVE MARCHÉ
                         </span>
                       </div>
                       <span className="text-2xl font-black text-white font-mono">
                         ${formatCoinPrice(selectedCoin.price)}
                       </span>
                     </div>
-                    <div className="text-right">
-                      <span className="text-[10px] text-purple-400 block">Solde Compte Trade</span>
-                      <span className="text-sm font-mono font-black text-emerald-400">
-                        {Math.round(soldeCompteTradeAr).toLocaleString('fr-FR')} Ar
-                      </span>
-                      <button
-                        type="button"
-                        onClick={() => {
-                          setConvertDirection('WALLET_TO_TRADE');
-                          setActiveModal('convert');
-                        }}
-                        className="mt-0.5 text-[10px] font-bold text-[#8B5CF6] underline block ml-auto"
-                      >
-                        ⇄ Convertir Wallet → Trade
-                      </button>
-                    </div>
+                    {tradingModeType === 'SPOT' && tradeStrategyChoice === 'MANUEL' ? (
+                      <div className="text-right space-y-0.5">
+                        <span className="text-[10px] text-purple-300 block">Wallet SALOMA (Spot)</span>
+                        <span className="text-xs font-mono font-black text-emerald-400 block">
+                          {clientUsdtBalance.toLocaleString('en-US', { maximumFractionDigits: 4 })} USDT
+                        </span>
+                        <span className="text-[11px] font-mono font-bold text-white block">
+                          {clientSelectedCryptoBalance.toFixed(6)} {selectedCoin.symbol}
+                        </span>
+                      </div>
+                    ) : (
+                      <div className="text-right">
+                        <span className="text-[10px] text-purple-400 block">Solde Compte Trade</span>
+                        <span className="text-sm font-mono font-black text-emerald-400">
+                          {Math.round(soldeCompteTradeAr).toLocaleString('fr-FR')} Ar
+                        </span>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setConvertDirection('WALLET_TO_TRADE');
+                            setActiveModal('convert');
+                          }}
+                          className="mt-0.5 text-[10px] font-bold text-[#8B5CF6] underline block ml-auto"
+                        >
+                          ⇄ Convertir Wallet → Trade
+                        </button>
+                      </div>
+                    )}
                   </div>
                   <div className="pt-1.5 border-t border-purple-500/20 flex items-center justify-between text-[10px] font-mono">
                     <span className="text-emerald-300 font-bold">
-                      Broker Pur • Pont: {activeBrokerExchange}
+                      {tradingModeType === 'SPOT' ? 'Wallet Interne SALOMA' : 'Exécution Directe • Plateforme'}
                     </span>
                     <span className="text-purple-200">
-                      Marge Isolée Individuelle • Frais 0.1%
+                      {tradingModeType === 'SPOT' ? 'Achat / Vente Instantané' : 'Marge Isolée Individuelle'}
                     </span>
                   </div>
                 </div>
@@ -4782,7 +5342,10 @@ export default function App() {
                   <>
                     <div className="flex items-center gap-2 bg-[#190E38] p-1 rounded-xl border border-purple-500/30">
                       <button
-                        onClick={() => setTradingModeType('SPOT')}
+                        onClick={() => {
+                          setTradingModeType('SPOT');
+                          setSpotUnavailableNotice(null);
+                        }}
                         className={`flex-1 py-2 rounded-lg text-xs font-bold transition ${
                           tradingModeType === 'SPOT'
                             ? 'bg-emerald-600/40 border border-emerald-500/50 text-emerald-300 shadow'
@@ -4792,7 +5355,10 @@ export default function App() {
                         SPOT (Varotra mivantana)
                       </button>
                       <button
-                        onClick={() => setTradingModeType('LEVIER')}
+                        onClick={() => {
+                          setTradingModeType('LEVIER');
+                          setSpotUnavailableNotice(null);
+                        }}
                         className={`flex-1 py-2 rounded-lg text-xs font-bold transition ${
                           tradingModeType === 'LEVIER'
                             ? 'bg-[#7C3AED] border border-purple-300 text-white shadow-[0_0_15px_rgba(124,58,237,0.5)]'
@@ -4805,8 +5371,138 @@ export default function App() {
 
                     {/* 3. BOUTONS BUY / SELL CÔTE À CÔTE (GAUCHE = BUY, DROITE = SELL) */}
                     <div className="p-3.5 rounded-2xl bg-[#1D1240] border-2 border-[#8B5CF6]/60 space-y-3">
-                      <div className="space-y-2">
-                        {tradingModeType === 'LEVIER' ? (
+                      {spotUnavailableNotice && tradingModeType === 'SPOT' && (
+                        <div className="p-2.5 rounded-xl bg-amber-500/20 border border-amber-400/60 text-amber-200 text-xs font-bold flex items-center gap-2">
+                          <AlertTriangle className="w-4 h-4 text-amber-300 shrink-0" />
+                          <span>{spotUnavailableNotice}</span>
+                        </div>
+                      )}
+
+                      {tradingModeType === 'SPOT' ? (
+                        <div className="space-y-2.5">
+                          <div className="p-2.5 rounded-xl bg-[#150D2E] border border-emerald-500/40 flex justify-between items-center gap-2">
+                            <div>
+                              <span className="text-[10px] font-black text-emerald-300 block">
+                                Wallet Spot SALOMA (USDT ⇄ {selectedCoin.symbol})
+                              </span>
+                              <span className="text-[10px] font-mono text-purple-200 block">
+                                USDT: {clientUsdtBalance.toFixed(4)} • {selectedCoin.symbol}: {clientSelectedCryptoBalance.toFixed(6)}
+                              </span>
+                            </div>
+                            <button
+                              type="button"
+                              onClick={() => setTradingModeType('LEVIER')}
+                              className="text-[10px] px-2.5 py-1 rounded bg-[#7C3AED] text-white font-bold shrink-0"
+                            >
+                              Levier
+                            </button>
+                          </div>
+
+                          <div className="space-y-1.5">
+                            <div className="flex items-center justify-between text-[10px] font-bold text-purple-300 px-0.5">
+                              <span>
+                                Montant ({spotOrderUnit === 'USDT' ? 'USDT' : selectedCoin.symbol})
+                              </span>
+                              <span className="font-mono text-emerald-300">
+                                {spotOrderUnit === 'USDT'
+                                  ? `≈ ${spotOrderCryptoEquiv.toFixed(6)} ${selectedCoin.symbol}`
+                                  : `≈ ${spotOrderUsdtEquiv.toFixed(2)} USDT`}
+                              </span>
+                            </div>
+                            <div className="grid grid-cols-12 gap-1.5 items-center">
+                              <div className="col-span-7">
+                                <input
+                                  type="text"
+                                  inputMode="decimal"
+                                  value={spotAmountInput}
+                                  onChange={e => {
+                                    setSelectedSpotPercent(null);
+                                    setSpotUnavailableNotice(null);
+                                    setSpotAmountInput(sanitizeDecimalInput(e.target.value));
+                                  }}
+                                  placeholder={spotOrderUnit === 'USDT' ? 'Ex: 10 USDT' : `Ex: 0.001 ${selectedCoin.symbol}`}
+                                  className="w-full px-2.5 py-1.5 rounded-xl bg-[#150D2E] border border-purple-500/40 text-white text-xs font-mono font-bold focus:outline-none focus:border-[#8B5CF6]"
+                                />
+                              </div>
+                              <div className="col-span-5 grid grid-cols-2 gap-1">
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    setSpotOrderUnit('USDT');
+                                    setSelectedSpotPercent(null);
+                                  }}
+                                  className={`py-1.5 rounded-xl text-[10px] font-black border transition ${
+                                    spotOrderUnit === 'USDT'
+                                      ? 'bg-[#7C3AED] border-purple-300 text-white'
+                                      : 'bg-[#150D2E] border-purple-500/40 text-purple-300'
+                                  }`}
+                                >
+                                  USDT
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    setSpotOrderUnit('CRYPTO');
+                                    setSelectedSpotPercent(null);
+                                  }}
+                                  className={`py-1.5 rounded-xl text-[10px] font-black border transition ${
+                                    spotOrderUnit === 'CRYPTO'
+                                      ? 'bg-[#7C3AED] border-purple-300 text-white'
+                                      : 'bg-[#150D2E] border-purple-500/40 text-purple-300'
+                                  }`}
+                                >
+                                  {selectedCoin.symbol}
+                                </button>
+                              </div>
+                            </div>
+                          </div>
+
+                          <div className="grid grid-cols-5 gap-1">
+                            {([25, 50, 75, 100, 'MAX'] as const).map(p => (
+                              <button
+                                key={String(p)}
+                                type="button"
+                                onClick={() => applySpotPercent(p)}
+                                className={`py-1 rounded-lg text-[10px] font-mono font-black border transition ${
+                                  selectedSpotPercent === p
+                                    ? 'bg-[#7C3AED] border-purple-300 text-white shadow'
+                                    : 'bg-[#150D2E] border-purple-500/30 text-purple-200'
+                                }`}
+                              >
+                                {p === 'MAX' ? 'MAX' : `${p}%`}
+                              </button>
+                            ))}
+                          </div>
+
+                          {(() => {
+                            const spotFeeUsdt = Number(
+                              (spotOrderUsdtEquiv * ((salomaFees.tradeFeePct || 0.1) / 100)).toFixed(4)
+                            );
+                            const spotTotalBuyUsdt = Number((spotOrderUsdtEquiv + spotFeeUsdt).toFixed(4));
+                            const spotNetSellUsdt = Number(Math.max(0, spotOrderUsdtEquiv - spotFeeUsdt).toFixed(4));
+                            return (
+                              <div className="p-2.5 rounded-xl bg-[#150D2E] border border-purple-500/30 text-[10px] font-mono space-y-1.5">
+                                <div className="text-amber-300 font-bold leading-snug">
+                                  Trade : {spotOrderUsdtEquiv.toFixed(2)} USDT - Frais SALOMA {salomaFees.tradeFeePct}% = {spotFeeUsdt.toFixed(4)} USDT - Total : {spotTotalBuyUsdt.toFixed(4)} USDT
+                                </div>
+                                <div className="flex justify-between pt-1 border-t border-purple-500/20">
+                                  <span className="text-purple-300">BUY (débit total) :</span>
+                                  <span className="text-emerald-300 font-bold">
+                                    +{spotOrderCryptoEquiv.toFixed(6)} {selectedCoin.symbol} • -{spotTotalBuyUsdt.toFixed(4)} USDT
+                                  </span>
+                                </div>
+                                <div className="flex justify-between">
+                                  <span className="text-purple-300">SELL (net reçu) :</span>
+                                  <span className="text-rose-300 font-bold">
+                                    +{spotNetSellUsdt.toFixed(4)} USDT • -{spotOrderCryptoEquiv.toFixed(6)} {selectedCoin.symbol}
+                                  </span>
+                                </div>
+                              </div>
+                            );
+                          })()}
+                        </div>
+                      ) : (
+                        <div className="space-y-2">
                           <div className="p-2.5 rounded-xl bg-[#150D2E] border border-[#8B5CF6]/50 space-y-2">
                             <div className="flex justify-between items-center">
                               <span className="text-[10px] font-black text-purple-200">LEVIER (x1–x500)</span>
@@ -4848,79 +5544,77 @@ export default function App() {
                               <span className="font-mono font-black text-purple-200 text-xs">x</span>
                             </div>
                             <span className="text-[9px] text-rose-300 font-mono block">
-                              Liq. à {liquidationThreshold}% contre vous • Frais SALOMA 0.1%
+                              Liq. à {liquidationThreshold}% contre vous • Marge Isolée
                             </span>
                           </div>
-                        ) : (
-                          <div className="p-2.5 rounded-xl bg-[#150D2E] border border-emerald-500/40 flex justify-between items-center">
-                            <span className="text-[10px] font-black text-emerald-300">Mode SPOT (x1) • Frais 0.1%</span>
-                            <button
-                              type="button"
-                              onClick={() => setTradingModeType('LEVIER')}
-                              className="text-[10px] px-2.5 py-1 rounded bg-[#7C3AED] text-white font-bold"
-                            >
-                              Activer Levier
-                            </button>
-                          </div>
-                        )}
 
-                        <div className="space-y-1.5">
-                          <div className="flex items-center justify-between text-[10px] font-bold text-purple-300 px-0.5">
-                            <span>Montant ({selectedTradeCurrencyObj.shortLabel})</span>
-                            <span className="font-mono text-emerald-300">
-                              {tradeAmountCurrency === 'ARIARY'
-                                ? `≈ $${(numericAmountAr / USD_TO_MGA).toFixed(2)} USD`
-                                : `≈ ${numericAmountAr.toLocaleString('fr-FR')} Ar`}
-                            </span>
-                          </div>
-                          <div className="grid grid-cols-12 gap-1.5 items-center">
-                            <div className="col-span-8">
-                              <input
-                                type="text"
-                                inputMode="decimal"
-                                value={tradeAmountInput}
-                                onChange={e => {
-                                  setSelectedTradePercent(null);
-                                  setTradeAmountInput(sanitizeDecimalInput(e.target.value));
-                                }}
-                                placeholder={`Montant (${selectedTradeCurrencyObj.shortLabel})`}
-                                className="w-full px-2.5 py-1.5 rounded-xl bg-[#150D2E] border border-purple-500/40 text-white text-xs font-mono font-bold focus:outline-none focus:border-[#8B5CF6]"
-                              />
+                          <div className="space-y-1.5">
+                            <div className="flex items-center justify-between text-[10px] font-bold text-purple-300 px-0.5">
+                              <span>Montant ({selectedTradeCurrencyObj.shortLabel})</span>
+                              <span className="font-mono text-emerald-300">
+                                {tradeAmountCurrency === 'ARIARY'
+                                  ? `≈ $${(numericAmountAr / USD_TO_MGA).toFixed(2)} USD`
+                                  : `≈ ${numericAmountAr.toLocaleString('fr-FR')} Ar`}
+                              </span>
                             </div>
-                            <div className="col-span-4">
-                              <select
-                                aria-label="Devise du montant"
-                                value={tradeAmountCurrency}
-                                onChange={e => handleChangeTradeAmountCurrency(e.target.value)}
-                                className="w-full px-2 py-1.5 rounded-xl bg-[#23154D] border border-[#8B5CF6]/70 text-white text-[11px] font-black focus:outline-none"
+                            <div className="grid grid-cols-12 gap-1.5 items-center">
+                              <div className="col-span-8">
+                                <input
+                                  type="text"
+                                  inputMode="decimal"
+                                  value={tradeAmountInput}
+                                  onChange={e => {
+                                    setSelectedTradePercent(null);
+                                    setTradeAmountInput(sanitizeDecimalInput(e.target.value));
+                                  }}
+                                  placeholder={`Montant (${selectedTradeCurrencyObj.shortLabel})`}
+                                  className="w-full px-2.5 py-1.5 rounded-xl bg-[#150D2E] border border-purple-500/40 text-white text-xs font-mono font-bold focus:outline-none focus:border-[#8B5CF6]"
+                                />
+                              </div>
+                              <div className="col-span-4">
+                                <select
+                                  aria-label="Devise du montant"
+                                  value={tradeAmountCurrency}
+                                  onChange={e => handleChangeTradeAmountCurrency(e.target.value)}
+                                  className="w-full px-2 py-1.5 rounded-xl bg-[#23154D] border border-[#8B5CF6]/70 text-white text-[11px] font-black focus:outline-none"
+                                >
+                                  {tradeAmountCurrencies.map(c => (
+                                    <option key={c.symbol} value={c.symbol}>
+                                      {c.symbol === 'ARIARY' ? 'ARIARY' : c.symbol}
+                                    </option>
+                                  ))}
+                                </select>
+                              </div>
+                            </div>
+                          </div>
+
+                          <div className="grid grid-cols-5 gap-1">
+                            {([25, 50, 75, 100, 'MAX'] as const).map(p => (
+                              <button
+                                key={String(p)}
+                                type="button"
+                                onClick={() => applyTradePercent(p)}
+                                className={`py-1 rounded-lg text-[10px] font-mono font-black border transition ${
+                                  selectedTradePercent === p
+                                    ? 'bg-[#7C3AED] border-purple-300 text-white shadow'
+                                    : 'bg-[#150D2E] border-purple-500/30 text-purple-200'
+                                }`}
                               >
-                                {tradeAmountCurrencies.map(c => (
-                                  <option key={c.symbol} value={c.symbol}>
-                                    {c.symbol === 'ARIARY' ? 'ARIARY' : c.symbol}
-                                  </option>
-                                ))}
-                              </select>
-                            </div>
+                                {p === 'MAX' ? 'MAX' : `${p}%`}
+                              </button>
+                            ))}
                           </div>
-                        </div>
 
-                        <div className="grid grid-cols-5 gap-1">
-                          {([25, 50, 75, 100, 'MAX'] as const).map(p => (
-                            <button
-                              key={String(p)}
-                              type="button"
-                              onClick={() => applyTradePercent(p)}
-                              className={`py-1 rounded-lg text-[10px] font-mono font-black border transition ${
-                                selectedTradePercent === p
-                                  ? 'bg-[#7C3AED] border-purple-300 text-white shadow'
-                                  : 'bg-[#150D2E] border-purple-500/30 text-purple-200'
-                              }`}
-                            >
-                              {p === 'MAX' ? 'MAX' : `${p}%`}
-                            </button>
-                          ))}
+                          {(() => {
+                            const levFeeAr = Math.round(numericAmountAr * ((salomaFees.tradeFeePct || 0.1) / 100));
+                            return (
+                              <div className="p-2 rounded-xl bg-[#150D2E] border border-amber-500/35 text-[10px] font-mono text-amber-300 font-bold">
+                                Trade : {numericAmountAr.toLocaleString('fr-FR')} Ar - Frais SALOMA {salomaFees.tradeFeePct}% = {levFeeAr.toLocaleString('fr-FR')} Ar - Total : {(numericAmountAr + levFeeAr).toLocaleString('fr-FR')} Ar
+                              </div>
+                            );
+                          })()}
                         </div>
-                      </div>
+                      )}
 
                       {(autoBuyEnabled || autoSellEnabled) && (
                         <div className="px-2.5 py-1.5 rounded-xl bg-[#150D2E] border border-[#8B5CF6]/60 flex items-center justify-between text-[10px] font-bold">
@@ -4935,7 +5629,7 @@ export default function App() {
                             • {selectedCoin.symbol}/USDT
                           </span>
                           <span className="font-mono text-purple-300">
-                            {tradingModeType === 'SPOT' ? 'SPOT x1' : `x${numericLeverage}`}
+                            {tradingModeType === 'SPOT' ? 'SPOT' : `x${numericLeverage}`}
                           </span>
                         </div>
                       )}
@@ -5056,7 +5750,9 @@ export default function App() {
                                 {liqPrice > 0 && (
                                   <div className="flex justify-between text-[9px] font-mono text-rose-300/90">
                                     <span>Liq. Individuelle : ${formatCoinPrice(liqPrice)}</span>
-                                    <span>{tr.mode || `Pont ${activeBrokerExchange}`}</span>
+                                    <span>
+                                      {(tr.mode || 'Pont Marché').replace(/\s*\[(BYBIT|OKX|BINANCE)\]/gi, '') || 'Pont Marché'}
+                                    </span>
                                   </div>
                                 )}
                               </div>
@@ -5069,7 +5765,7 @@ export default function App() {
                 )}
 
                 {/* ====================================================
-                    MODE B : AUTO STRATÉGIE (BOTS BINANCE POUR DÉBUTANT)
+                    MODE B : AUTO STRATÉGIE (BOTS POUR DÉBUTANT)
                    ==================================================== */}
                 {tradeStrategyChoice === 'BOT' && (
                   <div className="p-3.5 rounded-2xl bg-[#1D1240] border-2 border-emerald-500/50 space-y-3 shadow-[0_0_20px_rgba(16,185,129,0.18)]">
@@ -5078,7 +5774,7 @@ export default function App() {
                         <Bot className="w-4 h-4 text-emerald-400" />
                         <span className="text-xs font-black text-white">Bots Trading Automatiques</span>
                       </div>
-                      <span className="text-[10px] font-mono font-bold text-amber-300">Frais 0.1%</span>
+                      <span className="text-[10px] font-mono font-bold text-emerald-300">Exécution Auto</span>
                     </div>
 
                     {/* CHOIX DES 2 BOTS : SPOT GRID BOT & DCA BOT */}
@@ -5349,26 +6045,43 @@ export default function App() {
                 <div className="p-3.5 rounded-2xl bg-[#1D1240] border-2 border-[#8B5CF6]/50 space-y-2">
                   <span className="text-xs font-black text-white flex items-center gap-1.5">
                     <Activity className="w-3.5 h-3.5 text-purple-400" />
-                    Tableau : Position, Frais & Levier
+                    Tableau : Position &amp; Levier
                   </span>
                   {(() => {
-                    const activeAmt = tradeStrategyChoice === 'BOT' ? numericBotAmountAr : numericAmountAr;
+                    const isManualSpot = tradeStrategyChoice === 'MANUEL' && tradingModeType === 'SPOT';
+                    const activeAmt = isManualSpot
+                      ? Math.round(spotOrderUsdtEquiv * USD_TO_MGA)
+                      : tradeStrategyChoice === 'BOT'
+                      ? numericBotAmountAr
+                      : numericAmountAr;
                     const activeLev = tradeStrategyChoice === 'BOT' ? 1 : tradingModeType === 'SPOT' ? 1 : numericLeverage;
-                    const feeAr = Math.round(activeAmt * 0.001);
+                    const feeAr = Math.round(activeAmt * ((salomaFees.tradeFeePct || 0.1) / 100));
                     return (
                       <div className="overflow-hidden rounded-xl border border-purple-500/30 text-xs">
                         <table className="w-full text-left">
                           <tbody className="divide-y divide-purple-500/20 bg-[#150D2E]">
                             <tr>
-                              <td className="px-3 py-2 text-purple-300">Montant engagé</td>
+                              <td className="px-3 py-2 text-purple-300">Montant Trade</td>
                               <td className="px-3 py-2 text-right font-mono font-bold text-white">
-                                {activeAmt.toLocaleString('fr-FR')} Ar
+                                {isManualSpot
+                                  ? `${spotOrderUsdtEquiv.toFixed(2)} USDT`
+                                  : `${activeAmt.toLocaleString('fr-FR')} Ar`}
                               </td>
                             </tr>
                             <tr>
-                              <td className="px-3 py-2 text-purple-300">Frais SALOMA (0.1%)</td>
+                              <td className="px-3 py-2 text-amber-300 font-bold">
+                                Frais SALOMA ({salomaFees.tradeFeePct}%)
+                              </td>
                               <td className="px-3 py-2 text-right font-mono font-bold text-amber-300">
-                                {feeAr.toLocaleString('fr-FR')} Ar
+                                {isManualSpot
+                                  ? `${(spotOrderUsdtEquiv * ((salomaFees.tradeFeePct || 0.1) / 100)).toFixed(4)} USDT`
+                                  : `${feeAr.toLocaleString('fr-FR')} Ar`}
+                              </td>
+                            </tr>
+                            <tr>
+                              <td className="px-3 py-2 text-purple-300">Prix SALOMA appliqué</td>
+                              <td className="px-3 py-2 text-right font-mono font-bold text-purple-200">
+                                ${formatCoinPrice(selectedCoin.price)}
                               </td>
                             </tr>
                             <tr className="bg-[#1F1042]/70 font-bold">
@@ -5376,7 +6089,9 @@ export default function App() {
                                 Valeur position (x{activeLev})
                               </td>
                               <td className="px-3 py-2 text-right font-mono text-emerald-400">
-                                {((activeAmt - feeAr) * activeLev).toLocaleString('fr-FR')} Ar
+                                {isManualSpot
+                                  ? `${spotOrderUsdtEquiv.toFixed(2)} USDT`
+                                  : `${(activeAmt * activeLev).toLocaleString('fr-FR')} Ar`}
                               </td>
                             </tr>
                           </tbody>
@@ -5408,30 +6123,41 @@ export default function App() {
                     <div className="text-center py-3 text-xs text-purple-400/70">Aucun trade clôturé</div>
                   ) : (
                     <div className="space-y-1.5 max-h-40 overflow-y-auto">
-                      {closedTrades.map(item => (
-                        <div
-                          key={item.$id}
-                          className="flex justify-between items-center p-2 rounded-xl bg-[#150D2E] text-xs"
-                        >
-                          <div>
-                            <span className="font-bold text-white">
-                              {item.type === 'achat' ? 'BUY' : 'SELL'} {item.paire} x{item.leverage || 1}
-                              {item.mode && item.mode !== 'Manuel' ? ` • ${item.mode}` : ''}
-                            </span>
-                            <span className="text-[10px] text-purple-400 block">
-                              ${formatCoinPrice(item.prix)} → ${formatCoinPrice(item.close_price || item.prix)}
-                            </span>
-                          </div>
-                          <span
-                            className={`font-mono font-bold ${
-                              (Number(item.profit) || 0) >= 0 ? 'text-emerald-400' : 'text-rose-400'
-                            }`}
+                      {closedTrades.map(item => {
+                        const isSpotOrder = (item.mode || '').startsWith('Spot ');
+                        return (
+                          <div
+                            key={item.$id}
+                            className="flex justify-between items-center p-2 rounded-xl bg-[#150D2E] text-xs"
                           >
-                            {(Number(item.profit) || 0) >= 0 ? '+' : ''}
-                            {Number(item.profit || 0).toLocaleString('fr-FR')} Ar
-                          </span>
-                        </div>
-                      ))}
+                            <div>
+                              <span className="font-bold text-white">
+                                {item.type === 'achat' ? 'BUY' : 'SELL'} {item.paire}{' '}
+                                {isSpotOrder ? 'SPOT' : `x${item.leverage || 1}`}
+                                {item.mode && item.mode !== 'Manuel' && !isSpotOrder ? ` • ${item.mode}` : ''}
+                              </span>
+                              <span className="text-[10px] text-purple-400 block">
+                                Prix SALOMA : ${formatCoinPrice(item.prix)}
+                                {!isSpotOrder ? ` → $${formatCoinPrice(item.close_price || item.prix)}` : ''}
+                              </span>
+                            </div>
+                            {isSpotOrder ? (
+                              <span className="font-mono font-bold text-emerald-300 text-[11px]">
+                                {(item.mode || '').replace(/^Spot\s+/i, '')}
+                              </span>
+                            ) : (
+                              <span
+                                className={`font-mono font-bold ${
+                                  (Number(item.profit) || 0) >= 0 ? 'text-emerald-400' : 'text-rose-400'
+                                }`}
+                              >
+                                {(Number(item.profit) || 0) >= 0 ? '+' : ''}
+                                {Number(item.profit || 0).toLocaleString('fr-FR')} Ar
+                              </span>
+                            )}
+                          </div>
+                        );
+                      })}
                     </div>
                   )}
                 </div>
@@ -5457,7 +6183,7 @@ export default function App() {
                     {formatMoney(soldeTotalAr)}
                   </h1>
                   <p className="text-xs font-bold text-purple-300 font-mono mt-0.5">
-                    ≈ {formatMoney(soldeTotalAr, displayCurrency === 'MGA' ? 'USD' : 'MGA')}
+                    ≈ {formatMoney(soldeTotalAr, displayCurrency === 'MGA' ? 'USD' : 'MGA')} • {clientUsdtBalance.toFixed(2)} USDT SALOMA
                   </p>
 
                   {/* 2 SOLDES SÉPARÉS : WALLET & COMPTE TRADE */}
@@ -5469,7 +6195,9 @@ export default function App() {
                       <span className="font-black text-emerald-400 font-mono text-sm block">
                         {formatMoney(soldeDisponibleAr)}
                       </span>
-                      <span className="text-[9px] text-purple-300 block">Argent déposé & retirable</span>
+                      <span className="text-[10px] font-mono font-bold text-emerald-200 block">
+                        {clientUsdtBalance.toFixed(4)} USDT SALOMA
+                      </span>
                     </div>
                     <div className="bg-[#150D2E]/90 p-3 rounded-2xl border border-[#8B5CF6]/50 space-y-0.5">
                       <span className="text-[10px] text-purple-200 block font-black uppercase">
@@ -5758,7 +6486,7 @@ export default function App() {
               <div className="flex flex-wrap items-center justify-between gap-2 text-[10px] text-purple-300 pt-1">
                 <div className="text-left font-mono space-y-0.5">
                   <span className="block">Min Dépôt : {activeNetwork.minDeposit} {selectedWalletCoin.symbol}</span>
-                  <span className="block text-purple-400">Frais réseau : {activeNetwork.withdrawFee} {selectedWalletCoin.symbol}</span>
+                  <span className="block text-purple-400">Coût réseau : {activeNetwork.withdrawFee} {selectedWalletCoin.symbol}</span>
                 </div>
                 <button
                   type="button"
@@ -5912,7 +6640,7 @@ export default function App() {
                 ))}
               </div>
               <div className="flex justify-between text-[11px] font-mono text-emerald-400 pt-1">
-                <span>Frais de transfert interne :</span>
+                <span>Coût de transfert interne :</span>
                 <span className="font-black">0 Ar (Gratuit)</span>
               </div>
             </div>
@@ -6001,15 +6729,18 @@ export default function App() {
                 />
               </div>
 
-              {/* RETRAIT SEUL = 0.15% SALOMA + FRAIS RÉSEAU AFFICHÉS CLAIREMENT */}
+              {/* RETRAIT SEUL = FRAIS SALOMA (0.15%) + FRAIS RÉSEAU SÉPARÉS ET AFFICHÉS CLAIREMENT */}
               {(() => {
                 const amt = parseFloat(withdrawAmountInput) || 0;
-                const salomaFee = amt * 0.0015;
-                const netFee = activeNetwork.withdrawFee;
+                const salomaFee = amt * ((salomaFees.withdrawFeePct || 0.15) / 100);
+                const netFee = effectiveWalletNetworkFee;
                 const totalFrais = salomaFee + netFee;
                 const netRec = Math.max(0, amt - totalFrais);
                 return (
                   <div className="p-3 rounded-xl bg-[#100926] border border-amber-500/40 space-y-1.5 text-[11px]">
+                    <div className="text-[10px] font-mono font-bold text-amber-300 pb-1 border-b border-purple-500/20">
+                      Retrait : Frais SALOMA {salomaFees.withdrawFeePct}% + Frais Réseau {netFee} {selectedWalletCoin.symbol}
+                    </div>
                     <div className="flex justify-between text-purple-300">
                       <span>Chaîne / Réseau sélectionné :</span>
                       <span className="font-bold text-emerald-300">
@@ -6017,13 +6748,13 @@ export default function App() {
                       </span>
                     </div>
                     <div className="flex justify-between text-purple-300">
-                      <span>Frais SALOMA Retrait (0.15%) :</span>
+                      <span>Frais SALOMA ({salomaFees.withdrawFeePct}%) :</span>
                       <span className="font-mono font-bold text-amber-300">
                         {salomaFee.toFixed(6)} {selectedWalletCoin.symbol}
                       </span>
                     </div>
                     <div className="flex justify-between text-purple-300">
-                      <span>Frais réseau ({activeNetworkLabel}) :</span>
+                      <span>Frais Réseau ({activeNetworkLabel}) :</span>
                       <span className="font-mono font-black text-amber-300">
                         {netFee} {selectedWalletCoin.symbol}
                       </span>
@@ -6189,9 +6920,9 @@ export default function App() {
             </div>
             <div className="text-xs text-purple-200 space-y-2 leading-relaxed">
               <p>• <strong>Portefeuille & Convertir</strong> : Gérez votre <strong>WALLET</strong> (dépôt/retrait Crypto uniquement) et votre <strong>COMPTE TRADE</strong>. Utilisez <strong>Convertir</strong> (0 Ar) pour transférer entre Wallet et Compte Trade.</p>
-              <p>• <strong>Trading (Broker Pur)</strong> : Manuel (Spot / Levier) ou Auto Stratégie (Spot Grid Bot / DCA Bot) en Marge Isolée individuelle. Frais SALOMA 0,1%.</p>
-              <p>• <strong>Échange</strong> : Convertissez Ar ⇄ Crypto ou Crypto ⇄ Crypto au taux SALOMA (frais 0,1%).</p>
-              <p>• <strong>Retrait Crypto</strong> : Frais SALOMA 0,15% + frais réseau affichés (USDT TRC20, BTC, ETH).</p>
+              <p>• <strong>Trading</strong> : Manuel (Spot / Levier) ou Auto Stratégie (Spot Grid Bot / DCA Bot) en Marge Isolée individuelle au prix final affiché.</p>
+              <p>• <strong>Échange</strong> : Convertissez Ar ⇄ Crypto ou Crypto ⇄ Crypto instantanément au prix final SALOMA affiché.</p>
+              <p>• <strong>Retrait Crypto</strong> : Transferts blockchain sécurisés (USDT TRC20, BTC, ETH et 50 cryptos) avec paramètres réseau affichés avant confirmation.</p>
             </div>
           </div>
         </div>
@@ -6602,6 +7333,71 @@ export default function App() {
             </div>
           </div>
 
+          {/* ALERTE LIQUIDITÉ SPONSOR (VISIBLE CÔTÉ ADMIN SEULEMENT) */}
+          {adminLiquidityAlerts.length > 0 && (
+            <div className="p-3.5 rounded-2xl bg-rose-950/75 border-2 border-rose-500 space-y-2.5 shadow-[0_0_24px_rgba(244,63,94,0.3)]">
+              <div className="flex items-start justify-between gap-2">
+                <div className="flex items-center gap-2">
+                  <AlertTriangle className="w-5 h-5 text-amber-300 shrink-0" />
+                  <div>
+                    <h3 className="font-black text-rose-100 text-xs">
+                      {adminLiquidityAlerts[0]?.message || 'Liquidité Bybit insuffisante - Recharger le compte sponsor'}
+                    </h3>
+                    <span className="text-[10px] text-rose-200/90 block">
+                      {adminLiquidityAlerts.length} alerte(s) active(s) • Trades Spot temporairement bloqués
+                    </span>
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => void handleClearLiquidityAlert()}
+                  className="px-2.5 py-1 rounded-lg bg-rose-600 hover:bg-rose-500 text-white text-[10px] font-black shrink-0"
+                >
+                  Tout résoudre
+                </button>
+              </div>
+              <div className="space-y-1.5">
+                {adminLiquidityAlerts.map(al => (
+                  <div
+                    key={al.id}
+                    className="p-2.5 rounded-xl bg-[#150D2E]/90 border border-rose-500/40 text-[11px] flex items-center justify-between gap-2"
+                  >
+                    <div className="min-w-0">
+                      <span className="font-mono font-black text-white block">
+                        {al.sponsor} • {al.side} {al.pair} ({al.asset})
+                      </span>
+                      <span className="text-[10px] font-mono text-amber-200 block">
+                        Requis: {al.requiredAmount} {al.asset} • Disponible: {al.availableAmount} {al.asset}
+                      </span>
+                      <span className="text-[9px] text-rose-300/90 block truncate">{al.reason}</span>
+                    </div>
+                    <div className="flex items-center gap-1 shrink-0">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setAdminTab('apis');
+                          void handleTestSponsorConnection(
+                            al.sponsor.toLowerCase() as 'bybit' | 'okx' | 'binance'
+                          );
+                        }}
+                        className="px-2 py-1 rounded bg-[#23154D] text-purple-200 text-[10px] font-bold"
+                      >
+                        Tester
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => void handleClearLiquidityAlert(al.id)}
+                        className="px-2 py-1 rounded bg-emerald-600 text-white text-[10px] font-bold"
+                      >
+                        Résolu
+                      </button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
           <div className="p-3.5 rounded-2xl bg-[#190F38] border-2 border-[#8B5CF6]/70 space-y-2">
             <div className="flex justify-between items-center text-xs">
               <span className="font-black text-white">Activité Réelle Trades ({adminTrades.length})</span>
@@ -6931,8 +7727,8 @@ export default function App() {
                     <div className="space-y-2 text-xs">
                       <div className="p-2.5 rounded-xl bg-[#150D2E] border border-emerald-500/30 flex justify-between items-center">
                         <div>
-                          <span className="font-bold text-white block">1. Trade (0.1%)</span>
-                          <span className="text-[10px] text-purple-300">Commission sur ordres Manuel & Bots</span>
+                          <span className="font-bold text-white block">1. Trade ({salomaFees.tradeFeePct}%)</span>
+                          <span className="text-[10px] text-purple-300">Commission transparente sur ordres Manuel, Spot & Bots</span>
                         </div>
                         <span className="font-mono font-black text-emerald-400">
                           +{Math.round(bucket.tradeAr).toLocaleString('fr-FR')} Ar
@@ -6941,8 +7737,8 @@ export default function App() {
 
                       <div className="p-2.5 rounded-xl bg-[#150D2E] border border-purple-500/30 flex justify-between items-center">
                         <div>
-                          <span className="font-bold text-white block">2. Échange (0.1%)</span>
-                          <span className="text-[10px] text-purple-300">Commission sur conversions Ar/Crypto</span>
+                          <span className="font-bold text-white block">2. Échange ({salomaFees.exchangeFeePct}%)</span>
+                          <span className="text-[10px] text-purple-300">Commission transparente sur conversions Ar/Crypto</span>
                         </div>
                         <span className="font-mono font-black text-purple-300">
                           +{Math.round(bucket.echangeAr).toLocaleString('fr-FR')} Ar
@@ -6951,8 +7747,8 @@ export default function App() {
 
                       <div className="p-2.5 rounded-xl bg-[#150D2E] border border-amber-500/30 flex justify-between items-center">
                         <div>
-                          <span className="font-bold text-white block">3. Retrait (0.15% + Frais réseau)</span>
-                          <span className="text-[10px] text-purple-300">USDT TRC20 / BTC / ETH</span>
+                          <span className="font-bold text-white block">3. Retrait ({salomaFees.withdrawFeePct}% + Frais Réseau {salomaFees.networkFeeUsdt} USDT)</span>
+                          <span className="text-[10px] text-purple-300">Frais SALOMA + Frais Réseau séparés</span>
                         </div>
                         <span className="font-mono font-black text-amber-300">
                           +{Math.round(bucket.retraitAr).toLocaleString('fr-FR')} Ar
@@ -6970,15 +7766,15 @@ export default function App() {
                 })()}
               </div>
 
-              {/* PRIX EXCHANGE RÉEL VS PRIX SALOMA EN TEMPS RÉEL (1:1 WEBSOCKET) */}
+              {/* PRIX SPONSOR VS PRIX CLIENT SALOMA + MARGE % + FRAIS ESTIMÉS + PROFIT NET (ADMIN ONLY) */}
               <div className="p-3.5 rounded-2xl bg-[#1D1240] border-2 border-[#8B5CF6]/50 space-y-2.5">
                 <div className="flex justify-between items-center">
                   <div>
                     <span className="text-xs font-black text-white block">
-                      Prix {adminBybitStatus?.primaryExchange || activeBrokerExchange} = Prix SALOMA (1:1 LIVE WebSocket)
+                      Prix {adminBybitStatus?.primaryExchange || activeBrokerExchange} (Sponsor) vs Prix Client SALOMA
                     </span>
                     <span className="text-[10px] text-purple-300 block">
-                      0.1% frais Exchange récupéré en interne (analana frais), strictement masqué côté client
+                      Prix Client = Prix Sponsor × (1 + Marge %) • Frais Sponsor 0.1% et Profit net affichés uniquement ici
                     </span>
                   </div>
                   <span
@@ -6993,33 +7789,53 @@ export default function App() {
                   </span>
                 </div>
 
-                <div className="overflow-y-auto max-h-72 rounded-xl border border-purple-500/30 text-[11px]">
+                <div className="overflow-x-auto overflow-y-auto max-h-80 rounded-xl border border-purple-500/30 text-[10px]">
                   <table className="w-full text-left font-mono">
-                    <thead className="bg-[#100926] text-purple-300 text-[10px] sticky top-0">
+                    <thead className="bg-[#100926] text-purple-300 text-[9px] sticky top-0">
                       <tr>
-                        <th className="px-2.5 py-2">Paire</th>
-                        <th className="px-2.5 py-2 text-right">
-                          {adminBybitStatus?.primaryExchange || activeBrokerExchange} Réel
-                        </th>
-                        <th className="px-2.5 py-2 text-right">SALOMA</th>
-                        <th className="px-2.5 py-2 text-right">Align.</th>
+                        <th className="px-2 py-2">Paire</th>
+                        <th className="px-2 py-2 text-right">Sponsor</th>
+                        <th className="px-2 py-2 text-right">Marge</th>
+                        <th className="px-2 py-2 text-right">Client</th>
+                        <th className="px-2 py-2 text-right">Frais est.</th>
+                        <th className="px-2 py-2 text-right">Profit net</th>
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-purple-500/20 bg-[#150D2E]">
-                      {adminMarketComparison.map(row => (
-                        <tr key={row.symbol}>
-                          <td className="px-2.5 py-1.5 font-bold text-white">{row.symbol}</td>
-                          <td className="px-2.5 py-1.5 text-right text-sky-300">
-                            ${formatCoinPrice(row.bybitPrice)}
-                          </td>
-                          <td className="px-2.5 py-1.5 text-right text-emerald-400 font-bold">
-                            ${formatCoinPrice(row.salomaPrice)}
-                          </td>
-                          <td className="px-2.5 py-1.5 text-right text-emerald-300">
-                            {row.spreadPct === 0 ? '1:1 (0%)' : `${row.spreadPct}%`}
-                          </td>
-                        </tr>
-                      ))}
+                      {adminMarketComparison.map(row => {
+                        const sp = row.sponsorPrice ?? row.bybitPrice;
+                        const cp = row.clientPrice ?? row.salomaPrice;
+                        const mPct = row.marginPct ?? 0.1;
+                        const estFee = row.estimatedFee ?? sp * 0.001;
+                        const netProfit = row.estimatedNetProfit ?? cp - sp - estFee;
+                        return (
+                          <tr key={row.symbol}>
+                            <td className="px-2 py-1.5 font-bold text-white">{row.symbol}</td>
+                            <td className="px-2 py-1.5 text-right text-sky-300">
+                              ${formatCoinPrice(sp)}
+                            </td>
+                            <td className="px-2 py-1.5 text-right text-purple-200">
+                              {mPct}%
+                            </td>
+                            <td className="px-2 py-1.5 text-right text-emerald-400 font-bold">
+                              ${formatCoinPrice(cp)}
+                            </td>
+                            <td className="px-2 py-1.5 text-right text-amber-300">
+                              ${estFee < 0.0001 ? estFee.toFixed(8) : formatCoinPrice(estFee)}
+                            </td>
+                            <td
+                              className={`px-2 py-1.5 text-right font-bold ${
+                                netProfit >= 0 ? 'text-emerald-300' : 'text-rose-400'
+                              }`}
+                            >
+                              {netProfit >= 0 ? '+' : ''}$
+                              {Math.abs(netProfit) < 0.0001
+                                ? netProfit.toFixed(8)
+                                : formatCoinPrice(Math.abs(netProfit))}
+                            </td>
+                          </tr>
+                        );
+                      })}
                     </tbody>
                   </table>
                 </div>
@@ -7028,27 +7844,140 @@ export default function App() {
           )}
 
           {adminTab === 'trading' && (
-            <div className="p-3.5 rounded-2xl bg-[#1D1240] border-2 border-[#8B5CF6]/50 space-y-2">
-              <span className="text-xs font-black text-white block">
-                Trades Réels ({adminTrades.length})
-              </span>
-              <div className="space-y-1.5 max-h-96 overflow-y-auto">
-                {adminTrades.map(tr => (
-                  <div key={tr.$id} className="p-2.5 rounded-xl bg-[#150D2E] text-xs border border-purple-500/20 space-y-1">
-                    <div className="flex justify-between font-bold">
-                      <span className="text-white">
-                        {tr.paire} ({tr.type}) {tr.mode ? `• ${tr.mode}` : ''}
-                      </span>
-                      <span className="text-purple-300 font-mono">{tr.statut}</span>
-                    </div>
-                    <div className="flex justify-between text-[11px] font-mono">
-                      <span className="text-purple-400">{Number(tr.montant).toLocaleString('fr-FR')} Ar</span>
-                      <span className={Number(tr.profit) >= 0 ? 'text-emerald-400' : 'text-rose-400'}>
-                        Profit: {Number(tr.profit).toLocaleString('fr-FR')} Ar
+            <div className="space-y-4">
+              {/* ADMIN AUTO BUY / SELL : CONFIGURATION MARGE BYBIT & FRAIS SALOMA */}
+              <div className="p-4 rounded-3xl bg-[#1D1240] border-2 border-emerald-400/70 space-y-3 shadow-[0_0_20px_rgba(16,185,129,0.18)]">
+                <div className="flex items-center justify-between gap-2">
+                  <div className="flex items-center gap-2">
+                    <Bot className="w-5 h-5 text-emerald-400" />
+                    <div>
+                      <h3 className="font-black text-white text-sm">Auto Buy / Sell — Marge Bybit &amp; Frais SALOMA</h3>
+                      <span className="text-[10px] text-purple-300 block">
+                        Modifiable en temps réel : récupération frais Bybit (cachée) + frais SALOMA transparents client
                       </span>
                     </div>
                   </div>
-                ))}
+                </div>
+
+                <div className="grid grid-cols-1 gap-2.5 text-xs">
+                  <div className="p-2.5 rounded-xl bg-[#150D2E] border border-sky-500/40 space-y-1">
+                    <div className="flex justify-between items-center">
+                      <label className="font-black text-sky-300 text-[11px]">
+                        % Marge récupération frais Bybit (cachée dans Prix Client)
+                      </label>
+                      <span className="text-[9px] font-mono text-purple-300">Défaut: 0.1%</span>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <input
+                        type="number"
+                        min={0}
+                        max={5}
+                        step={0.01}
+                        value={adminFeeInputs.bybitRecoveryMarginPct}
+                        onChange={e =>
+                          setAdminFeeInputs(prev => ({ ...prev, bybitRecoveryMarginPct: e.target.value }))
+                        }
+                        className="flex-1 px-3 py-1.5 rounded-lg bg-[#100926] border border-sky-500/50 text-white font-mono font-bold text-xs"
+                      />
+                      <span className="font-mono font-black text-sky-300">%</span>
+                    </div>
+                  </div>
+
+                  <div className="grid grid-cols-2 gap-2">
+                    <div className="p-2.5 rounded-xl bg-[#150D2E] border border-emerald-500/40 space-y-1">
+                      <label className="font-black text-emerald-300 text-[10px] block">
+                        Frais Trade % (défaut 0.1%)
+                      </label>
+                      <input
+                        type="number"
+                        min={0}
+                        max={5}
+                        step={0.01}
+                        value={adminFeeInputs.tradeFeePct}
+                        onChange={e => setAdminFeeInputs(prev => ({ ...prev, tradeFeePct: e.target.value }))}
+                        className="w-full px-2.5 py-1.5 rounded-lg bg-[#100926] border border-emerald-500/50 text-white font-mono font-bold text-xs"
+                      />
+                    </div>
+                    <div className="p-2.5 rounded-xl bg-[#150D2E] border border-purple-500/40 space-y-1">
+                      <label className="font-black text-purple-300 text-[10px] block">
+                        Frais Échange % (défaut 0.1%)
+                      </label>
+                      <input
+                        type="number"
+                        min={0}
+                        max={5}
+                        step={0.01}
+                        value={adminFeeInputs.exchangeFeePct}
+                        onChange={e => setAdminFeeInputs(prev => ({ ...prev, exchangeFeePct: e.target.value }))}
+                        className="w-full px-2.5 py-1.5 rounded-lg bg-[#100926] border border-purple-500/50 text-white font-mono font-bold text-xs"
+                      />
+                    </div>
+                  </div>
+
+                  <div className="grid grid-cols-2 gap-2">
+                    <div className="p-2.5 rounded-xl bg-[#150D2E] border border-amber-500/40 space-y-1">
+                      <label className="font-black text-amber-300 text-[10px] block">
+                        Frais Retrait % (défaut 0.15%)
+                      </label>
+                      <input
+                        type="number"
+                        min={0}
+                        max={5}
+                        step={0.01}
+                        value={adminFeeInputs.withdrawFeePct}
+                        onChange={e => setAdminFeeInputs(prev => ({ ...prev, withdrawFeePct: e.target.value }))}
+                        className="w-full px-2.5 py-1.5 rounded-lg bg-[#100926] border border-amber-500/50 text-white font-mono font-bold text-xs"
+                      />
+                    </div>
+                    <div className="p-2.5 rounded-xl bg-[#150D2E] border border-amber-500/40 space-y-1">
+                      <label className="font-black text-amber-300 text-[10px] block">
+                        Frais Réseau (USDT, déf. 0.50)
+                      </label>
+                      <input
+                        type="number"
+                        min={0}
+                        max={100}
+                        step={0.05}
+                        value={adminFeeInputs.networkFeeUsdt}
+                        onChange={e => setAdminFeeInputs(prev => ({ ...prev, networkFeeUsdt: e.target.value }))}
+                        className="w-full px-2.5 py-1.5 rounded-lg bg-[#100926] border border-amber-500/50 text-white font-mono font-bold text-xs"
+                      />
+                    </div>
+                  </div>
+                </div>
+
+                <button
+                  type="button"
+                  disabled={adminFeeSaving}
+                  onClick={() => void handleAdminSaveFees()}
+                  className="w-full py-2.5 rounded-xl bg-gradient-to-r from-emerald-600 to-[#7C3AED] text-white font-black text-xs shadow disabled:opacity-50"
+                >
+                  {adminFeeSaving ? 'Enregistrement...' : 'Enregistrer Marge Bybit & Frais SALOMA'}
+                </button>
+              </div>
+
+              <div className="p-3.5 rounded-2xl bg-[#1D1240] border-2 border-[#8B5CF6]/50 space-y-2">
+                <span className="text-xs font-black text-white block">
+                  Trades Réels ({adminTrades.length})
+                </span>
+                <div className="space-y-1.5 max-h-96 overflow-y-auto">
+                  {adminTrades.map(tr => (
+                    <div key={tr.$id} className="p-2.5 rounded-xl bg-[#150D2E] text-xs border border-purple-500/20 space-y-1">
+                      <div className="flex justify-between font-bold">
+                        <span className="text-white">
+                          {tr.paire} ({tr.type}) {tr.mode ? `• ${tr.mode}` : ''}
+                        </span>
+                        <span className="text-purple-300 font-mono">{tr.statut}</span>
+                      </div>
+                      <div className="flex justify-between text-[11px] font-mono">
+                        <span className="text-purple-400">{Number(tr.montant).toLocaleString('fr-FR')} Ar</span>
+                        <span className={Number(tr.profit) >= 0 ? 'text-emerald-400' : 'text-rose-400'}>
+                          Profit: {Number(tr.profit).toLocaleString('fr-FR')} Ar
+                        </span>
+                      </div>
+                    </div>
+                  ))}
+                </div>
               </div>
             </div>
           )}
@@ -7121,13 +8050,107 @@ export default function App() {
           )}
 
           {/* ========================================================
-              ADMIN - 3 APIS SÉPARÉES : BYBIT / OKX / BINANCE (SECRETS ****)
+              ADMIN - 3 APIS SÉPARÉES : BYBIT / OKX / BINANCE (SECRETS **** + STATUT TEMPS RÉEL + MARGE %)
              ======================================================== */}
           {adminTab === 'apis' && (
             <div className="space-y-4">
+              {/* ADMIN CONFIGURATION FRAIS SALOMA & MARGE RÉCUPÉRATION BYBIT */}
+              <div className="p-4 rounded-3xl bg-[#1D1240] border-2 border-emerald-400/70 space-y-3">
+                <div className="flex items-center justify-between gap-2">
+                  <div>
+                    <h3 className="font-black text-white text-sm">Auto Buy / Sell — Marge Bybit &amp; Frais SALOMA</h3>
+                    <span className="text-[10px] text-purple-300 block">
+                      Bybit garantit la liquidité • SALOMA récupère {adminFeeInputs.bybitRecoveryMarginPct}% dans le prix + affiche ses frais au client
+                    </span>
+                  </div>
+                </div>
+                <div className="grid grid-cols-2 gap-2 text-xs">
+                  <div className="col-span-2 p-2.5 rounded-xl bg-[#150D2E] border border-sky-500/40 space-y-1">
+                    <label className="font-black text-sky-300 text-[10px] block">
+                      % Marge récupération frais Bybit (défaut 0.1%)
+                    </label>
+                    <input
+                      type="number"
+                      min={0}
+                      max={5}
+                      step={0.01}
+                      value={adminFeeInputs.bybitRecoveryMarginPct}
+                      onChange={e =>
+                        setAdminFeeInputs(prev => ({ ...prev, bybitRecoveryMarginPct: e.target.value }))
+                      }
+                      className="w-full px-2.5 py-1.5 rounded-lg bg-[#100926] border border-sky-500/50 text-white font-mono font-bold text-xs"
+                    />
+                  </div>
+                  <div className="p-2.5 rounded-xl bg-[#150D2E] border border-emerald-500/40 space-y-1">
+                    <label className="font-black text-emerald-300 text-[10px] block">
+                      Frais Trade % (déf. 0.1%)
+                    </label>
+                    <input
+                      type="number"
+                      min={0}
+                      max={5}
+                      step={0.01}
+                      value={adminFeeInputs.tradeFeePct}
+                      onChange={e => setAdminFeeInputs(prev => ({ ...prev, tradeFeePct: e.target.value }))}
+                      className="w-full px-2.5 py-1.5 rounded-lg bg-[#100926] border border-emerald-500/50 text-white font-mono font-bold text-xs"
+                    />
+                  </div>
+                  <div className="p-2.5 rounded-xl bg-[#150D2E] border border-purple-500/40 space-y-1">
+                    <label className="font-black text-purple-300 text-[10px] block">
+                      Frais Échange % (déf. 0.1%)
+                    </label>
+                    <input
+                      type="number"
+                      min={0}
+                      max={5}
+                      step={0.01}
+                      value={adminFeeInputs.exchangeFeePct}
+                      onChange={e => setAdminFeeInputs(prev => ({ ...prev, exchangeFeePct: e.target.value }))}
+                      className="w-full px-2.5 py-1.5 rounded-lg bg-[#100926] border border-purple-500/50 text-white font-mono font-bold text-xs"
+                    />
+                  </div>
+                  <div className="p-2.5 rounded-xl bg-[#150D2E] border border-amber-500/40 space-y-1">
+                    <label className="font-black text-amber-300 text-[10px] block">
+                      Frais Retrait % (déf. 0.15%)
+                    </label>
+                    <input
+                      type="number"
+                      min={0}
+                      max={5}
+                      step={0.01}
+                      value={adminFeeInputs.withdrawFeePct}
+                      onChange={e => setAdminFeeInputs(prev => ({ ...prev, withdrawFeePct: e.target.value }))}
+                      className="w-full px-2.5 py-1.5 rounded-lg bg-[#100926] border border-amber-500/50 text-white font-mono font-bold text-xs"
+                    />
+                  </div>
+                  <div className="p-2.5 rounded-xl bg-[#150D2E] border border-amber-500/40 space-y-1">
+                    <label className="font-black text-amber-300 text-[10px] block">
+                      Frais Réseau (USDT, déf. 0.50)
+                    </label>
+                    <input
+                      type="number"
+                      min={0}
+                      max={100}
+                      step={0.05}
+                      value={adminFeeInputs.networkFeeUsdt}
+                      onChange={e => setAdminFeeInputs(prev => ({ ...prev, networkFeeUsdt: e.target.value }))}
+                      className="w-full px-2.5 py-1.5 rounded-lg bg-[#100926] border border-amber-500/50 text-white font-mono font-bold text-xs"
+                    />
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  disabled={adminFeeSaving}
+                  onClick={() => void handleAdminSaveFees()}
+                  className="w-full py-2.5 rounded-xl bg-gradient-to-r from-emerald-600 to-[#7C3AED] text-white font-black text-xs shadow disabled:opacity-50"
+                >
+                  {adminFeeSaving ? 'Enregistrement...' : 'Enregistrer Marge Bybit & Frais SALOMA'}
+                </button>
+              </div>
+
               {/* CHOIX DE L'API PRINCIPALE POUR ENVOI DES ORDRES */}
               <div className="p-4 rounded-3xl bg-[#1D1240] border-2 border-[#8B5CF6] space-y-3">
-                <div className="flex items-center justify-between">
+                <div className="flex items-center justify-between gap-2">
                   <div className="flex items-center gap-2">
                     <Server className="w-5 h-5 text-emerald-400" />
                     <div>
@@ -7137,6 +8160,26 @@ export default function App() {
                       </span>
                     </div>
                   </div>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      void handleTestSponsorConnection('bybit');
+                      void handleTestSponsorConnection('okx');
+                      void handleTestSponsorConnection('binance');
+                    }}
+                    className="px-2.5 py-1.5 rounded-xl bg-[#23154D] hover:bg-[#7C3AED] border border-[#8B5CF6]/60 text-[10px] font-black text-white inline-flex items-center gap-1 transition"
+                  >
+                    <RefreshCw
+                      className={`w-3 h-3 ${
+                        sponsorConnectionStatus.bybit.loading ||
+                        sponsorConnectionStatus.okx.loading ||
+                        sponsorConnectionStatus.binance.loading
+                          ? 'animate-spin'
+                          : ''
+                      }`}
+                    />
+                    <span>Tester Tout</span>
+                  </button>
                 </div>
                 <div className="grid grid-cols-3 gap-2">
                   {(['bybit', 'okx', 'binance'] as const).map(id => {
@@ -7170,6 +8213,7 @@ export default function App() {
                   label: id.toUpperCase(),
                   enabled: id === 'bybit',
                   isPrimary: id === 'bybit',
+                  marginPct: 0.1,
                   hasApiKey: false,
                   apiKeyMasked: '',
                   hasSecret: false,
@@ -7178,6 +8222,15 @@ export default function App() {
                   passphraseMasked: ''
                 };
                 const inputs = apiFormInputs[id];
+                const conn = sponsorConnectionStatus[id];
+                const marginStr = apiMarginInputs[id] ?? String(cfg.marginPct ?? 0.1);
+                const parsedMargin = Number(String(marginStr).replace(',', '.'));
+                const safeMarginPct = Number.isFinite(parsedMargin) ? Math.min(5, Math.max(0, parsedMargin)) : 0.1;
+                const sampleSponsorPrice = 0.00008;
+                const sampleClientPrice = sampleSponsorPrice * (1 + safeMarginPct / 100);
+                const sampleFeeEst = sampleSponsorPrice * 0.001;
+                const sampleNetProfit = sampleClientPrice - sampleSponsorPrice - sampleFeeEst;
+
                 return (
                   <div
                     key={id}
@@ -7189,7 +8242,7 @@ export default function App() {
                   >
                     <div className="flex items-center justify-between gap-2">
                       <div>
-                        <div className="flex items-center gap-2">
+                        <div className="flex items-center gap-2 flex-wrap">
                           <h4 className="font-black text-white text-sm">{cfg.label} API</h4>
                           {cfg.isPrimary && (
                             <span className="text-[9px] font-black px-2 py-0.5 rounded bg-emerald-500/20 text-emerald-300 border border-emerald-400/50">
@@ -7197,8 +8250,8 @@ export default function App() {
                             </span>
                           )}
                         </div>
-                        <span className="text-[10px] font-mono text-purple-300">
-                          {cfg.hasSecret ? 'Secret configuré : ****' : 'Aucune clé secrète enregistrée'}
+                        <span className="text-[10px] font-mono text-purple-300 block">
+                          {cfg.hasSecret ? 'Secret Admin : ****' : 'Fallback Admin : non saisi'}
                         </span>
                       </div>
 
@@ -7206,7 +8259,7 @@ export default function App() {
                         type="button"
                         disabled={apiActionLoading === `toggle-${id}`}
                         onClick={() => handleAdminToggleApi(id, !cfg.enabled)}
-                        className={`px-3 py-1.5 rounded-xl text-[11px] font-black transition ${
+                        className={`px-3 py-1.5 rounded-xl text-[11px] font-black transition shrink-0 ${
                           cfg.enabled
                             ? 'bg-emerald-600/25 border border-emerald-400 text-emerald-300'
                             : 'bg-rose-600/20 border border-rose-500/50 text-rose-300'
@@ -7216,6 +8269,95 @@ export default function App() {
                       </button>
                     </div>
 
+                    {/* INDICATEUR CONNEXION EN TEMPS RÉEL + BOUTON TESTER CONNEXION */}
+                    <div className="p-2.5 rounded-2xl bg-[#150D2E] border border-[#8B5CF6]/40 flex items-center justify-between gap-2">
+                      <div className="min-w-0">
+                        {conn.loading ? (
+                          <span className="text-[11px] font-mono font-bold text-purple-200 flex items-center gap-1.5">
+                            <RefreshCw className="w-3.5 h-3.5 animate-spin text-[#8B5CF6]" />
+                            Vérification en cours...
+                          </span>
+                        ) : conn.connected ? (
+                          <div>
+                            <span className="text-[11px] font-mono font-black text-emerald-300 block">
+                              Connecté ✅ - Solde: {conn.usdtBalance.toLocaleString('en-US', { maximumFractionDigits: 4 })} USDT
+                            </span>
+                            <span className="text-[9px] font-mono text-purple-300 block">
+                              Source : {conn.source === 'vercel_env' ? 'Variables Vercel' : 'Clés saisies Admin'}
+                            </span>
+                          </div>
+                        ) : (
+                          <div>
+                            <span className="text-[11px] font-mono font-black text-rose-300 block">
+                              Non connecté ❌
+                            </span>
+                            {conn.tested && conn.message && (
+                              <span className="text-[9px] font-mono text-rose-200/80 block truncate">
+                                {conn.message}
+                              </span>
+                            )}
+                          </div>
+                        )}
+                      </div>
+                      <button
+                        type="button"
+                        disabled={conn.loading}
+                        onClick={() => void handleTestSponsorConnection(id)}
+                        className="px-2.5 py-1.5 rounded-xl bg-[#23154D] hover:bg-[#7C3AED] border border-[#8B5CF6]/70 text-white text-[10px] font-black shrink-0 inline-flex items-center gap-1 disabled:opacity-50 transition"
+                      >
+                        <RefreshCw className={`w-3 h-3 ${conn.loading ? 'animate-spin' : ''}`} />
+                        <span>Tester Connexion</span>
+                      </button>
+                    </div>
+
+                    {/* CHAMP MODIFIABLE : MARGE % (RÉCUPÉRATION FRAIS) PAR SPONSOR */}
+                    <div className="p-3 rounded-2xl bg-[#150D2E] border border-emerald-500/35 space-y-2 text-xs">
+                      <div className="flex items-center justify-between gap-2">
+                        <label className="text-[11px] font-black text-emerald-300">
+                          Marge % (récupération frais) — {cfg.label}
+                        </label>
+                        <span className="text-[10px] font-mono text-purple-300">0% – 5%</span>
+                      </div>
+                      <div className="flex items-center gap-2">
+                        <input
+                          type="number"
+                          min={0}
+                          max={5}
+                          step={0.01}
+                          value={marginStr}
+                          onChange={e =>
+                            setApiMarginInputs(prev => ({
+                              ...prev,
+                              [id]: e.target.value
+                            }))
+                          }
+                          className="flex-1 px-3 py-2 rounded-xl bg-[#100926] border border-[#8B5CF6]/60 text-white font-mono font-black text-xs focus:outline-none focus:border-emerald-400"
+                        />
+                        <span className="font-mono font-black text-purple-200 text-xs">%</span>
+                        <button
+                          type="button"
+                          disabled={apiActionLoading === `margin-${id}`}
+                          onClick={() => void handleAdminSaveApiMargin(id)}
+                          className="px-3 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white font-black text-[11px] shrink-0 disabled:opacity-50 transition"
+                        >
+                          {apiActionLoading === `margin-${id}` ? '...' : 'Appliquer'}
+                        </button>
+                      </div>
+                      <div className="grid grid-cols-2 gap-x-3 gap-y-1 pt-1 border-t border-purple-500/20 text-[10px] font-mono">
+                        <span className="text-purple-300">Prix Sponsor ex:</span>
+                        <span className="text-right text-sky-300">${sampleSponsorPrice.toFixed(8)}</span>
+                        <span className="text-purple-300">Prix Client ({safeMarginPct}%):</span>
+                        <span className="text-right text-emerald-400 font-bold">${sampleClientPrice.toFixed(8)}</span>
+                        <span className="text-purple-300">Frais estimés (0.1%):</span>
+                        <span className="text-right text-amber-300">${sampleFeeEst.toFixed(8)}</span>
+                        <span className="text-purple-300">Profit net estimé:</span>
+                        <span className={`text-right font-bold ${sampleNetProfit >= 0 ? 'text-emerald-300' : 'text-rose-400'}`}>
+                          {sampleNetProfit >= 0 ? '+' : ''}${sampleNetProfit.toFixed(8)}
+                        </span>
+                      </div>
+                    </div>
+
+                    {/* CHAMPS CLÉ / SECRET CONSERVÉS EN SECOURS */}
                     <div className="space-y-2.5 text-xs">
                       <div>
                         <label className="text-[10px] font-bold text-purple-300 block mb-1">
