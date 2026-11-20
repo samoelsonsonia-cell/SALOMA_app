@@ -18,7 +18,12 @@ import {
   Permission,
   Role
 } from 'node-appwrite';
-import { findCoinNetwork } from './src/services/priceAggregator';
+import {
+  TEST_MIN_USD,
+  computeMinCoinForUsd,
+  findCoinNetwork,
+  formatMinCoinQty
+} from './src/services/priceAggregator';
 import {
   executeBuy,
   executeSell,
@@ -30,6 +35,7 @@ import {
 
 const PORT = 3000;
 const USD_TO_MGA = 4750;
+const MIN_TRADE_AR = Math.round(TEST_MIN_USD * USD_TO_MGA);
 const SALOMA_SPREAD_RATE = 0; // PRIX SALOMA = PRIX EXACT BYBIT / OKX / BINANCE (1:1 temps réel)
 const BYBIT_HIDDEN_FEE_RATE = 0.001; // 0.1% Sponsor execution fee recovered inside Prix_Client = Prix_Bybit * (1 + Marge%)
 const TRADE_AR_KEY = '_trade_ar';
@@ -1317,22 +1323,22 @@ const CRYPTO_NETWORK_FEES: Record<string, { chain: string; fee: number; minDepos
   USDT: {
     chain: 'TRC20',
     fee: 1.2,
-    minDeposit: 5,
-    minWithdraw: 5,
+    minDeposit: 0.5,
+    minWithdraw: 0.5,
     depositAddress: 'TJX9zK2B7YmNQ9sLo2481A2026SalomaTRC'
   },
   BTC: {
     chain: 'Bitcoin',
     fee: 0.00025,
-    minDeposit: 0.0002,
-    minWithdraw: 0.0005,
+    minDeposit: computeMinCoinForUsd(68420, 'BTC', TEST_MIN_USD),
+    minWithdraw: computeMinCoinForUsd(68420, 'BTC', TEST_MIN_USD),
     depositAddress: 'bc1q9h6x743j2y0z5v4km89x2026saloma'
   },
   ETH: {
     chain: 'ERC20',
     fee: 0.0035,
-    minDeposit: 0.005,
-    minWithdraw: 0.01,
+    minDeposit: computeMinCoinForUsd(3580, 'ETH', TEST_MIN_USD),
+    minWithdraw: computeMinCoinForUsd(3580, 'ETH', TEST_MIN_USD),
     depositAddress: '0x992B28B3eB9229555C09F6eF83A8992026'
   }
 };
@@ -3179,6 +3185,11 @@ export function createSalomaApiApp() {
 
   app.post('/api/wallet/deposit', requireAuth, requireVerified, async (req: AuthedRequest, res: Response) => {
     try {
+      try {
+        await refreshMarketPrices();
+      } catch {
+        // use cached price when upstream refresh lags
+      }
       const userId = req.authUser!.$id;
       const montant = Number(req.body?.montant);
       const methode = String(req.body?.methode || 'Crypto').trim();
@@ -3192,17 +3203,31 @@ export function createSalomaApiApp() {
         res.status(400).json({ error: 'Seuls les dépôts Crypto sont acceptés.' });
         return;
       }
-      const coinNet = findCoinNetwork(devise, req.body?.networkCode || networkName || chainLabel);
+      const livePriceUsd =
+        devise === 'USDT' ? 1 : getSalomaPriceUsd(devise) || Number(req.body?.priceUsd || 0);
+      const coinNet = findCoinNetwork(
+        devise,
+        req.body?.networkCode || networkName || chainLabel,
+        livePriceUsd
+      );
       const fallbackCfg = CRYPTO_NETWORK_FEES[devise];
       if (!coinNet && !fallbackCfg) {
         res.status(400).json({ error: `Crypto non supportée (${devise}). Veuillez choisir parmi les 50 coins SALOMA.` });
         return;
       }
-      const minDeposit = coinNet ? coinNet.minDeposit : fallbackCfg.minDeposit;
+      const minDeposit =
+        livePriceUsd > 0
+          ? computeMinCoinForUsd(livePriceUsd, devise, TEST_MIN_USD)
+          : coinNet
+          ? coinNet.minDeposit
+          : fallbackCfg.minDeposit;
+      const minDepositAccepted = Number((minDeposit * 0.98).toFixed(8));
       const resolvedChain = chainLabel || coinNet?.chain || fallbackCfg?.chain || devise;
 
-      if (Number.isNaN(montant) || montant < minDeposit) {
-        res.status(400).json({ error: `Montant minimum de dépôt ${devise} : ${minDeposit} ${devise}.` });
+      if (Number.isNaN(montant) || montant < minDepositAccepted) {
+        res.status(400).json({
+          error: `Min Dépôt : 0.5$ équivalent (${formatMinCoinQty(minDeposit)} ${devise}).`
+        });
         return;
       }
       if (!txHash || txHash.length < 6) {
@@ -3287,7 +3312,13 @@ export function createSalomaApiApp() {
           : effectivePriceUsd > 0
           ? Number((configuredNetFeeUsdt / effectivePriceUsd).toFixed(8))
           : fallbackCoinNetFee;
-      const minWithdraw = coinNet ? coinNet.minWithdraw : fallbackCfg.minWithdraw;
+      const minWithdraw =
+        effectivePriceUsd > 0
+          ? computeMinCoinForUsd(effectivePriceUsd, devise, TEST_MIN_USD)
+          : coinNet
+          ? coinNet.minWithdraw
+          : fallbackCfg.minWithdraw;
+      const minWithdrawAccepted = Number((minWithdraw * 0.98).toFixed(8));
       const resolvedChain = chainLabel || coinNet?.chain || fallbackCfg?.chain || devise;
       const totalFrais = Number((salomaWithdrawFee + networkFee).toFixed(8));
 
@@ -3297,8 +3328,10 @@ export function createSalomaApiApp() {
         });
         return;
       }
-      if (montant < minWithdraw) {
-        res.status(400).json({ error: `Montant minimum de retrait ${devise} : ${minWithdraw} ${devise}.` });
+      if (montant < minWithdrawAccepted) {
+        res.status(400).json({
+          error: `Min Retrait : 0.5$ équivalent (${formatMinCoinQty(minWithdraw)} ${devise}).`
+        });
         return;
       }
       if (!numero_compte || numero_compte.length < 6) {
@@ -3572,8 +3605,8 @@ export function createSalomaApiApp() {
         usdtAmount = Number((cryptoQty * clientPrice).toFixed(4));
       }
 
-      if (usdtAmount < 0.1 || cryptoQty <= 0) {
-        res.status(400).json({ error: 'Montant minimum Spot SALOMA : 0.10 USDT.' });
+      if (usdtAmount < TEST_MIN_USD || cryptoQty <= 0) {
+        res.status(400).json({ error: 'Montant minimum Spot SALOMA : 0.50 USDT (Min : 0.5$).' });
         return;
       }
 
@@ -3831,8 +3864,10 @@ export function createSalomaApiApp() {
       const baseMode = String(req.body?.mode || 'Manuel').replace(/\s*\[(BYBIT|OKX|BINANCE)\]/gi, '').trim();
       const mode = baseMode || 'Manuel';
 
-      if (Number.isNaN(montant) || montant < 500) {
-        res.status(400).json({ error: 'Montant minimum de trading : 500 Ar.' });
+      if (Number.isNaN(montant) || montant < MIN_TRADE_AR) {
+        res.status(400).json({
+          error: `Montant minimum de trading : ${MIN_TRADE_AR.toLocaleString('fr-FR')} Ar (Min : 0.5$).`
+        });
         return;
       }
       if (Number.isNaN(prix) || prix <= 0) {

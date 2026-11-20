@@ -76,7 +76,10 @@ import {
   fetchSalomaMarketPrices,
   mergeSalomaMarketPrices,
   subscribeToPricesWebSocket,
-  formatCoinPrice
+  formatCoinPrice,
+  TEST_MIN_USD,
+  computeMinCoinForUsd,
+  formatMinCoinQty
 } from './services/priceAggregator';
 import {
   ENV_CONFIG,
@@ -96,6 +99,7 @@ import {
 
 const SESSION_STORAGE_KEY = 'saloma_session_secret';
 const USD_TO_MGA = 4750;
+const MIN_TRADE_AR = Math.round(TEST_MIN_USD * USD_TO_MGA);
 
 // --- APPWRITE DOCUMENT INTERFACES ---
 
@@ -515,6 +519,16 @@ export default function App() {
   const activeNetwork = selectedWalletCoin.networks[selectedNetworkIndex] || selectedWalletCoin.networks[0];
   const activeBlockchain = getBlockchainFromNetwork(activeNetwork);
   const activeNetworkLabel = getNetworkShortLabel(activeNetwork);
+  const activeMinCoinQty = useMemo(
+    () =>
+      computeMinCoinForUsd(selectedWalletCoin.price, selectedWalletCoin.symbol, TEST_MIN_USD) ||
+      activeNetwork.minDeposit,
+    [selectedWalletCoin.price, selectedWalletCoin.symbol, activeNetwork.minDeposit]
+  );
+  const activeMinCoinQtyLabel = useMemo(
+    () => formatMinCoinQty(activeMinCoinQty),
+    [activeMinCoinQty]
+  );
   const availableBlockchains = useMemo(
     () => Array.from(new Set(selectedWalletCoin.networks.map(getBlockchainFromNetwork))),
     [selectedWalletCoin]
@@ -1572,8 +1586,8 @@ export default function App() {
 
       // BUY -> executeBuy(clientId, pair, amountUsdt) : crée ClientTrade interne + hedge BYBIT en arrière-plan
       if (side === 'BUY') {
-        if (spotNumericInput <= 0 || spotOrderUsdtEquiv < 0.1) {
-          showToast('Montant minimum Spot SALOMA : 0.10 USDT.');
+        if (spotNumericInput <= 0 || spotOrderUsdtEquiv < TEST_MIN_USD) {
+          showToast('Min : 0.5$ (0.50 USDT).');
           return false;
         }
         const estimatedFeeUsdt = Number((spotOrderUsdtEquiv * feeRate).toFixed(6));
@@ -1673,8 +1687,8 @@ export default function App() {
       }
 
       // Sinon vente d'actifs crypto détenus dans le wallet Spot SALOMA
-      if (spotNumericInput <= 0 || spotOrderUsdtEquiv < 0.1) {
-        showToast('Montant minimum Spot SALOMA : 0.10 USDT.');
+      if (spotNumericInput <= 0 || spotOrderUsdtEquiv < TEST_MIN_USD) {
+        showToast('Min : 0.5$ (0.50 USDT).');
         return false;
       }
       const estimatedFeeUsdt = Number((spotOrderUsdtEquiv * feeRate).toFixed(6));
@@ -1769,8 +1783,8 @@ export default function App() {
       const estimatedFeeAr = Math.round(numericAmountAr * feeRate);
       const totalRequiredAr = numericAmountAr + estimatedFeeAr;
 
-      if (numericAmountAr < 500) {
-        showToast('Montant minimum de trading : 500 Ar.');
+      if (numericAmountAr < MIN_TRADE_AR) {
+        showToast(`Min : 0.5$ (${MIN_TRADE_AR.toLocaleString('fr-FR')} Ar).`);
         return false;
       }
       if (soldeCompteTradeAr <= 0 || totalRequiredAr > soldeCompteTradeAr) {
@@ -1842,7 +1856,11 @@ export default function App() {
 
     if (tradingModeType === 'SPOT') {
       if (side === 'BUY') {
-        if (spotOrderUsdtEquiv < 0.1 || spotOrderUsdtEquiv > clientUsdtBalance) {
+        if (spotOrderUsdtEquiv < TEST_MIN_USD) {
+          showToast('Min : 0.5$ (0.50 USDT).');
+          return;
+        }
+        if (spotOrderUsdtEquiv > clientUsdtBalance) {
           showToast('Solde USDT SALOMA insuffisant pour AUTO BUY.');
           return;
         }
@@ -1850,7 +1868,11 @@ export default function App() {
         showToast(`🤖 AUTO BUY Spot activé sur ${selectedCoin.symbol}/USDT`);
         void handleExecuteSpotOrder('BUY');
       } else {
-        if (spotOrderUsdtEquiv < 0.1 || spotOrderCryptoEquiv > clientSelectedCryptoBalance) {
+        if (spotOrderUsdtEquiv < TEST_MIN_USD) {
+          showToast('Min : 0.5$ (0.50 USDT).');
+          return;
+        }
+        if (spotOrderCryptoEquiv > clientSelectedCryptoBalance) {
           showToast(`Solde ${selectedCoin.symbol} SALOMA insuffisant pour AUTO SELL.`);
           return;
         }
@@ -1861,12 +1883,12 @@ export default function App() {
       return;
     }
 
-    if (soldeCompteTradeAr <= 0 || numericAmountAr > soldeCompteTradeAr) {
-      showToast('Solde Compte Trade insuffisant. Convertissez depuis votre Wallet vers Compte Trade.');
+    if (numericAmountAr < MIN_TRADE_AR) {
+      showToast(`Min : 0.5$ (${MIN_TRADE_AR.toLocaleString('fr-FR')} Ar).`);
       return;
     }
-    if (numericAmountAr < 500) {
-      showToast('Montant minimum de trading : 500 Ar.');
+    if (soldeCompteTradeAr <= 0 || numericAmountAr > soldeCompteTradeAr) {
+      showToast('Solde Compte Trade insuffisant. Convertissez depuis votre Wallet vers Compte Trade.');
       return;
     }
 
@@ -1939,8 +1961,8 @@ export default function App() {
       showToast('Solde Compte Trade insuffisant. Convertissez depuis votre Wallet vers Compte Trade.');
       return;
     }
-    if (numericBotAmountAr < 500) {
-      showToast('Montant minimum pour démarrer un Bot : 500 Ar.');
+    if (numericBotAmountAr < MIN_TRADE_AR) {
+      showToast(`Min : 0.5$ (${MIN_TRADE_AR.toLocaleString('fr-FR')} Ar).`);
       return;
     }
 
@@ -2191,8 +2213,8 @@ export default function App() {
     if (!(await ensureOnlineOrBlock())) return;
     const coinSym = selectedWalletCoin.symbol.toUpperCase();
     const amt = parseFloat(depositAmountInput);
-    if (isNaN(amt) || amt < activeNetwork.minDeposit) {
-      showToast(`Montant minimum de dépôt ${coinSym} (${activeNetworkLabel}) : ${activeNetwork.minDeposit} ${coinSym}.`);
+    if (isNaN(amt) || amt < Number((activeMinCoinQty * 0.98).toFixed(8))) {
+      showToast(`Min Dépôt : 0.5$ équivalent (${activeMinCoinQtyLabel} ${coinSym}).`);
       return;
     }
     if (!depositAccountInput.trim() || depositAccountInput.trim().length < 6) {
@@ -2213,6 +2235,7 @@ export default function App() {
           chain: activeBlockchain,
           networkCode: activeNetwork.chain,
           networkLabel: activeNetworkLabel,
+          priceUsd: selectedWalletCoin.price || 0,
           preuve: depositPreuveInput.trim()
         }
       });
@@ -2243,8 +2266,8 @@ export default function App() {
       );
       return;
     }
-    if (amt < activeNetwork.minWithdraw) {
-      showToast(`Montant minimum de retrait ${coinSym} (${activeNetworkLabel}) : ${activeNetwork.minWithdraw} ${coinSym}.`);
+    if (amt < Number((activeMinCoinQty * 0.98).toFixed(8))) {
+      showToast(`Min Retrait : 0.5$ équivalent (${activeMinCoinQtyLabel} ${coinSym}).`);
       return;
     }
     if (!withdrawAccountInput.trim() || withdrawAccountInput.trim().length < 6) {
@@ -5669,7 +5692,7 @@ export default function App() {
                           <div className="space-y-1.5">
                             <div className="flex items-center justify-between text-[10px] font-bold text-purple-300 px-0.5">
                               <span>
-                                Montant ({spotOrderUnit === 'USDT' ? 'USDT' : selectedCoin.symbol})
+                                Montant ({spotOrderUnit === 'USDT' ? 'USDT' : selectedCoin.symbol}) • <strong className="text-emerald-300">Min : 0.5$</strong>
                               </span>
                               <span className="font-mono text-emerald-300">
                                 {spotOrderUnit === 'USDT'
@@ -5688,7 +5711,11 @@ export default function App() {
                                     setSpotUnavailableNotice(null);
                                     setSpotAmountInput(sanitizeDecimalInput(e.target.value));
                                   }}
-                                  placeholder={spotOrderUnit === 'USDT' ? 'Ex: 10 USDT' : `Ex: 0.001 ${selectedCoin.symbol}`}
+                                  placeholder={
+                                    spotOrderUnit === 'USDT'
+                                      ? 'Min : 0.5$ (0.5 USDT)'
+                                      : `Min : 0.5$ (${formatMinCoinQty(computeMinCoinForUsd(selectedCoin.price, selectedCoin.symbol, TEST_MIN_USD))} ${selectedCoin.symbol})`
+                                  }
                                   className="w-full px-2.5 py-1.5 rounded-xl bg-[#150D2E] border border-purple-500/40 text-white text-xs font-mono font-bold focus:outline-none focus:border-[#8B5CF6]"
                                 />
                               </div>
@@ -5818,7 +5845,9 @@ export default function App() {
 
                           <div className="space-y-1.5">
                             <div className="flex items-center justify-between text-[10px] font-bold text-purple-300 px-0.5">
-                              <span>Montant ({selectedTradeCurrencyObj.shortLabel})</span>
+                              <span>
+                                Montant ({selectedTradeCurrencyObj.shortLabel}) • <strong className="text-emerald-300">Min : 0.5$</strong>
+                              </span>
                               <span className="font-mono text-emerald-300">
                                 {tradeAmountCurrency === 'ARIARY'
                                   ? `≈ $${(numericAmountAr / USD_TO_MGA).toFixed(2)} USD`
@@ -6103,7 +6132,7 @@ export default function App() {
                       <div>
                         <div className="flex justify-between items-center text-[11px] mb-1">
                           <label className="font-bold text-purple-300">
-                            Montant investi ({selectedBotCurrencyObj.shortLabel}) *
+                            Montant investi ({selectedBotCurrencyObj.shortLabel}) • <strong className="text-emerald-300">Min : 0.5$</strong>
                           </label>
                           <span className="font-mono text-[10px] text-emerald-300">
                             {botAmountCurrency === 'ARIARY'
@@ -6762,7 +6791,12 @@ export default function App() {
               </span>
               <div className="flex flex-wrap items-center justify-between gap-2 text-[10px] text-purple-300 pt-1">
                 <div className="text-left font-mono space-y-0.5">
-                  <span className="block">Min Dépôt : {activeNetwork.minDeposit} {selectedWalletCoin.symbol}</span>
+                  <span className="block text-emerald-300 font-bold">
+                    Min Dépôt : 0.5$ équivalent (ex: 0.5 USDT)
+                  </span>
+                  <span className="block text-purple-200">
+                    Min {selectedWalletCoin.symbol} : {activeMinCoinQtyLabel} {selectedWalletCoin.symbol}
+                  </span>
                   <span className="block text-purple-400">Coût réseau : {activeNetwork.withdrawFee} {selectedWalletCoin.symbol}</span>
                 </div>
                 <button
@@ -6791,7 +6825,7 @@ export default function App() {
                   inputMode="decimal"
                   value={depositAmountInput}
                   onChange={e => setDepositAmountInput(e.target.value.replace(/[^0-9.]/g, ''))}
-                  placeholder={`Min: ${activeNetwork.minDeposit} ${selectedWalletCoin.symbol}`}
+                  placeholder={`Min: ${activeMinCoinQtyLabel} ${selectedWalletCoin.symbol} (0.5$)`}
                   className="w-full px-3 py-2.5 rounded-xl bg-[#150D2E] border-2 border-[#8B5CF6]/40 text-white font-mono font-bold"
                 />
               </div>
@@ -6961,16 +6995,21 @@ export default function App() {
 
             <div className="space-y-3 text-xs">
               <div>
-                <label className="font-bold text-purple-300 block mb-1">
-                  Montant à retirer ({selectedWalletCoin.symbol}) *
-                </label>
+                <div className="flex items-center justify-between mb-1 gap-2">
+                  <label className="font-bold text-purple-300 block">
+                    Montant à retirer ({selectedWalletCoin.symbol}) *
+                  </label>
+                  <span className="text-[10px] font-mono text-emerald-300 font-bold">
+                    Min : {activeMinCoinQtyLabel} {selectedWalletCoin.symbol} (0.5$)
+                  </span>
+                </div>
                 <div className="relative">
                   <input
                     type="text"
                     inputMode="decimal"
                     value={withdrawAmountInput}
                     onChange={e => setWithdrawAmountInput(e.target.value.replace(/[^0-9.]/g, ''))}
-                    placeholder={`Min: ${activeNetwork.minWithdraw} ${selectedWalletCoin.symbol}`}
+                    placeholder={`Min: ${activeMinCoinQtyLabel} ${selectedWalletCoin.symbol} (0.5$)`}
                     className="w-full px-3 py-2.5 pr-16 rounded-xl bg-[#150D2E] border-2 border-[#8B5CF6]/40 text-white font-mono font-bold"
                   />
                   <button

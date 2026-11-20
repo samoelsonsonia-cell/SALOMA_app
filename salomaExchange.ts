@@ -483,8 +483,8 @@ export async function executeBuy(
   if (!baseSym || baseSym === 'USDT' || baseSym === 'AR') {
     return { ok: false, error: 'Veuillez sélectionner une paire crypto valide (ex: BTC/USDT).' };
   }
-  if (!Number.isFinite(amountUsdt) || amountUsdt < 0.1) {
-    return { ok: false, error: 'Montant minimum d’achat : 0.10 USDT.' };
+  if (!Number.isFinite(amountUsdt) || amountUsdt < 0.5) {
+    return { ok: false, error: 'Montant minimum d’achat : 0.50 USDT (Min : 0.5$).' };
   }
 
   const entryPrice = adapter.getSalomaPriceUsd(baseSym);
