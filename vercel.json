@@ -3,9 +3,10 @@
   "framework": "vite",
   "buildCommand": "npm run build",
   "outputDirectory": "dist",
+  "regions": ["fra1"],
   "rewrites": [
     {
-      "source": "/api/((?!admin/send-code$|admin/verify$|admin/apis/(?:bybit|okx|binance)$|bybit/(?:status|save)$|okx/status$|binance/status$).*)",
+      "source": "/api/((?!admin/send-code$|admin/verify$|admin/fees$|admin/apis/primary$|admin/apis/(?:bybit|okx|binance)(?:/margin|/toggle)?$|bybit/(?:status|save)$|okx/status$|binance/status$).*)",
       "destination": "/api/index?__saloma_path=$1"
     },
     {

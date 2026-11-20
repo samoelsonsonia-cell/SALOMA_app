@@ -68,6 +68,32 @@ function sendJson(res: ServerResponse, statusCode: number, payload: Record<strin
   }
 }
 
+async function readJsonBody(
+  req: IncomingMessage & { body?: unknown }
+): Promise<Record<string, unknown>> {
+  try {
+    if (req.body && typeof req.body === 'object' && !Buffer.isBuffer(req.body)) {
+      return req.body as Record<string, unknown>;
+    }
+    if (typeof req.body === 'string') {
+      return req.body.trim() ? (JSON.parse(req.body) as Record<string, unknown>) : {};
+    }
+    if (Buffer.isBuffer(req.body)) {
+      const txt = req.body.toString('utf8').trim();
+      return txt ? (JSON.parse(txt) as Record<string, unknown>) : {};
+    }
+    const chunks: Buffer[] = [];
+    for await (const chunk of req) {
+      chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk)));
+    }
+    const raw = Buffer.concat(chunks).toString('utf8').trim();
+    if (!raw) return {};
+    return JSON.parse(raw) as Record<string, unknown>;
+  } catch {
+    return {};
+  }
+}
+
 function verifyAdminHeaders(req: IncomingMessage): { ok: true } | { ok: false; error: string } {
   const configuredEmail = getServerAdminEmail();
   const configuredPin = getServerAdminPin();
@@ -134,7 +160,10 @@ function readAdminSavedBinanceFallback(): { apiKey: string; secret: string } | n
   return null;
 }
 
-export default async function handler(req: IncomingMessage, res: ServerResponse) {
+export default async function handler(
+  req: IncomingMessage & { body?: unknown },
+  res: ServerResponse
+) {
   try {
     const auth = verifyAdminHeaders(req);
     if (!auth.ok) {
@@ -142,14 +171,29 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
       return;
     }
 
+    const body = req.method === 'POST' ? await readJsonBody(req) : {};
+    const bodyKey = stripWrappingQuotes(body.apiKey).trim();
+    const bodySecret = stripWrappingQuotes(body.secret).trim();
+    const hasFormCreds =
+      Boolean(bodyKey) &&
+      Boolean(bodySecret) &&
+      !bodyKey.includes('****') &&
+      !/^\*+$/.test(bodySecret);
+
     const envKey = stripWrappingQuotes(process.env.BINANCE_API_KEY).trim();
     const envSecret = stripWrappingQuotes(process.env.BINANCE_API_SECRET).trim();
 
-    let apiKey = envKey;
-    let apiSecret = envSecret;
-    let source: 'vercel_env' | 'admin_saved' | 'none' = 'none';
+    let apiKey = '';
+    let apiSecret = '';
+    let source: 'admin_form' | 'vercel_env' | 'admin_saved' | 'none' = 'none';
 
-    if (apiKey && apiSecret) {
+    if (hasFormCreds) {
+      apiKey = bodyKey;
+      apiSecret = bodySecret;
+      source = 'admin_form';
+    } else if (envKey && envSecret) {
+      apiKey = envKey;
+      apiSecret = envSecret;
       source = 'vercel_env';
     } else {
       const saved = readAdminSavedBinanceFallback();
@@ -174,17 +218,19 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
     }
 
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 7500);
+    const timer = setTimeout(() => controller.abort(), 8000);
 
     try {
       const ts = Date.now();
-      const qs = `timestamp=${ts}&recvWindow=5000`;
+      const qs = `timestamp=${ts}&recvWindow=10000`;
       const sig = crypto.createHmac('sha256', apiSecret).update(qs).digest('hex');
 
       const r = await fetch(`https://api.binance.com/api/v3/account?${qs}&signature=${sig}`, {
         method: 'GET',
         headers: {
-          'X-MBX-APIKEY': apiKey
+          'X-MBX-APIKEY': apiKey,
+          Accept: 'application/json',
+          'User-Agent': 'SalomaTradingPlatform/1.0'
         },
         signal: controller.signal
       });
@@ -209,13 +255,22 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
       }
 
       if (!r.ok || !data || !Array.isArray(data.balances)) {
-        const msg = data?.msg || `Erreur authentification Binance (HTTP ${r.status}).`;
-        console.error('[SALOMA /api/binance/status] Échec vérification Binance:', msg);
+        const msg = data?.msg
+          ? `Binance (${data.code ?? r.status}): ${data.msg}`
+          : `Erreur authentification Binance (HTTP ${r.status}).`;
+        console.error('[SALOMA /api/binance/status] Échec vérification Binance:', {
+          httpStatus: r.status,
+          code: data?.code,
+          msg: data?.msg
+        });
         sendJson(res, 200, {
           sponsor: 'BINANCE',
           connected: false,
           usdtBalance: 0,
           source,
+          httpStatus: r.status,
+          retCode: data?.code,
+          retMsg: data?.msg,
           error: msg,
           message: msg
         });

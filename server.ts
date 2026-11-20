@@ -296,18 +296,44 @@ function resolveSponsorCredentials(provider: BrokerExchangeId): {
   return { apiKey: '', secret: '', passphrase: '', source: 'none' };
 }
 
-async function checkSponsorConnectionStatus(provider: BrokerExchangeId): Promise<{
+async function checkSponsorConnectionStatus(
+  provider: BrokerExchangeId,
+  overrideCreds?: { apiKey?: string; secret?: string; passphrase?: string }
+): Promise<{
   sponsor: 'BYBIT' | 'OKX' | 'BINANCE';
   connected: boolean;
   usdtBalance: number;
-  source: 'vercel_env' | 'admin_saved' | 'none';
+  source: 'admin_form' | 'vercel_env' | 'admin_saved' | 'none';
+  retCode?: number;
+  retMsg?: string;
+  httpStatus?: number;
+  endpoint?: string;
   error?: string;
   message?: string;
 }> {
   const sponsorUpper = provider.toUpperCase() as 'BYBIT' | 'OKX' | 'BINANCE';
-  const creds = resolveSponsorCredentials(provider);
+  const formKey = stripWrappingQuotes(overrideCreds?.apiKey).trim();
+  const formSecret = stripWrappingQuotes(overrideCreds?.secret).trim();
+  const formPass = stripWrappingQuotes(overrideCreds?.passphrase).trim();
+  const hasFormCreds =
+    Boolean(formKey) &&
+    Boolean(formSecret) &&
+    !formKey.includes('****') &&
+    !/^\*+$/.test(formSecret) &&
+    (provider !== 'okx' || (Boolean(formPass) && !/^\*+$/.test(formPass)));
+
+  const resolved = resolveSponsorCredentials(provider);
+  const creds = hasFormCreds
+    ? {
+        apiKey: formKey,
+        secret: formSecret,
+        passphrase: formPass,
+        source: 'admin_form' as const
+      }
+    : resolved;
+
   if (!creds.apiKey || !creds.secret || (provider === 'okx' && !creds.passphrase)) {
-    console.error(`[SALOMA /api/${provider}/status] Clé manquante dans Vercel (et aucun secours Admin).`);
+    console.error(`[SALOMA /api/${provider}/status] Clé manquante dans Vercel (et champs formulaire vides).`);
     return {
       sponsor: sponsorUpper,
       connected: false,
@@ -319,99 +345,173 @@ async function checkSponsorConnectionStatus(provider: BrokerExchangeId): Promise
   }
 
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), 7000);
+  const timer = setTimeout(() => controller.abort(), 9000);
   try {
     if (provider === 'bybit') {
-      const fetchBybitAccount = async (accountType: 'UNIFIED' | 'SPOT') => {
-        const timestamp = Date.now().toString();
-        const recvWindow = '5000';
-        const queryString = `accountType=${accountType}`;
-        const prehash = `${timestamp}${creds.apiKey}${recvWindow}${queryString}`;
-        const sign = crypto.createHmac('sha256', creds.secret).update(prehash).digest('hex');
-        const r = await fetch(`https://api.bybit.com/v5/account/wallet-balance?${queryString}`, {
-          method: 'GET',
-          headers: {
-            'X-BAPI-API-KEY': creds.apiKey,
-            'X-BAPI-SIGN': sign,
-            'X-BAPI-TIMESTAMP': timestamp,
-            'X-BAPI-RECV-WINDOW': recvWindow
-          },
-          signal: controller.signal
-        });
-        type BybitWalletResp = {
-          retCode?: number;
-          retMsg?: string;
-          result?: {
-            list?: Array<{
-              totalWalletBalance?: string;
-              coin?: Array<{ coin?: string; walletBalance?: string; equity?: string }>;
-            }>;
-          };
+      type BybitWalletResp = {
+        retCode?: number;
+        retMsg?: string;
+        result?: {
+          list?: Array<{
+            totalWalletBalance?: string;
+            coin?: Array<{ coin?: string; walletBalance?: string; equity?: string }>;
+          }>;
         };
-        const rawText = await r.text();
-        let data: BybitWalletResp | null = null;
-        try {
-          data = rawText ? (JSON.parse(rawText) as BybitWalletResp) : null;
-        } catch (parseErr) {
-          console.error('[SALOMA /api/bybit/status] Réponse Bybit non-JSON:', {
-            status: r.status,
-            accountType,
-            bodySnippet: rawText.slice(0, 300),
-            parseError: parseErr instanceof Error ? parseErr.message : String(parseErr)
-          });
-          return {
-            ok: false,
-            httpStatus: r.status,
-            data: null as BybitWalletResp | null,
-            rawError: `Réponse Bybit invalide (HTTP ${r.status})`
-          };
-        }
-        return { ok: r.ok, httpStatus: r.status, data, rawError: '' };
       };
 
-      let attempt = await fetchBybitAccount('UNIFIED');
-      if (attempt.data?.retCode !== 0) {
-        const fallbackSpot = await fetchBybitAccount('SPOT');
-        if (fallbackSpot.ok && fallbackSpot.data?.retCode === 0) {
-          attempt = fallbackSpot;
-        }
-      }
+      const domains = ['https://api.bybit.com', 'https://api.bytick.com'];
+      const recvWindow = '10000';
+      let lastHttpStatus = 0;
+      let lastRetCode: number | undefined;
+      let lastRetMsg = '';
+      let lastEndpoint = '';
+      let lastError = 'Erreur connexion Bybit.';
 
-      if (!attempt.ok || !attempt.data || attempt.data.retCode !== 0) {
-        const errMsg =
-          attempt.data?.retMsg ||
-          attempt.rawError ||
-          `Erreur authentification Bybit (HTTP ${attempt.httpStatus}).`;
-        console.error('[SALOMA /api/bybit/status] Échec Bybit:', {
-          httpStatus: attempt.httpStatus,
-          retCode: attempt.data?.retCode,
-          retMsg: attempt.data?.retMsg
-        });
-        return {
-          sponsor: 'BYBIT',
-          connected: false,
-          usdtBalance: 0,
-          source: creds.source,
-          error: errMsg,
-          message: errMsg
+      for (const baseUrl of domains) {
+        let serverTs = Date.now().toString();
+        try {
+          const tRes = await fetch(`${baseUrl}/v5/market/time`, {
+            headers: { Accept: 'application/json', 'User-Agent': 'SalomaTradingPlatform/1.0' },
+            signal: controller.signal
+          });
+          const tJson = (await tRes.json().catch(() => null)) as {
+            retCode?: number;
+            time?: number;
+            result?: { timeSecond?: string };
+          } | null;
+          if (tJson?.retCode === 0) {
+            if (typeof tJson.time === 'number' && tJson.time > 0) serverTs = String(tJson.time);
+            else if (tJson.result?.timeSecond) serverTs = String(Number(tJson.result.timeSecond) * 1000);
+          }
+        } catch {
+          // fallback local clock
+        }
+
+        const callBybitGet = async (endpointPath: string, queryString: string) => {
+          const timestamp = serverTs || Date.now().toString();
+          const prehash = `${timestamp}${creds.apiKey}${recvWindow}${queryString}`;
+          const sign = crypto.createHmac('sha256', creds.secret).update(prehash).digest('hex');
+          const fullUrl = queryString
+            ? `${baseUrl}${endpointPath}?${queryString}`
+            : `${baseUrl}${endpointPath}`;
+          const r = await fetch(fullUrl, {
+            method: 'GET',
+            headers: {
+              'X-BAPI-API-KEY': creds.apiKey,
+              'X-BAPI-SIGN': sign,
+              'X-BAPI-TIMESTAMP': timestamp,
+              'X-BAPI-RECV-WINDOW': recvWindow,
+              Accept: 'application/json',
+              'User-Agent': 'SalomaTradingPlatform/1.0'
+            },
+            signal: controller.signal
+          });
+          const rawText = await r.text();
+          let data: BybitWalletResp | null = null;
+          try {
+            data = rawText ? (JSON.parse(rawText) as BybitWalletResp) : null;
+          } catch {
+            data = null;
+          }
+          console.log('[SALOMA Bybit V5 Check]', {
+            endpoint: fullUrl,
+            httpStatus: r.status,
+            retCode: data?.retCode,
+            retMsg: data?.retMsg,
+            bodySnippet: data ? undefined : rawText.slice(0, 220)
+          });
+          return { ok: r.ok, httpStatus: r.status, data, endpoint: fullUrl };
         };
-      }
 
-      const list = attempt.data?.result?.list || [];
-      let usdt = 0;
-      for (const acc of list) {
-        const usdtCoin = (acc.coin || []).find(c => String(c.coin || '').toUpperCase() === 'USDT');
-        if (usdtCoin) {
-          usdt += Number(usdtCoin.walletBalance || usdtCoin.equity || 0) || 0;
-        } else if (acc.totalWalletBalance) {
-          usdt += Number(acc.totalWalletBalance) || 0;
+        const attempts = [await callBybitGet('/v5/account/wallet-balance', 'accountType=UNIFIED')];
+        if (!attempts[0].ok || attempts[0].data?.retCode !== 0) {
+          if (attempts[0].httpStatus !== 403 || attempts[0].data) {
+            attempts.push(await callBybitGet('/v5/account/wallet-balance', 'accountType=SPOT'));
+          }
+        }
+
+        for (const att of attempts) {
+          lastHttpStatus = att.httpStatus;
+          lastEndpoint = att.endpoint;
+          if (att.data) {
+            lastRetCode = att.data.retCode;
+            lastRetMsg = String(att.data.retMsg || '');
+          }
+          if (att.ok && att.data && att.data.retCode === 0) {
+            let usdt = 0;
+            for (const acc of att.data.result?.list || []) {
+              const usdtCoin = (acc.coin || []).find(c => String(c.coin || '').toUpperCase() === 'USDT');
+              if (usdtCoin) {
+                usdt += Number(usdtCoin.walletBalance || usdtCoin.equity || 0) || 0;
+              } else if (acc.totalWalletBalance) {
+                usdt += Number(acc.totalWalletBalance) || 0;
+              }
+            }
+            return {
+              sponsor: 'BYBIT',
+              connected: true,
+              usdtBalance: Number(usdt.toFixed(4)),
+              source: creds.source,
+              retCode: 0,
+              retMsg: 'OK',
+              httpStatus: att.httpStatus,
+              endpoint: att.endpoint
+            };
+          }
+        }
+
+        const firstAtt = attempts[0];
+        if (firstAtt.data && firstAtt.data.retCode !== 10003 && firstAtt.data.retCode !== 10004) {
+          const infoAtt = await callBybitGet('/v5/account/info', '');
+          lastHttpStatus = infoAtt.httpStatus;
+          lastEndpoint = infoAtt.endpoint;
+          if (infoAtt.data) {
+            lastRetCode = infoAtt.data.retCode;
+            lastRetMsg = String(infoAtt.data.retMsg || '');
+          }
+          if (infoAtt.ok && infoAtt.data && infoAtt.data.retCode === 0) {
+            return {
+              sponsor: 'BYBIT',
+              connected: true,
+              usdtBalance: 0,
+              source: creds.source,
+              retCode: 0,
+              retMsg: 'OK',
+              httpStatus: infoAtt.httpStatus,
+              endpoint: infoAtt.endpoint
+            };
+          }
+        }
+
+        if (lastRetMsg) {
+          lastError = `Bybit (${lastRetCode ?? lastHttpStatus}): ${lastRetMsg}`;
+          break;
+        }
+        if (lastHttpStatus === 403) {
+          lastError =
+            'HTTP 403 CloudFront/WAF — Vérifiez que le serveur est en Europe (fra1) et que la clé Mainnet est active.';
+        } else {
+          lastError = `Réponse Bybit invalide (HTTP ${lastHttpStatus || 'réseau'}).`;
         }
       }
+
+      console.error('[SALOMA /api/bybit/status] Échec Bybit:', {
+        httpStatus: lastHttpStatus,
+        retCode: lastRetCode,
+        retMsg: lastRetMsg,
+        endpoint: lastEndpoint
+      });
       return {
         sponsor: 'BYBIT',
-        connected: true,
-        usdtBalance: Number(usdt.toFixed(4)),
-        source: creds.source
+        connected: false,
+        usdtBalance: 0,
+        source: creds.source,
+        retCode: lastRetCode,
+        retMsg: lastRetMsg || undefined,
+        httpStatus: lastHttpStatus,
+        endpoint: lastEndpoint,
+        error: lastError,
+        message: lastError
       };
     }
 
@@ -4925,7 +5025,16 @@ export function createSalomaApiApp() {
         });
         return;
       }
-      const status = await checkSponsorConnectionStatus(provider);
+      const overrideCreds =
+        req.method === 'POST' && req.body && typeof req.body === 'object'
+          ? {
+              apiKey: typeof req.body.apiKey === 'string' ? req.body.apiKey : '',
+              secret: typeof req.body.secret === 'string' ? req.body.secret : '',
+              passphrase: typeof req.body.passphrase === 'string' ? req.body.passphrase : ''
+            }
+          : undefined;
+
+      const status = await checkSponsorConnectionStatus(provider, overrideCreds);
       if (status.connected) {
         for (const a of sponsorLiquidityAlerts) {
           if (a.active && a.sponsor === status.sponsor && a.asset === 'USDT' && status.usdtBalance >= a.requiredAmount) {
@@ -4952,61 +5061,73 @@ export function createSalomaApiApp() {
   app.post('/api/:sponsor(bybit|okx|binance)/status', requireAdminPin, handleSponsorStatusRoute);
 
   app.post('/api/admin/apis/primary', requireAdminPin, async (req: Request, res: Response) => {
-    const provider = String(req.body?.primaryApi || '').toLowerCase().trim() as BrokerExchangeId;
-    if (provider !== 'bybit' && provider !== 'okx' && provider !== 'binance') {
-      res.status(400).json({ error: 'API principale invalide (BYBIT, OKX ou BINANCE).' });
-      return;
-    }
-    brokerApisStore.primaryApi = provider;
-    brokerApisStore.providers[provider].enabled = true;
-    brokerApisStore.salomaFees.bybitRecoveryMarginPct = clampMarginPct(
-      brokerApisStore.providers[provider].marginPct,
-      0.1
-    );
-    saveApisStore();
-    recomputeMarketSalomaPrices();
-    await refreshMarketPrices(true);
-    broadcastWs(buildSnapshotPayload());
-    res.json({
-      apis: getMaskedApisConfig(),
-      salomaFees: brokerApisStore.salomaFees,
-      marketComparison: buildAdminMarketComparison(),
-      bybitStatus: {
-        online: isAnyExchangeWsOnline() || marketCache.bybitOnline,
-        wsOnline: isAnyExchangeWsOnline(),
-        latencyMs: marketCache.latencyMs,
-        updatedAt: marketCache.updatedAt,
-        primaryExchange: getActiveExchangeUpper()
+    try {
+      const provider = String(req.body?.primaryApi || '').toLowerCase().trim() as BrokerExchangeId;
+      if (provider !== 'bybit' && provider !== 'okx' && provider !== 'binance') {
+        res.status(200).json({
+          success: false,
+          ok: false,
+          error: 'API principale invalide (BYBIT, OKX ou BINANCE).'
+        });
+        return;
       }
-    });
+      brokerApisStore.primaryApi = provider;
+      brokerApisStore.providers[provider].enabled = true;
+      brokerApisStore.salomaFees.bybitRecoveryMarginPct = clampMarginPct(
+        brokerApisStore.providers[provider].marginPct,
+        0.1
+      );
+      saveApisStore();
+      recomputeMarketSalomaPrices();
+      await refreshMarketPrices(true);
+      broadcastWs(buildSnapshotPayload());
+      res.status(200).json({
+        success: true,
+        ok: true,
+        apis: getMaskedApisConfig(),
+        salomaFees: brokerApisStore.salomaFees,
+        marketComparison: buildAdminMarketComparison(),
+        bybitStatus: {
+          online: isAnyExchangeWsOnline() || marketCache.bybitOnline,
+          wsOnline: isAnyExchangeWsOnline(),
+          latencyMs: marketCache.latencyMs,
+          updatedAt: marketCache.updatedAt,
+          primaryExchange: getActiveExchangeUpper()
+        }
+      });
+    } catch (err) {
+      const msg = formatAppwriteErrorFr(err, 'Erreur sélection API principale.');
+      console.error('[SALOMA /api/admin/apis/primary] Erreur:', err);
+      res.status(200).json({ success: false, ok: false, error: msg, message: msg });
+    }
   });
 
   app.post('/api/admin/fees', requireAdminPin, (req: Request, res: Response) => {
     try {
-      const nextBybitMargin = Number(req.body?.bybitRecoveryMarginPct);
-      const nextTradeFee = Number(req.body?.tradeFeePct);
-      const nextExchangeFee = Number(req.body?.exchangeFeePct);
-      const nextWithdrawFee = Number(req.body?.withdrawFeePct);
-      const nextNetworkFee = Number(req.body?.networkFeeUsdt);
+      const nextBybitMargin = Number(req.body?.bybitRecoveryMarginPct ?? 0.1);
+      const nextTradeFee = Number(req.body?.tradeFeePct ?? 0.1);
+      const nextExchangeFee = Number(req.body?.exchangeFeePct ?? 0.1);
+      const nextWithdrawFee = Number(req.body?.withdrawFeePct ?? 0.15);
+      const nextNetworkFee = Number(req.body?.networkFeeUsdt ?? 0.5);
 
       if (!Number.isFinite(nextBybitMargin) || nextBybitMargin < 0 || nextBybitMargin > 5) {
-        res.status(400).json({ error: '% Marge récupération frais Bybit doit être entre 0 et 5%.' });
+        res.status(200).json({ success: false, ok: false, error: '% Marge récupération frais Bybit doit être entre 0 et 5%.' });
         return;
       }
       if (!Number.isFinite(nextTradeFee) || nextTradeFee < 0 || nextTradeFee > 5) {
-        res.status(400).json({ error: 'Frais Trade % doit être entre 0 et 5%.' });
+        res.status(200).json({ success: false, ok: false, error: 'Frais Trade % doit être entre 0 et 5%.' });
         return;
       }
       if (!Number.isFinite(nextExchangeFee) || nextExchangeFee < 0 || nextExchangeFee > 5) {
-        res.status(400).json({ error: 'Frais Échange % doit être entre 0 et 5%.' });
+        res.status(200).json({ success: false, ok: false, error: 'Frais Échange % doit être entre 0 et 5%.' });
         return;
       }
       if (!Number.isFinite(nextWithdrawFee) || nextWithdrawFee < 0 || nextWithdrawFee > 5) {
-        res.status(400).json({ error: 'Frais Retrait % doit être entre 0 et 5%.' });
+        res.status(200).json({ success: false, ok: false, error: 'Frais Retrait % doit être entre 0 et 5%.' });
         return;
       }
       if (!Number.isFinite(nextNetworkFee) || nextNetworkFee < 0 || nextNetworkFee > 100) {
-        res.status(400).json({ error: 'Frais Réseau (USDT) doit être entre 0 et 100 USDT.' });
+        res.status(200).json({ success: false, ok: false, error: 'Frais Réseau (USDT) doit être entre 0 et 100 USDT.' });
         return;
       }
 
@@ -5024,29 +5145,71 @@ export function createSalomaApiApp() {
       recomputeMarketSalomaPrices();
       broadcastWs(buildSnapshotPayload());
 
-      res.json({
+      res.status(200).json({
+        success: true,
         ok: true,
         salomaFees: brokerApisStore.salomaFees,
         apis: getMaskedApisConfig(),
         marketComparison: buildAdminMarketComparison()
       });
     } catch (err) {
-      res.status(400).json({ error: formatAppwriteErrorFr(err, 'Erreur sauvegarde configuration frais.') });
+      const msg = formatAppwriteErrorFr(err, 'Erreur sauvegarde configuration frais.');
+      console.error('[SALOMA /api/admin/fees] Erreur:', err);
+      res.status(200).json({ success: false, ok: false, error: msg, message: msg });
     }
   });
 
-  app.post('/api/admin/apis/:provider/margin', requireAdminPin, (req: Request, res: Response) => {
+  app.post('/api/admin/apis/:provider/margin', requireAdminPin, async (req: Request, res: Response) => {
     try {
       const provider = String(req.params.provider || '').toLowerCase().trim() as BrokerExchangeId;
       if (provider !== 'bybit' && provider !== 'okx' && provider !== 'binance') {
-        res.status(400).json({ error: 'Fournisseur API inconnu.' });
+        res.status(200).json({
+          success: false,
+          ok: false,
+          error: 'Fournisseur API inconnu.',
+          message: 'Fournisseur API inconnu.'
+        });
         return;
       }
-      const rawMargin = Number(req.body?.marginPct);
-      if (!Number.isFinite(rawMargin) || rawMargin < 0 || rawMargin > 5) {
-        res.status(400).json({ error: 'La marge % doit être comprise entre 0% et 5%.' });
+      const rawVal = req.body?.marginPct ?? req.body?.marge ?? null;
+      const rawMargin = Number(String(rawVal ?? '').replace(',', '.'));
+      if (rawVal === null || rawVal === undefined || rawVal === '' || !Number.isFinite(rawMargin) || rawMargin < 0 || rawMargin > 5) {
+        res.status(200).json({
+          success: false,
+          ok: false,
+          error: 'La marge % doit être comprise entre 0% et 5%.',
+          message: 'La marge % doit être comprise entre 0% et 5%.'
+        });
         return;
       }
+
+      if (provider === 'bybit') {
+        const overrideCreds =
+          req.body && typeof req.body === 'object'
+            ? {
+                apiKey: typeof req.body.apiKey === 'string' ? req.body.apiKey : '',
+                secret: typeof req.body.secret === 'string' ? req.body.secret : ''
+              }
+            : undefined;
+        const connCheck = await checkSponsorConnectionStatus('bybit', overrideCreds);
+        if (!connCheck.connected) {
+          const reason = connCheck.error || connCheck.message || 'Connexion BYBIT non établie.';
+          console.error('[SALOMA /api/admin/apis/bybit/margin] Refusé (Bybit non connecté):', reason);
+          res.status(200).json({
+            success: false,
+            ok: false,
+            connected: false,
+            retCode: connCheck.retCode,
+            retMsg: connCheck.retMsg,
+            error: `Impossible d'appliquer : ${reason}`,
+            message: `Impossible d'appliquer : ${reason}`,
+            apis: getMaskedApisConfig(),
+            salomaFees: brokerApisStore.salomaFees
+          });
+          return;
+        }
+      }
+
       const clamped = clampMarginPct(rawMargin, 0.1);
       brokerApisStore.providers[provider].marginPct = clamped;
       if (provider === brokerApisStore.primaryApi || provider === 'bybit') {
@@ -5055,51 +5218,107 @@ export function createSalomaApiApp() {
       saveApisStore();
       recomputeMarketSalomaPrices();
       broadcastWs(buildSnapshotPayload());
-      res.json({
+      res.status(200).json({
+        success: true,
+        ok: true,
+        connected: provider === 'bybit' ? true : undefined,
+        message: `Marge ${provider.toUpperCase()} appliquée (${clamped}%) ✅`,
         apis: getMaskedApisConfig(),
         salomaFees: brokerApisStore.salomaFees,
         marketComparison: buildAdminMarketComparison()
       });
     } catch (err) {
-      res.status(400).json({ error: formatAppwriteErrorFr(err, 'Erreur mise à jour marge.') });
+      const msg = formatAppwriteErrorFr(err, 'Erreur mise à jour marge.');
+      console.error('[SALOMA /api/admin/apis/:provider/margin] Erreur:', err);
+      res.status(200).json({ success: false, ok: false, error: msg, message: msg });
     }
   });
 
   app.post('/api/admin/apis/:provider/toggle', requireAdminPin, async (req: Request, res: Response) => {
-    const provider = String(req.params.provider || '').toLowerCase().trim() as BrokerExchangeId;
-    if (provider !== 'bybit' && provider !== 'okx' && provider !== 'binance') {
-      res.status(400).json({ error: 'Fournisseur API inconnu.' });
-      return;
-    }
-    const nextEnabled =
-      typeof req.body?.enabled === 'boolean'
-        ? req.body.enabled
-        : !brokerApisStore.providers[provider].enabled;
-
-    brokerApisStore.providers[provider].enabled = nextEnabled;
-
-    if (!nextEnabled && brokerApisStore.primaryApi === provider) {
-      const alt = (['bybit', 'okx', 'binance'] as const).find(
-        id => id !== provider && brokerApisStore.providers[id].enabled
-      );
-      if (alt) {
-        brokerApisStore.primaryApi = alt;
-      } else {
-        // Guarantee at least one API remains active as primary bridge
-        brokerApisStore.providers[provider].enabled = true;
-        res.status(400).json({ error: 'Au moins une API doit rester activée comme pont principal.' });
+    try {
+      const provider = String(req.params.provider || '').toLowerCase().trim() as BrokerExchangeId;
+      if (provider !== 'bybit' && provider !== 'okx' && provider !== 'binance') {
+        res.status(200).json({
+          success: false,
+          ok: false,
+          error: 'Fournisseur API inconnu.',
+          message: 'Fournisseur API inconnu.'
+        });
         return;
       }
-    }
+      const nextEnabled =
+        typeof req.body?.enabled === 'boolean'
+          ? req.body.enabled
+          : req.body?.enabled === 'true'
+            ? true
+            : req.body?.enabled === 'false'
+              ? false
+              : !brokerApisStore.providers[provider].enabled;
 
-    saveApisStore();
-    recomputeMarketSalomaPrices();
-    await refreshMarketPrices(true);
-    broadcastWs(buildSnapshotPayload());
-    res.json({
-      apis: getMaskedApisConfig(),
-      marketComparison: buildAdminMarketComparison()
-    });
+      if (nextEnabled) {
+        const overrideCreds =
+          req.body && typeof req.body === 'object'
+            ? {
+                apiKey: typeof req.body.apiKey === 'string' ? req.body.apiKey : '',
+                secret: typeof req.body.secret === 'string' ? req.body.secret : '',
+                passphrase: typeof req.body.passphrase === 'string' ? req.body.passphrase : ''
+              }
+            : undefined;
+        const connCheck = await checkSponsorConnectionStatus(provider, overrideCreds);
+        if (!connCheck.connected) {
+          const reason = connCheck.error || connCheck.message || `Connexion ${provider.toUpperCase()} non établie.`;
+          console.error(`[SALOMA /api/admin/apis/${provider}/toggle] Refus activation:`, reason);
+          res.status(200).json({
+            success: false,
+            ok: false,
+            connected: false,
+            retCode: connCheck.retCode,
+            retMsg: connCheck.retMsg,
+            error: `Impossible d'activer ${provider.toUpperCase()} : ${reason}`,
+            message: `Impossible d'activer ${provider.toUpperCase()} : ${reason}`,
+            apis: getMaskedApisConfig()
+          });
+          return;
+        }
+      }
+
+      brokerApisStore.providers[provider].enabled = nextEnabled;
+
+      if (!nextEnabled && brokerApisStore.primaryApi === provider) {
+        const alt = (['bybit', 'okx', 'binance'] as const).find(
+          id => id !== provider && brokerApisStore.providers[id].enabled
+        );
+        if (alt) {
+          brokerApisStore.primaryApi = alt;
+        } else {
+          brokerApisStore.providers[provider].enabled = true;
+          res.status(200).json({
+            success: false,
+            ok: false,
+            error: 'Au moins une API doit rester activée comme pont principal.',
+            message: 'Au moins une API doit rester activée comme pont principal.',
+            apis: getMaskedApisConfig()
+          });
+          return;
+        }
+      }
+
+      saveApisStore();
+      recomputeMarketSalomaPrices();
+      await refreshMarketPrices(true);
+      broadcastWs(buildSnapshotPayload());
+      res.status(200).json({
+        success: true,
+        ok: true,
+        message: `${provider.toUpperCase()} ${nextEnabled ? 'activée ✅' : 'désactivée.'}`,
+        apis: getMaskedApisConfig(),
+        marketComparison: buildAdminMarketComparison()
+      });
+    } catch (err) {
+      const msg = formatAppwriteErrorFr(err, 'Action impossible.');
+      console.error('[SALOMA /api/admin/apis/:provider/toggle] Erreur:', err);
+      res.status(200).json({ success: false, ok: false, error: msg, message: msg });
+    }
   });
 
   const handleSaveSponsorApiKeys = (req: Request, res: Response) => {

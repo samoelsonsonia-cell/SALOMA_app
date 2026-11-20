@@ -2726,27 +2726,41 @@ export default function App() {
         [provider]: { ...prev[provider], loading: true }
       }));
       try {
+        const form = apiFormInputs[provider];
+        const bodyPayload: Record<string, string> = {};
+        if (form?.apiKey?.trim()) bodyPayload.apiKey = form.apiKey.trim();
+        if (form?.secret?.trim()) bodyPayload.secret = form.secret.trim();
+        if (form?.passphrase?.trim()) bodyPayload.passphrase = form.passphrase.trim();
+
         const res = await apiRequest<{
           sponsor?: string;
           connected: boolean;
           usdtBalance: number;
           source?: string;
+          retCode?: number;
+          retMsg?: string;
+          httpStatus?: number;
           error?: string;
           message?: string;
           liquidityAlerts?: AdminLiquidityAlert[];
         }>(`/api/${provider}/status`, {
-          method: 'GET',
+          method: 'POST',
           adminPin,
           adminEmail,
-          adminToken: adminSessionToken
+          adminToken: adminSessionToken,
+          body: bodyPayload
         });
+        const detailMsg =
+          res.retCode !== undefined && res.retMsg && res.retCode !== 0
+            ? `${res.retMsg} (code ${res.retCode})`
+            : res.error || res.message;
         setSponsorConnectionStatus(prev => ({
           ...prev,
           [provider]: {
             connected: Boolean(res.connected),
             usdtBalance: Number(res.usdtBalance) || 0,
             source: res.source,
-            message: res.error || res.message,
+            message: detailMsg,
             loading: false,
             tested: true
           }
@@ -2767,7 +2781,7 @@ export default function App() {
         }));
       }
     },
-    [adminPin, adminEmail, adminSessionToken]
+    [adminPin, adminEmail, adminSessionToken, apiFormInputs]
   );
 
   useEffect(() => {
@@ -2895,9 +2909,12 @@ export default function App() {
     setAdminFeeSaving(true);
     try {
       const res = await apiRequest<{
-        ok: boolean;
-        salomaFees: AdminSalomaFeesConfig;
-        apis: AdminApisConfig;
+        success?: boolean;
+        ok?: boolean;
+        error?: string;
+        message?: string;
+        salomaFees?: AdminSalomaFeesConfig;
+        apis?: AdminApisConfig;
         marketComparison?: AdminMarketComparisonRow[];
       }>('/api/admin/fees', {
         method: 'POST',
@@ -2912,6 +2929,10 @@ export default function App() {
           networkFeeUsdt
         }
       });
+      if (res.success === false || res.ok === false) {
+        showToast(res.error || res.message || 'Erreur sauvegarde frais Admin.');
+        return;
+      }
       if (res.salomaFees) {
         setAdminFeeInputs({
           bybitRecoveryMarginPct: String(res.salomaFees.bybitRecoveryMarginPct),
@@ -2928,12 +2949,12 @@ export default function App() {
         });
         setApiMarginInputs(prev => ({
           ...prev,
-          bybit: String(res.salomaFees.bybitRecoveryMarginPct)
+          bybit: String(res.salomaFees!.bybitRecoveryMarginPct)
         }));
       }
       if (res.apis) setAdminApisConfig(res.apis);
       if (res.marketComparison) setAdminMarketComparison(res.marketComparison);
-      showToast('✓ Frais SALOMA & Marge récupération Bybit mis à jour !');
+      showToast(res.message || '✓ Frais SALOMA & Marge récupération Bybit mis à jour !');
     } catch (err) {
       showToast(err instanceof Error ? err.message : 'Erreur sauvegarde frais Admin.');
     } finally {
@@ -2950,8 +2971,14 @@ export default function App() {
     }
     setApiActionLoading(`margin-${provider}`);
     try {
+      const form = apiFormInputs[provider];
       const res = await apiRequest<{
-        apis: AdminApisConfig;
+        success?: boolean;
+        ok?: boolean;
+        connected?: boolean;
+        error?: string;
+        message?: string;
+        apis?: AdminApisConfig;
         salomaFees?: AdminSalomaFeesConfig;
         marketComparison?: AdminMarketComparisonRow[];
       }>(`/api/admin/apis/${provider}/margin`, {
@@ -2959,9 +2986,13 @@ export default function App() {
         adminPin,
         adminEmail,
         adminToken: adminSessionToken,
-        body: { marginPct: parsed }
+        body: {
+          marginPct: parsed,
+          ...(form?.apiKey?.trim() ? { apiKey: form.apiKey.trim() } : {}),
+          ...(form?.secret?.trim() ? { secret: form.secret.trim() } : {})
+        }
       });
-      setAdminApisConfig(res.apis);
+      if (res.apis) setAdminApisConfig(res.apis);
       if (res.marketComparison) {
         setAdminMarketComparison(res.marketComparison);
       }
@@ -2971,11 +3002,15 @@ export default function App() {
           bybitRecoveryMarginPct: String(res.salomaFees!.bybitRecoveryMarginPct)
         }));
       }
-      const savedEntry = res.apis.providers.find(p => p.id === provider);
+      if (res.success === false || res.ok === false) {
+        showToast(res.error || res.message || 'Connexion BYBIT requise avant d’appliquer.');
+        return;
+      }
+      const savedEntry = res.apis?.providers.find(p => p.id === provider);
       if (savedEntry) {
         setApiMarginInputs(prev => ({ ...prev, [provider]: String(savedEntry.marginPct ?? parsed) }));
       }
-      showToast(`✓ Marge ${provider.toUpperCase()} mise à jour (${parsed}%) !`);
+      showToast(res.message || `✓ Marge ${provider.toUpperCase()} mise à jour (${parsed}%) !`);
     } catch (err) {
       showToast(err instanceof Error ? err.message : 'Erreur mise à jour marge.');
     } finally {
@@ -2987,19 +3022,34 @@ export default function App() {
     if (!(await ensureOnlineOrBlock())) return;
     setApiActionLoading(`toggle-${provider}`);
     try {
+      const form = apiFormInputs[provider];
       const res = await apiRequest<{
-        apis: AdminApisConfig;
+        success?: boolean;
+        ok?: boolean;
+        connected?: boolean;
+        error?: string;
+        message?: string;
+        apis?: AdminApisConfig;
         marketComparison?: AdminMarketComparisonRow[];
       }>(`/api/admin/apis/${provider}/toggle`, {
         method: 'POST',
         adminPin,
         adminEmail,
         adminToken: adminSessionToken,
-        body: { enabled: nextEnabled }
+        body: {
+          enabled: nextEnabled,
+          ...(form?.apiKey?.trim() ? { apiKey: form.apiKey.trim() } : {}),
+          ...(form?.secret?.trim() ? { secret: form.secret.trim() } : {}),
+          ...(form?.passphrase?.trim() ? { passphrase: form.passphrase.trim() } : {})
+        }
       });
-      setAdminApisConfig(res.apis);
+      if (res.apis) setAdminApisConfig(res.apis);
       if (res.marketComparison) setAdminMarketComparison(res.marketComparison);
-      showToast(`${provider.toUpperCase()} ${nextEnabled ? 'activée' : 'désactivée'}.`);
+      if (res.success === false || res.ok === false) {
+        showToast(res.error || res.message || `Connexion ${provider.toUpperCase()} requise.`);
+        return;
+      }
+      showToast(res.message || `${provider.toUpperCase()} ${nextEnabled ? 'activée' : 'désactivée'}.`);
     } catch (err) {
       showToast(err instanceof Error ? err.message : 'Action impossible.');
     } finally {
@@ -3012,7 +3062,11 @@ export default function App() {
     setApiActionLoading(`primary-${provider}`);
     try {
       const res = await apiRequest<{
-        apis: AdminApisConfig;
+        success?: boolean;
+        ok?: boolean;
+        error?: string;
+        message?: string;
+        apis?: AdminApisConfig;
         salomaFees?: AdminSalomaFeesConfig;
         marketComparison?: AdminMarketComparisonRow[];
         bybitStatus?: {
@@ -3028,7 +3082,7 @@ export default function App() {
         adminToken: adminSessionToken,
         body: { primaryApi: provider }
       });
-      setAdminApisConfig(res.apis);
+      if (res.apis) setAdminApisConfig(res.apis);
       if (res.marketComparison) setAdminMarketComparison(res.marketComparison);
       if (res.bybitStatus) setAdminBybitStatus(res.bybitStatus);
       if (res.salomaFees) {
@@ -3040,8 +3094,12 @@ export default function App() {
           networkFeeUsdt: String(res.salomaFees.networkFeeUsdt)
         });
       }
+      if (res.success === false || res.ok === false) {
+        showToast(res.error || res.message || 'Erreur sélection API principale.');
+        return;
+      }
       setActiveBrokerExchange(provider.toUpperCase() as 'BYBIT' | 'OKX' | 'BINANCE');
-      showToast(`★ ${provider.toUpperCase()} définie comme API principale pour les ordres !`);
+      showToast(res.message || `★ ${provider.toUpperCase()} définie comme API principale pour les ordres !`);
     } catch (err) {
       showToast(err instanceof Error ? err.message : 'Erreur sélection API principale.');
     } finally {

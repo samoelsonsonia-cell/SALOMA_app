@@ -68,6 +68,32 @@ function sendJson(res: ServerResponse, statusCode: number, payload: Record<strin
   }
 }
 
+async function readJsonBody(
+  req: IncomingMessage & { body?: unknown }
+): Promise<Record<string, unknown>> {
+  try {
+    if (req.body && typeof req.body === 'object' && !Buffer.isBuffer(req.body)) {
+      return req.body as Record<string, unknown>;
+    }
+    if (typeof req.body === 'string') {
+      return req.body.trim() ? (JSON.parse(req.body) as Record<string, unknown>) : {};
+    }
+    if (Buffer.isBuffer(req.body)) {
+      const txt = req.body.toString('utf8').trim();
+      return txt ? (JSON.parse(txt) as Record<string, unknown>) : {};
+    }
+    const chunks: Buffer[] = [];
+    for await (const chunk of req) {
+      chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk)));
+    }
+    const raw = Buffer.concat(chunks).toString('utf8').trim();
+    if (!raw) return {};
+    return JSON.parse(raw) as Record<string, unknown>;
+  } catch {
+    return {};
+  }
+}
+
 function verifyAdminHeaders(req: IncomingMessage): { ok: true } | { ok: false; error: string } {
   const configuredEmail = getServerAdminEmail();
   const configuredPin = getServerAdminPin();
@@ -135,7 +161,10 @@ function readAdminSavedOkxFallback(): { apiKey: string; secret: string; passphra
   return null;
 }
 
-export default async function handler(req: IncomingMessage, res: ServerResponse) {
+export default async function handler(
+  req: IncomingMessage & { body?: unknown },
+  res: ServerResponse
+) {
   try {
     const auth = verifyAdminHeaders(req);
     if (!auth.ok) {
@@ -143,18 +172,38 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
       return;
     }
 
+    const body = req.method === 'POST' ? await readJsonBody(req) : {};
+    const bodyKey = stripWrappingQuotes(body.apiKey).trim();
+    const bodySecret = stripWrappingQuotes(body.secret).trim();
+    const bodyPass = stripWrappingQuotes(body.passphrase).trim();
+    const hasFormCreds =
+      Boolean(bodyKey) &&
+      Boolean(bodySecret) &&
+      Boolean(bodyPass) &&
+      !bodyKey.includes('****') &&
+      !/^\*+$/.test(bodySecret) &&
+      !/^\*+$/.test(bodyPass);
+
     const envKey = stripWrappingQuotes(process.env.OKX_API_KEY).trim();
     const envSecret = stripWrappingQuotes(process.env.OKX_API_SECRET).trim();
     const envPass = stripWrappingQuotes(
       process.env.OKX_PASSPHRASE || process.env.OKX_API_PASSPHRASE
     ).trim();
 
-    let apiKey = envKey;
-    let apiSecret = envSecret;
-    let passphrase = envPass;
-    let source: 'vercel_env' | 'admin_saved' | 'none' = 'none';
+    let apiKey = '';
+    let apiSecret = '';
+    let passphrase = '';
+    let source: 'admin_form' | 'vercel_env' | 'admin_saved' | 'none' = 'none';
 
-    if (apiKey && apiSecret && passphrase) {
+    if (hasFormCreds) {
+      apiKey = bodyKey;
+      apiSecret = bodySecret;
+      passphrase = bodyPass;
+      source = 'admin_form';
+    } else if (envKey && envSecret && envPass) {
+      apiKey = envKey;
+      apiSecret = envSecret;
+      passphrase = envPass;
       source = 'vercel_env';
     } else {
       const saved = readAdminSavedOkxFallback();
@@ -180,7 +229,7 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
     }
 
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 7500);
+    const timer = setTimeout(() => controller.abort(), 8000);
 
     try {
       const ts = new Date().toISOString();
@@ -194,7 +243,9 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
           'OK-ACCESS-KEY': apiKey,
           'OK-ACCESS-SIGN': sign,
           'OK-ACCESS-TIMESTAMP': ts,
-          'OK-ACCESS-PASSPHRASE': passphrase
+          'OK-ACCESS-PASSPHRASE': passphrase,
+          Accept: 'application/json',
+          'User-Agent': 'SalomaTradingPlatform/1.0'
         },
         signal: controller.signal
       });
@@ -222,13 +273,21 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
       }
 
       if (!r.ok || !data || data.code !== '0') {
-        const msg = data?.msg || `Erreur authentification OKX (HTTP ${r.status}).`;
-        console.error('[SALOMA /api/okx/status] Échec vérification OKX:', msg);
+        const msg = data?.msg
+          ? `OKX (${data.code ?? r.status}): ${data.msg}`
+          : `Erreur authentification OKX (HTTP ${r.status}).`;
+        console.error('[SALOMA /api/okx/status] Échec vérification OKX:', {
+          httpStatus: r.status,
+          code: data?.code,
+          msg: data?.msg
+        });
         sendJson(res, 200, {
           sponsor: 'OKX',
           connected: false,
           usdtBalance: 0,
           source,
+          httpStatus: r.status,
+          retMsg: data?.msg,
           error: msg,
           message: msg
         });
