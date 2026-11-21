@@ -91,7 +91,8 @@ import {
   computeMinCoinForUsd,
   formatMinCoinQty,
   isKnownTokenContractAddress,
-  resolveWalletAddressForChain
+  resolveWalletAddressForChain,
+  deriveProvisionalWalletAddress
 } from './services/priceAggregator';
 import {
   ENV_CONFIG,
@@ -212,6 +213,21 @@ export interface AppwriteNotificationRow {
   type: string;
   lu: boolean;
   date: string;
+}
+
+export interface PriceAlertRow {
+  id: string;
+  userId: string;
+  symbol: string;
+  direction: 'above' | 'below';
+  targetPriceUsd: number;
+  createdPriceUsd: number;
+  active: boolean;
+  triggered: boolean;
+  triggeredAt?: string;
+  triggeredPriceUsd?: number;
+  createdAt: string;
+  note?: string;
 }
 
 export interface AppwriteProblemRow {
@@ -412,6 +428,7 @@ export default function App() {
     | 'profile'
     | 'guide'
     | 'notifications'
+    | 'priceAlerts'
     | 'adminUnlock'
     | 'reportProblem'
   >(null);
@@ -466,6 +483,7 @@ export default function App() {
   const [depotsRetraitsList, setDepotsRetraitsList] = useState<AppwriteDepotRetraitRow[]>([]);
   const [earnList, setEarnList] = useState<AppwriteEarnRow[]>([]);
   const [notificationsList, setNotificationsList] = useState<AppwriteNotificationRow[]>([]);
+  const [priceAlertsList, setPriceAlertsList] = useState<PriceAlertRow[]>([]);
   const [userWalletAddresses, setUserWalletAddresses] = useState<Record<string, string>>({});
 
   const [displayCurrency, setDisplayCurrency] = useState<'MGA' | 'USD'>('MGA');
@@ -483,6 +501,10 @@ export default function App() {
   const unreadNotificationsCount = useMemo(
     () => notificationsList.filter(n => !n.lu).length,
     [notificationsList]
+  );
+  const activePriceAlertsCount = useMemo(
+    () => priceAlertsList.filter(a => a.active && !a.triggered).length,
+    [priceAlertsList]
   );
 
   // --- LIVE CRYPTO PRICES (Pont Broker Actif: Bybit / OKX / Binance via WebSocket) ---
@@ -536,6 +558,22 @@ export default function App() {
     () => resolveWalletAddressForChain(userWalletAddresses, activeNetwork.chain, selectedWalletCoin.symbol),
     [userWalletAddresses, activeNetwork.chain, selectedWalletCoin.symbol]
   );
+  const provisionalClientDepositAddress = useMemo(
+    () =>
+      deriveProvisionalWalletAddress(
+        userRow?.user_id || userRow?.$id,
+        activeNetwork.chain,
+        selectedWalletCoin.symbol
+      ),
+    [userRow?.user_id, userRow?.$id, activeNetwork.chain, selectedWalletCoin.symbol]
+  );
+  const [walletAddressPhase, setWalletAddressPhase] = useState<'loading' | 'slow' | 'timeout' | 'ready'>('ready');
+  const [walletAddressRetryCount, setWalletAddressRetryCount] = useState<number>(0);
+  const displayedClientDepositAddress =
+    activeClientDepositAddress ||
+    (walletAddressPhase === 'slow' || walletAddressPhase === 'timeout'
+      ? provisionalClientDepositAddress
+      : '');
   const activeMinCoinQty = useMemo(
     () =>
       computeMinCoinForUsd(selectedWalletCoin.price, selectedWalletCoin.symbol, MIN_WITHDRAW_USD) ||
@@ -733,6 +771,7 @@ export default function App() {
         earn: AppwriteEarnRow[];
         notifications: AppwriteNotificationRow[];
         walletAddresses?: Record<string, string>;
+        priceAlerts?: PriceAlertRow[];
       }>('/api/me/dashboard', { token });
 
       setUserRow(data.user);
@@ -742,6 +781,9 @@ export default function App() {
       setDepotsRetraitsList(data.depotsRetraits || []);
       setEarnList(data.earn || []);
       setNotificationsList(data.notifications || []);
+      if (Array.isArray(data.priceAlerts)) {
+        setPriceAlertsList(data.priceAlerts);
+      }
       if (data.walletAddresses && typeof data.walletAddresses === 'object') {
         setUserWalletAddresses(data.walletAddresses);
       }
@@ -756,25 +798,111 @@ export default function App() {
     }
   }, []);
 
+  const fetchWalletAddressesFast = useCallback(
+    async (coinSym?: string, chainName?: string): Promise<boolean> => {
+      if (!sessionToken || sessionToken === COOKIE_SESSION_MARKER) return false;
+      const params = new URLSearchParams();
+      if (coinSym) params.set('coin', coinSym.toUpperCase().trim());
+      if (chainName) params.set('chain', chainName.trim());
+      const qs = params.toString();
+      try {
+        const res = await apiRequest<{
+          walletAddresses?: Record<string, string>;
+          address?: string;
+          coin?: string;
+          chain?: string;
+        }>(`/api/wallet/addresses${qs ? `?${qs}` : ''}`, {
+          token: sessionToken,
+          timeoutMs: 2000
+        });
+        if (res.walletAddresses && typeof res.walletAddresses === 'object') {
+          setUserWalletAddresses(prev => {
+            const next = { ...prev, ...res.walletAddresses };
+            if (res.address && coinSym && chainName) {
+              next[`${coinSym.toUpperCase().trim()}:${chainName.trim()}`] = res.address;
+            }
+            return next;
+          });
+          return true;
+        }
+      } catch {
+        // handled by 2s slow provisional fallback & 5s timeout auto-retry
+      }
+      return false;
+    },
+    [sessionToken]
+  );
+
   useEffect(() => {
     if (!sessionToken || sessionToken === COOKIE_SESSION_MARKER || !userRow?.email_verifie) return;
     if (Object.keys(userWalletAddresses).length > 0) return;
+    void fetchWalletAddressesFast(selectedWalletCoin.symbol, activeNetwork.chain);
+  }, [
+    sessionToken,
+    userRow?.email_verifie,
+    userWalletAddresses,
+    selectedWalletCoin.symbol,
+    activeNetwork.chain,
+    fetchWalletAddressesFast
+  ]);
+
+  useEffect(() => {
+    if (activeModal !== 'deposit' && activeModal !== 'withdraw') return;
+
+    if (activeClientDepositAddress) {
+      setWalletAddressPhase('ready');
+      return;
+    }
+
+    if (!sessionToken || sessionToken === COOKIE_SESSION_MARKER) {
+      // Fallback session sans Bearer /api: afficher adresse provisoire immédiate au bout d'un bref délai ou directement
+      setWalletAddressPhase('slow');
+      return;
+    }
+
     let cancelled = false;
-    apiRequest<{ walletAddresses?: Record<string, string> }>('/api/wallet/addresses', {
-      token: sessionToken
-    })
-      .then(res => {
-        if (!cancelled && res.walletAddresses && typeof res.walletAddresses === 'object') {
-          setUserWalletAddresses(res.walletAddresses);
-        }
-      })
-      .catch(() => {
-        // non-blocking fallback; dashboard fetch also populates walletAddresses
-      });
+    setWalletAddressPhase('loading');
+
+    void fetchWalletAddressesFast(selectedWalletCoin.symbol, activeNetwork.chain).then(ok => {
+      if (!cancelled && ok) {
+        setWalletAddressPhase('ready');
+      }
+    });
+
+    const slowTimer = setTimeout(() => {
+      if (!cancelled) {
+        setWalletAddressPhase(prev => (prev === 'ready' ? 'ready' : 'slow'));
+      }
+    }, 2000);
+
+    const timeoutTimer = setTimeout(() => {
+      if (!cancelled) {
+        setWalletAddressPhase(prev => (prev === 'ready' ? 'ready' : 'timeout'));
+        void fetchWalletAddressesFast(selectedWalletCoin.symbol, activeNetwork.chain);
+      }
+    }, 5000);
+
+    const autoRetryInterval = setInterval(() => {
+      if (!cancelled) {
+        void fetchWalletAddressesFast(selectedWalletCoin.symbol, activeNetwork.chain);
+      }
+    }, 5000);
+
     return () => {
       cancelled = true;
+      clearTimeout(slowTimer);
+      clearTimeout(timeoutTimer);
+      clearInterval(autoRetryInterval);
     };
-  }, [sessionToken, userRow?.email_verifie, userWalletAddresses]);
+  }, [
+    activeModal,
+    activeClientDepositAddress,
+    sessionToken,
+    selectedWalletCoin.symbol,
+    activeNetwork.chain,
+    walletAddressRetryCount,
+    fetchWalletAddressesFast
+  ]);
 
   const clearAuthSession = useCallback(() => {
     try {
@@ -790,6 +918,7 @@ export default function App() {
     setDepotsRetraitsList([]);
     setEarnList([]);
     setNotificationsList([]);
+    setPriceAlertsList([]);
     setUserWalletAddresses({});
   }, []);
 
@@ -848,6 +977,30 @@ export default function App() {
     };
   }, []);
 
+  const sendBrowserPushNotification = useCallback((title: string, body: string, tag?: string) => {
+    if (typeof window === 'undefined' || !('Notification' in window)) return;
+    if (Notification.permission !== 'granted') return;
+    const options: NotificationOptions = {
+      body,
+      icon: '/pwa-192x192.png',
+      badge: '/pwa-192x192.png',
+      tag: tag || `saloma-${Date.now()}`
+    };
+    try {
+      if ('serviceWorker' in navigator && navigator.serviceWorker.controller) {
+        void navigator.serviceWorker.ready
+          .then(reg => reg.showNotification(title, options))
+          .catch(() => {
+            new Notification(title, options);
+          });
+      } else {
+        new Notification(title, options);
+      }
+    } catch {
+      // ignore unsupported desktop/webview notification contexts
+    }
+  }, []);
+
   // --- SERVER-SENT EVENTS (SSE) FOR LIVE NOTIFICATIONS ---
   useEffect(() => {
     if (!sessionToken || !userRow?.user_id || !userRow?.email_verifie) return;
@@ -857,14 +1010,27 @@ export default function App() {
       payload => {
         if (!payload || payload.user_id !== userRow.user_id) return;
 
+        let isNew = false;
         setNotificationsList(prev => {
           const exists = prev.some(n => n.$id === payload.$id);
           if (exists) {
             return prev.map(n => (n.$id === payload.$id ? payload : n));
           }
+          isNew = true;
           showToast(`🔔 ${payload.message}`);
           return [payload, ...prev];
         });
+
+        if (isNew && payload.type === 'price_alert') {
+          sendBrowserPushNotification(payload.titre, payload.message, payload.$id);
+          if (sessionToken !== COOKIE_SESSION_MARKER) {
+            void apiRequest<{ alerts: PriceAlertRow[] }>('/api/alerts', { token: sessionToken })
+              .then(res => {
+                if (Array.isArray(res.alerts)) setPriceAlertsList(res.alerts);
+              })
+              .catch(() => {});
+          }
+        }
 
         if (payload.type === 'success' || payload.titre === 'Dépôt validé') {
           void loadDashboard(sessionToken);
@@ -875,7 +1041,7 @@ export default function App() {
     return () => {
       unsubscribe();
     };
-  }, [sessionToken, userRow?.user_id, userRow?.email_verifie, showToast, loadDashboard]);
+  }, [sessionToken, userRow?.user_id, userRow?.email_verifie, showToast, loadDashboard, sendBrowserPushNotification]);
 
   // --- FORMAT HELPERS ---
   const formatMoney = (amountAr: number, cur: 'MGA' | 'USD' = displayCurrency) => {
@@ -1361,6 +1527,263 @@ export default function App() {
       });
     } catch {
       // ignore
+    }
+  };
+
+  // --- ALERTES DE PRIX (HAUSSIÈRE / BAISSIÈRE + PUSH & IN-APP) ---
+  const [alertCoinSymbol, setAlertCoinSymbol] = useState<string>('BTC');
+  const [alertDirection, setAlertDirection] = useState<'above' | 'below'>('above');
+  const [alertTargetPriceInput, setAlertTargetPriceInput] = useState<string>('');
+  const [alertNoteInput, setAlertNoteInput] = useState<string>('');
+  const [alertSubmitting, setAlertSubmitting] = useState<boolean>(false);
+  const [pushPermission, setPushPermission] = useState<'default' | 'granted' | 'denied' | 'unsupported'>(() => {
+    if (typeof window === 'undefined' || !('Notification' in window)) return 'unsupported';
+    return Notification.permission;
+  });
+  const triggeredAlertNotifiedRef = useRef<Set<string>>(new Set());
+
+  const localAlertsStorageKey = userRow?.user_id ? `saloma_price_alerts_${userRow.user_id}` : '';
+
+  useEffect(() => {
+    if (!localAlertsStorageKey || sessionToken !== COOKIE_SESSION_MARKER) return;
+    try {
+      const raw = localStorage.getItem(localAlertsStorageKey);
+      if (raw) {
+        const parsed = JSON.parse(raw);
+        if (Array.isArray(parsed)) setPriceAlertsList(parsed);
+      }
+    } catch {
+      // ignore storage read error
+    }
+  }, [localAlertsStorageKey, sessionToken]);
+
+  const persistLocalAlertsFallback = useCallback(
+    (nextAlerts: PriceAlertRow[]) => {
+      if (!localAlertsStorageKey) return;
+      try {
+        localStorage.setItem(localAlertsStorageKey, JSON.stringify(nextAlerts));
+      } catch {
+        // ignore storage quota
+      }
+    },
+    [localAlertsStorageKey]
+  );
+
+  // Évaluateur temps réel sur les ticks WebSocket live (garantit alerte instantanée Push & In-App)
+  useEffect(() => {
+    if (!userRow?.user_id || priceAlertsList.length === 0) return;
+
+    const coinPriceBySym = new Map<string, number>();
+    for (const c of coins) {
+      coinPriceBySym.set(c.symbol.toUpperCase(), c.price);
+    }
+
+    const hitAlerts: Array<{ alert: PriceAlertRow; livePrice: number }> = [];
+    for (const a of priceAlertsList) {
+      if (!a.active || a.triggered) continue;
+      const livePrice = coinPriceBySym.get(a.symbol.toUpperCase());
+      if (!livePrice || livePrice <= 0) continue;
+      const reached = a.direction === 'above' ? livePrice >= a.targetPriceUsd : livePrice <= a.targetPriceUsd;
+      if (reached && !triggeredAlertNotifiedRef.current.has(a.id)) {
+        hitAlerts.push({ alert: a, livePrice });
+      }
+    }
+
+    if (hitAlerts.length === 0) return;
+
+    const nowIso = new Date().toISOString();
+    const hitMap = new Map(hitAlerts.map(h => [h.alert.id, h.livePrice]));
+
+    for (const { alert, livePrice } of hitAlerts) {
+      triggeredAlertNotifiedRef.current.add(alert.id);
+      const dirLabel = alert.direction === 'above' ? 'Alerte haussière atteinte' : 'Alerte baissière atteinte';
+      const opSymbol = alert.direction === 'above' ? '≥' : '≤';
+      const title = `🔔 ${alert.symbol}/USDT : ${dirLabel}`;
+      const body = `${alert.symbol} a atteint $${formatCoinPrice(livePrice)} (seuil ${opSymbol} $${formatCoinPrice(alert.targetPriceUsd)})${alert.note ? ` — ${alert.note}` : ''}`;
+
+      showToast(`🔔 ${body}`);
+      sendBrowserPushNotification(title, body, alert.id);
+
+      setNotificationsList(prev => {
+        const syntheticId = `alert_notif_${alert.id}`;
+        if (prev.some(n => n.$id === syntheticId || n.message.includes(`$${alert.targetPriceUsd}`))) {
+          return prev;
+        }
+        return [
+          {
+            $id: syntheticId,
+            user_id: userRow.user_id,
+            titre: title,
+            message: body,
+            type: 'price_alert',
+            lu: false,
+            date: nowIso
+          },
+          ...prev
+        ];
+      });
+    }
+
+    setPriceAlertsList(prev => {
+      const next = prev.map(a =>
+        hitMap.has(a.id)
+          ? { ...a, active: false, triggered: true, triggeredAt: nowIso, triggeredPriceUsd: hitMap.get(a.id) }
+          : a
+      );
+      if (sessionToken === COOKIE_SESSION_MARKER) {
+        persistLocalAlertsFallback(next);
+      }
+      return next;
+    });
+  }, [
+    coins,
+    priceAlertsList,
+    userRow?.user_id,
+    sessionToken,
+    showToast,
+    sendBrowserPushNotification,
+    persistLocalAlertsFallback
+  ]);
+
+  const openPriceAlertsModal = useCallback(
+    (defaultSymbol?: string) => {
+      const targetSym = (defaultSymbol || selectedCoin.symbol || 'BTC').toUpperCase();
+      const matchedCoin = coins.find(c => c.symbol.toUpperCase() === targetSym) || selectedCoin;
+      setAlertCoinSymbol(matchedCoin.symbol);
+      const suggestedTarget =
+        alertDirection === 'above' ? matchedCoin.price * 1.02 : matchedCoin.price * 0.98;
+      setAlertTargetPriceInput(formatCoinPrice(suggestedTarget).replace(/,/g, ''));
+      setAlertNoteInput('');
+      if (typeof window !== 'undefined' && 'Notification' in window) {
+        setPushPermission(Notification.permission);
+      }
+      setActiveModal('priceAlerts');
+    },
+    [coins, selectedCoin, alertDirection]
+  );
+
+  const handleRequestPushPermission = async () => {
+    if (typeof window === 'undefined' || !('Notification' in window)) {
+      setPushPermission('unsupported');
+      showToast('Notifications Push non supportées sur ce navigateur (alertes in-app actives).');
+      return;
+    }
+    try {
+      const perm = await Notification.requestPermission();
+      setPushPermission(perm);
+      if (perm === 'granted') {
+        sendBrowserPushNotification(
+          'SALOMA — Alertes Push activées',
+          'Vous recevrez une notification dès qu’un seuil de prix crypto est atteint.',
+          'saloma-push-test'
+        );
+        showToast('✓ Notifications Push activées !');
+      } else {
+        showToast('Permission Push refusée — les alertes in-app restent actives.');
+      }
+    } catch {
+      showToast('Alertes in-app actives dans SALOMA.');
+    }
+  };
+
+  const handleCreatePriceAlert = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!sessionToken || !userRow?.user_id) return;
+    const target = parseFloat(alertTargetPriceInput);
+    if (!Number.isFinite(target) || target <= 0) {
+      showToast('Veuillez entrer un prix cible valide supérieur à 0 $.');
+      return;
+    }
+    const coinObj = coins.find(c => c.symbol.toUpperCase() === alertCoinSymbol.toUpperCase()) || selectedCoin;
+    setAlertSubmitting(true);
+    try {
+      if (sessionToken === COOKIE_SESSION_MARKER) {
+        const localAlert: PriceAlertRow = {
+          id: `local_alert_${Date.now()}`,
+          userId: userRow.user_id,
+          symbol: coinObj.symbol.toUpperCase(),
+          direction: alertDirection,
+          targetPriceUsd: target,
+          createdPriceUsd: coinObj.price,
+          active: true,
+          triggered: false,
+          createdAt: new Date().toISOString(),
+          note: alertNoteInput.trim() || undefined
+        };
+        const next = [localAlert, ...priceAlertsList];
+        setPriceAlertsList(next);
+        persistLocalAlertsFallback(next);
+        setAlertNoteInput('');
+        showToast(`✓ Alerte ${coinObj.symbol} enregistrée ($${formatCoinPrice(target)})`);
+      } else {
+        const res = await apiRequest<{ alert: PriceAlertRow; alerts: PriceAlertRow[] }>('/api/alerts', {
+          method: 'POST',
+          token: sessionToken,
+          body: {
+            symbol: coinObj.symbol,
+            direction: alertDirection,
+            targetPriceUsd: target,
+            note: alertNoteInput.trim() || undefined
+          }
+        });
+        if (Array.isArray(res.alerts)) setPriceAlertsList(res.alerts);
+        setAlertNoteInput('');
+        showToast(`✓ Alerte ${coinObj.symbol} créée ($${formatCoinPrice(target)})`);
+      }
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : 'Erreur création alerte de prix.');
+    } finally {
+      setAlertSubmitting(false);
+    }
+  };
+
+  const handleToggleOrRearmAlert = async (alert: PriceAlertRow) => {
+    if (!sessionToken) return;
+    triggeredAlertNotifiedRef.current.delete(alert.id);
+    if (sessionToken === COOKIE_SESSION_MARKER) {
+      const next = priceAlertsList.map(a =>
+        a.id === alert.id
+          ? {
+              ...a,
+              active: alert.triggered ? true : !a.active,
+              triggered: false,
+              triggeredAt: undefined,
+              triggeredPriceUsd: undefined
+            }
+          : a
+      );
+      setPriceAlertsList(next);
+      persistLocalAlertsFallback(next);
+      return;
+    }
+    try {
+      const res = await apiRequest<{ alerts: PriceAlertRow[] }>(`/api/alerts/${alert.id}`, {
+        method: 'PATCH',
+        token: sessionToken,
+        body: alert.triggered ? { rearm: true } : { active: !alert.active }
+      });
+      if (Array.isArray(res.alerts)) setPriceAlertsList(res.alerts);
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : 'Erreur mise à jour alerte.');
+    }
+  };
+
+  const handleDeletePriceAlert = async (alertId: string) => {
+    if (!sessionToken) return;
+    if (sessionToken === COOKIE_SESSION_MARKER) {
+      const next = priceAlertsList.filter(a => a.id !== alertId);
+      setPriceAlertsList(next);
+      persistLocalAlertsFallback(next);
+      return;
+    }
+    try {
+      const res = await apiRequest<{ alerts: PriceAlertRow[] }>(`/api/alerts/${alertId}`, {
+        method: 'DELETE',
+        token: sessionToken
+      });
+      if (Array.isArray(res.alerts)) setPriceAlertsList(res.alerts);
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : 'Erreur suppression alerte.');
     }
   };
 
@@ -2264,6 +2687,9 @@ export default function App() {
     setWalletCoinSearchTerm('');
     setCopiedDepositAddress(false);
     setActiveModal('deposit');
+    if (!activeClientDepositAddress) {
+      setWalletAddressRetryCount(c => c + 1);
+    }
   };
 
   const handleOpenWithdraw = () => {
@@ -5686,12 +6112,25 @@ export default function App() {
                 <div className="p-3 rounded-2xl bg-[#1D1240] border-2 border-[#8B5CF6]/50 space-y-2">
                   <div className="flex items-center justify-between gap-2">
                     <div>
-                      <div className="flex items-center gap-1.5">
+                      <div className="flex items-center gap-1.5 flex-wrap">
                         <span className="text-[10px] font-bold text-purple-300 uppercase">Prix SALOMA</span>
                         <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-emerald-500/20 border border-emerald-400/60 text-emerald-300 text-[9px] font-black">
                           <span className={`w-1.5 h-1.5 rounded-full bg-emerald-400 ${isWsLive ? 'animate-pulse' : 'opacity-60'}`} />
                           LIVE MARCHÉ
                         </span>
+                        <button
+                          type="button"
+                          onClick={() => openPriceAlertsModal(selectedCoin.symbol)}
+                          className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-[#7C3AED]/30 border border-[#8B5CF6]/60 text-purple-100 text-[9px] font-black hover:bg-[#7C3AED]/50"
+                        >
+                          <Bell className="w-2.5 h-2.5 text-amber-300" />
+                          <span>Alerte prix</span>
+                          {activePriceAlertsCount > 0 && (
+                            <span className="px-1 rounded bg-amber-500 text-black text-[8px] font-black">
+                              {activePriceAlertsCount}
+                            </span>
+                          )}
+                        </button>
                       </div>
                       <span className="text-2xl font-black text-white font-mono">
                         ${formatCoinPrice(selectedCoin.price)}
@@ -6830,6 +7269,14 @@ export default function App() {
                 </h3>
               </div>
               <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => openPriceAlertsModal(selectedCoin.symbol)}
+                  className="text-[10px] font-bold px-2.5 py-1 rounded-lg bg-amber-500/20 text-amber-300 border border-amber-400/40 inline-flex items-center gap-1"
+                >
+                  <Bell className="w-3 h-3" />
+                  <span>Alertes prix{activePriceAlertsCount > 0 ? ` (${activePriceAlertsCount})` : ''}</span>
+                </button>
                 {unreadNotificationsCount > 0 && (
                   <button
                     onClick={handleMarkAllNotificationsRead}
@@ -6877,6 +7324,300 @@ export default function App() {
       )}
 
       {/* ========================================================
+          MODAL: ALERTES DE PRIX CRYPTO (HAUSSIÈRE / BAISSIÈRE)
+         ======================================================== */}
+      {activeModal === 'priceAlerts' && (() => {
+        const alertCoinObj =
+          coins.find(c => c.symbol.toUpperCase() === alertCoinSymbol.toUpperCase()) || selectedCoin;
+        const currentLivePrice = alertCoinObj.price || 0;
+        return (
+          <div className="fixed inset-0 z-50 bg-black/85 backdrop-blur-sm flex items-end sm:items-center justify-center p-0 sm:p-4">
+            <div className="bg-[#1D1240] border-2 border-[#8B5CF6] w-full max-w-md rounded-t-3xl sm:rounded-3xl p-5 space-y-4 max-h-[92vh] overflow-y-auto">
+              <div className="flex justify-between items-center">
+                <button
+                  type="button"
+                  onClick={() => setActiveModal(null)}
+                  className="p-1.5 rounded-lg bg-[#23154D] text-purple-300"
+                >
+                  <ArrowLeft className="w-5 h-5" />
+                </button>
+                <div className="text-center">
+                  <h3 className="font-black text-white text-base flex items-center justify-center gap-1.5">
+                    <Bell className="w-4 h-4 text-amber-300" />
+                    <span>Alertes de Prix SALOMA</span>
+                  </h3>
+                  <span className="text-[10px] text-purple-300">
+                    Notification Push &amp; In-App dès que le seuil est atteint
+                  </span>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setActiveModal(null)}
+                  className="p-1.5 rounded-lg bg-[#23154D] text-purple-300"
+                >
+                  <X className="w-5 h-5" />
+                </button>
+              </div>
+
+              {/* STATUT NOTIFICATION PUSH NAVIGATEUR */}
+              <div className="p-2.5 rounded-xl bg-[#150D2E] border border-purple-500/30 flex items-center justify-between gap-2 text-[11px]">
+                <span className="text-purple-200 font-bold">
+                  Push navigateur :{' '}
+                  <strong
+                    className={
+                      pushPermission === 'granted'
+                        ? 'text-emerald-400'
+                        : pushPermission === 'denied'
+                        ? 'text-rose-400'
+                        : 'text-amber-300'
+                    }
+                  >
+                    {pushPermission === 'granted'
+                      ? 'Activé ✓'
+                      : pushPermission === 'denied'
+                      ? 'Bloqué (In-App actif)'
+                      : pushPermission === 'unsupported'
+                      ? 'In-App actif'
+                      : 'Non activé'}
+                  </strong>
+                </span>
+                {pushPermission !== 'granted' && pushPermission !== 'unsupported' && (
+                  <button
+                    type="button"
+                    onClick={handleRequestPushPermission}
+                    className="px-2.5 py-1 rounded-lg bg-[#7C3AED] text-white text-[10px] font-black shrink-0"
+                  >
+                    Activer Push
+                  </button>
+                )}
+              </div>
+
+              {/* FORMULAIRE NOUVELLE ALERTE */}
+              <form onSubmit={handleCreatePriceAlert} className="p-3.5 rounded-2xl bg-[#150D2E] border border-[#8B5CF6]/50 space-y-3 text-xs">
+                <div>
+                  <div className="flex items-center justify-between mb-1">
+                    <label className="font-bold text-purple-300">Cryptomonnaie *</label>
+                    <span className="text-[10px] font-mono text-emerald-300 font-bold">
+                      Prix actuel : ${formatCoinPrice(currentLivePrice)}
+                    </span>
+                  </div>
+                  <select
+                    value={alertCoinObj.symbol}
+                    onChange={e => {
+                      const nextSym = e.target.value;
+                      setAlertCoinSymbol(nextSym);
+                      const nextCoin = coins.find(c => c.symbol === nextSym);
+                      if (nextCoin) {
+                        const mult = alertDirection === 'above' ? 1.02 : 0.98;
+                        setAlertTargetPriceInput(formatCoinPrice(nextCoin.price * mult).replace(/,/g, ''));
+                      }
+                    }}
+                    className="w-full px-3 py-2.5 rounded-xl bg-[#190F38] border-2 border-[#8B5CF6]/40 text-white font-bold"
+                  >
+                    {coins.map(c => (
+                      <option key={c.id} value={c.symbol}>
+                        {c.symbol} — {c.name} (${formatCoinPrice(c.price)})
+                      </option>
+                    ))}
+                  </select>
+                </div>
+
+                <div>
+                  <label className="font-bold text-purple-300 block mb-1">Type d’alerte *</label>
+                  <div className="grid grid-cols-2 gap-2">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setAlertDirection('above');
+                        if (currentLivePrice > 0) {
+                          setAlertTargetPriceInput(formatCoinPrice(currentLivePrice * 1.02).replace(/,/g, ''));
+                        }
+                      }}
+                      className={`p-2.5 rounded-xl border-2 text-left transition flex items-center gap-2 ${
+                        alertDirection === 'above'
+                          ? 'bg-emerald-600/25 border-emerald-400 text-white'
+                          : 'bg-[#190F38] border-purple-500/30 text-purple-300'
+                      }`}
+                    >
+                      <TrendingUp className="w-4 h-4 text-emerald-400 shrink-0" />
+                      <div>
+                        <span className="font-black block">Haussière</span>
+                        <span className="text-[10px] opacity-85">Prix ≥ cible</span>
+                      </div>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setAlertDirection('below');
+                        if (currentLivePrice > 0) {
+                          setAlertTargetPriceInput(formatCoinPrice(currentLivePrice * 0.98).replace(/,/g, ''));
+                        }
+                      }}
+                      className={`p-2.5 rounded-xl border-2 text-left transition flex items-center gap-2 ${
+                        alertDirection === 'below'
+                          ? 'bg-rose-600/25 border-rose-400 text-white'
+                          : 'bg-[#190F38] border-purple-500/30 text-purple-300'
+                      }`}
+                    >
+                      <TrendingDown className="w-4 h-4 text-rose-400 shrink-0" />
+                      <div>
+                        <span className="font-black block">Baissière</span>
+                        <span className="text-[10px] opacity-85">Prix ≤ cible</span>
+                      </div>
+                    </button>
+                  </div>
+                </div>
+
+                <div>
+                  <label className="font-bold text-purple-300 block mb-1">
+                    Seuil cible en USD ($) *
+                  </label>
+                  <input
+                    type="text"
+                    inputMode="decimal"
+                    required
+                    value={alertTargetPriceInput}
+                    onChange={e => setAlertTargetPriceInput(e.target.value.replace(/[^0-9.]/g, ''))}
+                    placeholder={`Ex: ${formatCoinPrice(currentLivePrice)}`}
+                    className="w-full px-3 py-2.5 rounded-xl bg-[#190F38] border-2 border-[#8B5CF6]/40 text-white font-mono font-bold"
+                  />
+                  <div className="grid grid-cols-4 gap-1.5 mt-1.5">
+                    {[-5, -2, 2, 5].map(pct => (
+                      <button
+                        key={pct}
+                        type="button"
+                        onClick={() => {
+                          if (currentLivePrice <= 0) return;
+                          setAlertDirection(pct >= 0 ? 'above' : 'below');
+                          setAlertTargetPriceInput(
+                            formatCoinPrice(currentLivePrice * (1 + pct / 100)).replace(/,/g, '')
+                          );
+                        }}
+                        className={`py-1 rounded-lg bg-[#190F38] border border-purple-500/30 text-[10px] font-mono font-bold ${
+                          pct >= 0 ? 'text-emerald-300' : 'text-rose-300'
+                        }`}
+                      >
+                        {pct > 0 ? `+${pct}%` : `${pct}%`}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                <div>
+                  <label className="font-bold text-purple-300 block mb-1">Note (optionnel)</label>
+                  <input
+                    type="text"
+                    maxLength={120}
+                    value={alertNoteInput}
+                    onChange={e => setAlertNoteInput(e.target.value)}
+                    placeholder={`Ex: Objectif ${alertCoinObj.symbol}`}
+                    className="w-full px-3 py-2 rounded-xl bg-[#190F38] border border-[#8B5CF6]/40 text-white"
+                  />
+                </div>
+
+                <button
+                  type="submit"
+                  disabled={alertSubmitting}
+                  className="w-full py-3 rounded-xl bg-gradient-to-r from-[#7C3AED] to-[#8B5CF6] text-white font-black text-xs shadow disabled:opacity-60"
+                >
+                  {alertSubmitting ? 'Enregistrement...' : 'Créer l’alerte de prix'}
+                </button>
+              </form>
+
+              {/* LISTE DES ALERTES UTILISATEUR */}
+              <div className="space-y-2">
+                <div className="flex items-center justify-between text-xs font-bold text-purple-200">
+                  <span>Mes alertes ({priceAlertsList.length})</span>
+                  <span className="text-[10px] font-mono text-emerald-300">
+                    {activePriceAlertsCount} active{activePriceAlertsCount > 1 ? 's' : ''}
+                  </span>
+                </div>
+
+                {priceAlertsList.length === 0 ? (
+                  <div className="p-4 rounded-2xl bg-[#150D2E] border border-purple-500/20 text-center text-xs text-purple-300">
+                    Aucune alerte configurée. Créez une alerte haussière ou baissière ci-dessus.
+                  </div>
+                ) : (
+                  <div className="space-y-2 max-h-60 overflow-y-auto pr-1">
+                    {priceAlertsList.map(alert => {
+                      const live =
+                        coins.find(c => c.symbol.toUpperCase() === alert.symbol.toUpperCase())?.price || 0;
+                      const diffPct =
+                        live > 0 ? (((alert.targetPriceUsd - live) / live) * 100).toFixed(2) : null;
+                      return (
+                        <div
+                          key={alert.id}
+                          className={`p-3 rounded-2xl border space-y-1.5 text-xs ${
+                            alert.triggered
+                              ? 'bg-emerald-950/35 border-emerald-400/50'
+                              : alert.active
+                              ? 'bg-[#150D2E] border-[#8B5CF6]/50'
+                              : 'bg-[#150D2E]/60 border-purple-500/20 opacity-75'
+                          }`}
+                        >
+                          <div className="flex items-center justify-between gap-2">
+                            <div className="flex items-center gap-1.5">
+                              <span className="font-black text-white">{alert.symbol}/USDT</span>
+                              <span
+                                className={`px-1.5 py-0.5 rounded text-[9px] font-black ${
+                                  alert.direction === 'above'
+                                    ? 'bg-emerald-500/20 text-emerald-300'
+                                    : 'bg-rose-500/20 text-rose-300'
+                                }`}
+                              >
+                                {alert.direction === 'above' ? 'Haussière ≥' : 'Baissière ≤'} $
+                                {formatCoinPrice(alert.targetPriceUsd)}
+                              </span>
+                            </div>
+                            <span
+                              className={`text-[9px] font-mono font-black px-1.5 py-0.5 rounded ${
+                                alert.triggered
+                                  ? 'bg-emerald-500/25 text-emerald-300'
+                                  : alert.active
+                                  ? 'bg-[#7C3AED]/30 text-purple-200'
+                                  : 'bg-slate-600/30 text-slate-300'
+                              }`}
+                            >
+                              {alert.triggered ? 'Atteinte ✓' : alert.active ? 'Active' : 'En pause'}
+                            </span>
+                          </div>
+
+                          <div className="flex items-center justify-between gap-2 text-[10px] font-mono text-purple-300">
+                            <span>
+                              Actuel : ${formatCoinPrice(live)}
+                              {diffPct !== null && ` (${Number(diffPct) >= 0 ? '+' : ''}${diffPct}%)`}
+                            </span>
+                            <div className="flex items-center gap-1.5">
+                              <button
+                                type="button"
+                                onClick={() => handleToggleOrRearmAlert(alert)}
+                                className="px-2 py-0.5 rounded bg-[#23154D] border border-purple-400/40 text-purple-100 font-bold"
+                              >
+                                {alert.triggered ? 'Réactiver' : alert.active ? 'Pause' : 'Activer'}
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => handleDeletePriceAlert(alert.id)}
+                                className="p-1 rounded bg-rose-500/20 text-rose-300"
+                                title="Supprimer l’alerte"
+                              >
+                                <Trash2 className="w-3 h-3" />
+                              </button>
+                            </div>
+                          </div>
+                          {alert.note && <p className="text-[10px] text-purple-200 italic">{alert.note}</p>}
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+            </div>
+          </div>
+        );
+      })()}
+
+      {/* ========================================================
           MODAL: DÉPÔT CRYPTO UNIQUEMENT (50 COINS + CHAÎNE & RÉSEAU)
          ======================================================== */}
       {activeModal === 'deposit' && (
@@ -6907,8 +7648,46 @@ export default function App() {
                 Adresse de dépôt {selectedWalletCoin.symbol} ({activeNetwork.name})
               </span>
               <span className="font-mono text-xs text-white break-all block bg-[#100926] p-2.5 rounded-xl border border-purple-500/20">
-                {activeClientDepositAddress || 'Génération de votre adresse wallet...'}
+                {activeClientDepositAddress ||
+                  (walletAddressPhase === 'loading'
+                    ? 'Génération de votre adresse wallet...'
+                    : provisionalClientDepositAddress)}
               </span>
+              {!activeClientDepositAddress && (
+                <div className="flex flex-wrap items-center justify-center gap-2 text-[10px]">
+                  {walletAddressPhase === 'slow' && (
+                    <span className="text-amber-300 font-bold">
+                      Adresse provisoire ({selectedWalletCoin.symbol})
+                    </span>
+                  )}
+                  {walletAddressPhase === 'timeout' && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setWalletAddressPhase('loading');
+                        setWalletAddressRetryCount(c => c + 1);
+                        void fetchWalletAddressesFast(selectedWalletCoin.symbol, activeNetwork.chain);
+                      }}
+                      className="text-amber-300 font-bold underline"
+                    >
+                      Cliquez pour générer
+                    </button>
+                  )}
+                  {walletAddressPhase !== 'loading' && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setWalletAddressPhase('loading');
+                        setWalletAddressRetryCount(c => c + 1);
+                        void fetchWalletAddressesFast(selectedWalletCoin.symbol, activeNetwork.chain);
+                      }}
+                      className="px-2 py-0.5 rounded bg-[#23154D] border border-purple-400/40 text-purple-100 font-bold"
+                    >
+                      Réessayer
+                    </button>
+                  )}
+                </div>
+              )}
               <div className="flex flex-wrap items-center justify-between gap-2 text-[10px] text-purple-300 pt-1">
                 <div className="text-left font-mono space-y-0.5">
                   <span className="block text-emerald-300 font-bold">
@@ -6921,10 +7700,10 @@ export default function App() {
                 </div>
                 <button
                   type="button"
-                  disabled={!activeClientDepositAddress}
+                  disabled={!displayedClientDepositAddress}
                   onClick={() => {
-                    if (!activeClientDepositAddress) return;
-                    navigator.clipboard?.writeText(activeClientDepositAddress);
+                    if (!displayedClientDepositAddress) return;
+                    navigator.clipboard?.writeText(displayedClientDepositAddress);
                     setCopiedDepositAddress(true);
                     showToast(`✓ Adresse ${selectedWalletCoin.symbol} (${activeNetworkLabel}) copiée !`);
                     setTimeout(() => setCopiedDepositAddress(false), 2000);

@@ -42,6 +42,14 @@ import {
   getUserAddressForChain,
   validateWalletAddressForChain
 } from './walletAddresses';
+import {
+  listUserPriceAlerts,
+  createUserPriceAlert,
+  updateUserPriceAlert,
+  deleteUserPriceAlert,
+  evaluatePriceAlertsForSymbol,
+  type PriceAlert
+} from './priceAlerts';
 
 const PORT = 3000;
 const USD_TO_MGA = 4750;
@@ -1609,6 +1617,8 @@ function applyExternalTickerUpdate(
   marketCache.bybitOnline = true;
   marketCache.updatedAt = Date.now();
 
+  triggerPriceAlertNotifications(sym, nextSalomaPrice);
+
   if (changed) {
     broadcastWs({
       type: 'tick',
@@ -1983,6 +1993,7 @@ async function refreshMarketPrices(force = false): Promise<void> {
             low24h: row.low24h > 0 ? computeSalomaPrice(sym, row.low24h) : cur.low24h,
             volume24hUsd: row.volUsd > 0 ? row.volUsd : cur.volume24hUsd
           };
+          triggerPriceAlertNotifications(sym, salomaPrice);
         }
         marketCache.bybitOnline = updatedCount > 0;
         marketCache.latencyMs = latencyMs;
@@ -2204,7 +2215,33 @@ async function createNotification(
     return row;
   } catch (err) {
     console.error('Notification insert error:', err);
-    return null;
+    const fallbackRow = {
+      $id: `notif_${crypto.randomUUID()}`,
+      user_id: userId,
+      titre,
+      message,
+      type,
+      lu: false,
+      date: new Date().toISOString()
+    };
+    notificationEmitter.emit(`user:${userId}`, fallbackRow);
+    return fallbackRow;
+  }
+}
+
+function triggerPriceAlertNotifications(symbol: string, currentPriceUsd: number) {
+  try {
+    const triggeredList: PriceAlert[] = evaluatePriceAlertsForSymbol(symbol, currentPriceUsd);
+    for (const alert of triggeredList) {
+      const dirLabel = alert.direction === 'above' ? 'Alerte haussière atteinte' : 'Alerte baissière atteinte';
+      const opSymbol = alert.direction === 'above' ? '≥' : '≤';
+      const titre = `🔔 ${alert.symbol}/USDT : ${dirLabel}`;
+      const noteSuffix = alert.note ? ` — ${alert.note}` : '';
+      const message = `${alert.symbol} a atteint $${currentPriceUsd} (seuil ${opSymbol} $${alert.targetPriceUsd})${noteSuffix}`;
+      void createNotification(alert.userId, titre, message, 'price_alert');
+    }
+  } catch (err) {
+    console.error('Price alert evaluation error:', err);
   }
 }
 
@@ -2265,6 +2302,29 @@ interface AuthedRequest extends Request {
   userRow?: Record<string, unknown> & { $id: string };
 }
 
+interface CachedAuthSession {
+  authUser: {
+    $id: string;
+    email: string;
+    name: string;
+    emailVerification: boolean;
+  };
+  userRow?: Record<string, unknown> & { $id: string };
+  expiresAt: number;
+}
+
+const AUTH_SESSION_CACHE = new Map<string, CachedAuthSession>();
+const AUTH_SESSION_TTL_MS = 30_000;
+
+function getSessionCacheKey(secret: string): string {
+  return crypto.createHash('sha256').update(secret).digest('hex');
+}
+
+function invalidateAuthSessionCache(secret?: string) {
+  if (!secret) return;
+  AUTH_SESSION_CACHE.delete(getSessionCacheKey(secret));
+}
+
 async function requireAuth(req: AuthedRequest, res: Response, next: NextFunction) {
   const authHeader = req.headers.authorization || '';
   const secret = authHeader.startsWith('Bearer ') ? authHeader.slice(7).trim() : '';
@@ -2272,23 +2332,47 @@ async function requireAuth(req: AuthedRequest, res: Response, next: NextFunction
     res.status(401).json({ error: 'Session expirée ou manquante. Veuillez vous connecter.' });
     return;
   }
+
+  const cacheKey = getSessionCacheKey(secret);
+  const cached = AUTH_SESSION_CACHE.get(cacheKey);
+  if (cached && cached.expiresAt > Date.now()) {
+    req.authUser = cached.authUser;
+    req.sessionSecret = secret;
+    req.userRow = cached.userRow;
+    next();
+    return;
+  }
+
   try {
     const userClient = getUserSessionClient(secret);
     const acc = new Account(userClient);
     const authUser = await acc.get();
-    req.authUser = {
+    const normalizedAuthUser = {
       $id: authUser.$id,
       email: authUser.email,
       name: authUser.name,
       emailVerification: Boolean(authUser.emailVerification)
     };
+    req.authUser = normalizedAuthUser;
     req.sessionSecret = secret;
     const uRow = await getUserRowByUserId(authUser.$id);
-    if (uRow) {
-      req.userRow = uRow as Record<string, unknown> & { $id: string };
+    const normalizedUserRow = uRow ? (uRow as Record<string, unknown> & { $id: string }) : undefined;
+    if (normalizedUserRow) {
+      req.userRow = normalizedUserRow;
     }
+
+    if (AUTH_SESSION_CACHE.size >= 2000) {
+      const oldest = AUTH_SESSION_CACHE.keys().next().value;
+      if (oldest) AUTH_SESSION_CACHE.delete(oldest);
+    }
+    AUTH_SESSION_CACHE.set(cacheKey, {
+      authUser: normalizedAuthUser,
+      userRow: normalizedUserRow,
+      expiresAt: Date.now() + AUTH_SESSION_TTL_MS
+    });
     next();
   } catch {
+    AUTH_SESSION_CACHE.delete(cacheKey);
     res.status(401).json({ error: 'Session invalide ou expirée. Reconnectez-vous.' });
   }
 }
@@ -2893,6 +2977,8 @@ export function createSalomaApiApp() {
         })) as unknown as Record<string, unknown> & { $id: string };
       }
 
+      invalidateAuthSessionCache(req.sessionSecret);
+
       await createNotification(
         req.authUser!.$id,
         'Compte vérifié',
@@ -2983,6 +3069,7 @@ export function createSalomaApiApp() {
   });
 
   app.post('/api/auth/logout', requireAuth, async (req: AuthedRequest, res: Response) => {
+    invalidateAuthSessionCache(req.sessionSecret);
     try {
       const acc = new Account(getUserSessionClient(req.sessionSecret!));
       await acc.deleteSession({ sessionId: 'current' });
@@ -3124,7 +3211,8 @@ export function createSalomaApiApp() {
         echanges: echangesRes.rows,
         depotsRetraits: depotsRes.rows,
         earn: earnRes.rows,
-        notifications: notifRes.rows
+        notifications: notifRes.rows,
+        priceAlerts: listUserPriceAlerts(userId)
       });
     } catch (err) {
       res.status(400).json({ error: formatAppwriteErrorFr(err, 'Erreur lors du chargement des données.') });
@@ -3209,10 +3297,30 @@ export function createSalomaApiApp() {
   // 3. DÉPÔTS & RETRAITS CRYPTO UNIQUEMENT (50 COINS + CHAÎNE & RÉSEAU)
   // ========================================================
 
-  app.get('/api/wallet/addresses', requireAuth, requireVerified, (req: AuthedRequest, res: Response) => {
+  app.get('/api/wallet/addresses', requireAuth, (req: AuthedRequest, res: Response) => {
     try {
       const userId = req.authUser!.$id;
-      res.json({ walletAddresses: getUserWalletAddresses(userId) });
+      const coinParam = String(req.query?.coin || '').toUpperCase().trim();
+      const chainParam = String(req.query?.chain || '').trim();
+      const walletAddresses = getUserWalletAddresses(userId);
+      const payload: {
+        walletAddresses: Record<string, string>;
+        address?: string;
+        coin?: string;
+        chain?: string;
+        generatedAt: number;
+      } = {
+        walletAddresses,
+        generatedAt: Date.now()
+      };
+      if (coinParam || chainParam) {
+        const resolvedChain =
+          chainParam || findCoinNetwork(coinParam || 'USDT')?.chain || 'TRC20';
+        payload.coin = coinParam || undefined;
+        payload.chain = resolvedChain;
+        payload.address = getUserAddressForChain(userId, resolvedChain, coinParam || undefined);
+      }
+      res.json(payload);
     } catch (err) {
       res.status(400).json({ error: formatAppwriteErrorFr(err, 'Erreur génération adresses wallet.') });
     }
@@ -3271,7 +3379,7 @@ export function createSalomaApiApp() {
       }
 
       const displayNetwork = networkName ? `${resolvedChain} • ${networkName}` : resolvedChain;
-      const userDepositAddress = getUserAddressForChain(userId, resolvedChain);
+      const userDepositAddress = getUserAddressForChain(userId, resolvedChain, devise);
 
       const txRow = await adminDb.createRow({
         databaseId: APPWRITE_DATABASE_ID,
@@ -4778,6 +4886,98 @@ export function createSalomaApiApp() {
     }
   });
 
+  // ========================================================
+  // 7B. ALERTES DE PRIX CRYPTO (HAUSSIÈRE / BAISSIÈRE + PUSH)
+  // ========================================================
+
+  app.get('/api/alerts', requireAuth, (req: AuthedRequest, res: Response) => {
+    try {
+      const userId = req.authUser!.$id;
+      res.json({ alerts: listUserPriceAlerts(userId) });
+    } catch (err) {
+      res.status(400).json({ error: formatAppwriteErrorFr(err, 'Erreur chargement alertes de prix.') });
+    }
+  });
+
+  app.post('/api/alerts', requireAuth, (req: AuthedRequest, res: Response) => {
+    try {
+      const userId = req.authUser!.$id;
+      const rawSym = String(req.body?.symbol || '').toUpperCase().trim();
+      const symbol = rawSym === 'MATIC' ? 'POL' : rawSym;
+      const direction = req.body?.direction === 'below' ? 'below' : 'above';
+      const targetPriceUsd = Number(req.body?.targetPriceUsd);
+      const note = req.body?.note ? String(req.body.note).trim() : undefined;
+
+      if (!symbol || !marketCache.coins[symbol]) {
+        res.status(400).json({ error: `Crypto non reconnue (${rawSym || '?'})` });
+        return;
+      }
+      if (!Number.isFinite(targetPriceUsd) || targetPriceUsd <= 0) {
+        res.status(400).json({ error: 'Veuillez entrer un prix cible supérieur à 0 $.' });
+        return;
+      }
+
+      const currentPriceUsd = getSalomaPriceUsd(symbol) || marketCache.coins[symbol]?.salomaPrice || 0;
+      const alert = createUserPriceAlert({
+        userId,
+        symbol,
+        direction,
+        targetPriceUsd,
+        createdPriceUsd: currentPriceUsd,
+        note
+      });
+
+      if (currentPriceUsd > 0) {
+        triggerPriceAlertNotifications(symbol, currentPriceUsd);
+      }
+
+      const alerts = listUserPriceAlerts(userId);
+      const latest = alerts.find(a => a.id === alert.id) || alert;
+      res.status(201).json({ alert: latest, alerts });
+    } catch (err) {
+      res.status(400).json({ error: err instanceof Error ? err.message : 'Impossible de créer l’alerte.' });
+    }
+  });
+
+  app.patch('/api/alerts/:id', requireAuth, (req: AuthedRequest, res: Response) => {
+    try {
+      const userId = req.authUser!.$id;
+      const alertId = String(req.params.id || '').trim();
+      const updated = updateUserPriceAlert(userId, alertId, {
+        active: typeof req.body?.active === 'boolean' ? req.body.active : undefined,
+        rearm: Boolean(req.body?.rearm)
+      });
+      if (!updated) {
+        res.status(404).json({ error: 'Alerte introuvable.' });
+        return;
+      }
+      if (updated.active) {
+        const currentPriceUsd = getSalomaPriceUsd(updated.symbol);
+        if (currentPriceUsd > 0) {
+          triggerPriceAlertNotifications(updated.symbol, currentPriceUsd);
+        }
+      }
+      res.json({ alert: updated, alerts: listUserPriceAlerts(userId) });
+    } catch (err) {
+      res.status(400).json({ error: err instanceof Error ? err.message : 'Erreur mise à jour alerte.' });
+    }
+  });
+
+  app.delete('/api/alerts/:id', requireAuth, (req: AuthedRequest, res: Response) => {
+    try {
+      const userId = req.authUser!.$id;
+      const alertId = String(req.params.id || '').trim();
+      const removed = deleteUserPriceAlert(userId, alertId);
+      if (!removed) {
+        res.status(404).json({ error: 'Alerte introuvable.' });
+        return;
+      }
+      res.json({ ok: true, alerts: listUserPriceAlerts(userId) });
+    } catch (err) {
+      res.status(400).json({ error: err instanceof Error ? err.message : 'Erreur suppression alerte.' });
+    }
+  });
+
   app.post('/api/problemes', requireAuth, async (req: AuthedRequest, res: Response) => {
     try {
       const userId = req.authUser!.$id;
@@ -6269,7 +6469,7 @@ export function createSalomaApiApp() {
 
       const montantAr = livePriceUsd > 0 ? Math.round(montant * livePriceUsd * USD_TO_MGA) : 0;
       const displayNetwork = networkName ? `${resolvedChain} • ${networkName}` : resolvedChain;
-      const adminDepositAddress = getUserAddressForChain(ADMIN_WALLET_USER_ID, resolvedChain);
+      const adminDepositAddress = getUserAddressForChain(ADMIN_WALLET_USER_ID, resolvedChain, devise);
       const nowIso = new Date().toISOString();
       const txPayload = {
         user_id: ADMIN_WALLET_USER_ID,

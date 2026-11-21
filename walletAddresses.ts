@@ -605,11 +605,12 @@ export const ALL_SUPPORTED_CHAINS = [
   'ETC'
 ] as const;
 
-function deriveAddressForFamily(userId: string, family: string): string {
+function deriveAddressForFamily(userId: string, family: string, symbolTag?: string): string {
+  const scope = symbolTag ? `${userId}:coin:${symbolTag}` : userId;
   switch (family) {
     case 'EVM': {
       for (let i = 0; i < 8; i++) {
-        const { uncompressedPub } = deriveSecp256k1Key(userId, i === 0 ? 'evm' : `evm#${i}`);
+        const { uncompressedPub } = deriveSecp256k1Key(scope, i === 0 ? 'evm' : `evm#${i}`);
         const hash = keccak256('0x' + uncompressedPub.subarray(1).toString('hex'));
         const eoa = getAddress('0x' + hash.slice(-40));
         if (!KNOWN_NON_WALLET_CONTRACT_ADDRESSES.has(eoa.toLowerCase())) {
@@ -620,7 +621,7 @@ function deriveAddressForFamily(userId: string, family: string): string {
     }
     case 'TRON': {
       for (let i = 0; i < 8; i++) {
-        const { uncompressedPub } = deriveSecp256k1Key(userId, i === 0 ? 'tron' : `tron#${i}`);
+        const { uncompressedPub } = deriveSecp256k1Key(scope, i === 0 ? 'tron' : `tron#${i}`);
         const hash = keccak256('0x' + uncompressedPub.subarray(1).toString('hex'));
         const addr20 = Buffer.from(hash.slice(-40), 'hex');
         const tronAddr = base58CheckEncode(Buffer.concat([Buffer.from([0x41]), addr20]));
@@ -631,46 +632,46 @@ function deriveAddressForFamily(userId: string, family: string): string {
       throw new Error('TRON address collision.');
     }
     case 'BTC_SEGWIT': {
-      const { compressedPub } = deriveSecp256k1Key(userId, 'btc-segwit');
+      const { compressedPub } = deriveSecp256k1Key(scope, 'btc-segwit');
       return segwitEncode('bc', 0, hash160(compressedPub));
     }
     case 'BTC_TAPROOT': {
-      const { compressedPub } = deriveSecp256k1Key(userId, 'btc-taproot');
+      const { compressedPub } = deriveSecp256k1Key(scope, 'btc-taproot');
       return segwitEncode('bc', 1, compressedPub.subarray(1, 33));
     }
     case 'BTC_LIGHTNING': {
-      const tag = crypto.createHash('sha256').update(`ln:${userId}`).digest('hex').slice(0, 16);
+      const tag = crypto.createHash('sha256').update(`ln:${scope}`).digest('hex').slice(0, 16);
       const lnurlUrl = Buffer.from(`https://saloma.exchange/.well-known/lnurlp/${tag}`, 'utf8');
       return bech32DataEncode('lnurl', lnurlUrl);
     }
     case 'SOLANA': {
-      const { publicKey32 } = deriveEd25519Key(userId, 'solana');
+      const { publicKey32 } = deriveEd25519Key(scope, 'solana');
       return encodeBase58(publicKey32);
     }
     case 'RIPPLE': {
-      const { compressedPub } = deriveSecp256k1Key(userId, 'ripple');
+      const { compressedPub } = deriveSecp256k1Key(scope, 'ripple');
       return base58CheckEncode(Buffer.concat([Buffer.from([0x00]), hash160(compressedPub)]), XRP_ALPHABET);
     }
     case 'DOGECOIN': {
-      const { compressedPub } = deriveSecp256k1Key(userId, 'dogecoin');
+      const { compressedPub } = deriveSecp256k1Key(scope, 'dogecoin');
       return base58CheckEncode(Buffer.concat([Buffer.from([0x1e]), hash160(compressedPub)]));
     }
     case 'LITECOIN': {
-      const { compressedPub } = deriveSecp256k1Key(userId, 'litecoin');
+      const { compressedPub } = deriveSecp256k1Key(scope, 'litecoin');
       return segwitEncode('ltc', 0, hash160(compressedPub));
     }
     case 'BCH': {
-      const { compressedPub } = deriveSecp256k1Key(userId, 'bch');
+      const { compressedPub } = deriveSecp256k1Key(scope, 'bch');
       return encodeCashAddr(hash160(compressedPub));
     }
     case 'CARDANO': {
-      const { publicKey32 } = deriveEd25519Key(userId, 'cardano');
+      const { publicKey32 } = deriveEd25519Key(scope, 'cardano');
       const keyHash28 = blake2b(publicKey32, 28);
       const header = Buffer.from([0x61]); // Mainnet Shelley Enterprise Address
       return bech32DataEncode('addr', Buffer.concat([header, keyHash28]));
     }
     case 'TON': {
-      const { publicKey32 } = deriveEd25519Key(userId, 'ton');
+      const { publicKey32 } = deriveEd25519Key(scope, 'ton');
       const body = Buffer.concat([Buffer.from([0x51, 0x00]), publicKey32]);
       const crc = crc16XModem(body);
       const crcBuf = Buffer.alloc(2);
@@ -678,11 +679,11 @@ function deriveAddressForFamily(userId: string, family: string): string {
       return Buffer.concat([body, crcBuf]).toString('base64url');
     }
     case 'SUI': {
-      const { publicKey32 } = deriveEd25519Key(userId, 'sui');
+      const { publicKey32 } = deriveEd25519Key(scope, 'sui');
       return '0x' + blake2b(Buffer.concat([Buffer.from([0x00]), publicKey32]), 32).toString('hex');
     }
     case 'APTOS': {
-      const { publicKey32 } = deriveEd25519Key(userId, 'aptos');
+      const { publicKey32 } = deriveEd25519Key(scope, 'aptos');
       const digest = crypto
         .createHash('sha3-256')
         .update(Buffer.concat([publicKey32, Buffer.from([0x00])]))
@@ -690,17 +691,17 @@ function deriveAddressForFamily(userId: string, family: string): string {
       return '0x' + digest;
     }
     case 'NEAR': {
-      const { publicKey32 } = deriveEd25519Key(userId, 'near');
+      const { publicKey32 } = deriveEd25519Key(scope, 'near');
       return publicKey32.toString('hex');
     }
     case 'POLKADOT': {
-      const { publicKey32 } = deriveEd25519Key(userId, 'polkadot');
+      const { publicKey32 } = deriveEd25519Key(scope, 'polkadot');
       const payload = Buffer.concat([Buffer.from([0x00]), publicKey32]);
       const ck = blake2b(Buffer.concat([Buffer.from('SS58PRE', 'utf8'), payload]), 64).subarray(0, 2);
       return encodeBase58(Buffer.concat([payload, ck]));
     }
     case 'STELLAR': {
-      const { publicKey32 } = deriveEd25519Key(userId, 'stellar');
+      const { publicKey32 } = deriveEd25519Key(scope, 'stellar');
       const payload = Buffer.concat([Buffer.from([0x30]), publicKey32]);
       const crc = crc16XModem(payload);
       const crcBuf = Buffer.alloc(2);
@@ -708,51 +709,51 @@ function deriveAddressForFamily(userId: string, family: string): string {
       return base32Encode(Buffer.concat([payload, crcBuf]));
     }
     case 'ALGORAND': {
-      const { publicKey32 } = deriveEd25519Key(userId, 'algorand');
+      const { publicKey32 } = deriveEd25519Key(scope, 'algorand');
       const ck = crypto.createHash('sha512-256').update(publicKey32).digest().subarray(-4);
       return base32Encode(Buffer.concat([publicKey32, ck]));
     }
     case 'COSMOS': {
-      const { compressedPub } = deriveSecp256k1Key(userId, 'cosmos');
+      const { compressedPub } = deriveSecp256k1Key(scope, 'cosmos');
       return bech32DataEncode('cosmos', hash160(compressedPub));
     }
     case 'INJECTIVE': {
-      const { uncompressedPub } = deriveSecp256k1Key(userId, 'injective');
+      const { uncompressedPub } = deriveSecp256k1Key(scope, 'injective');
       const hash = keccak256('0x' + uncompressedPub.subarray(1).toString('hex'));
       return bech32DataEncode('inj', Buffer.from(hash.slice(-40), 'hex'));
     }
     case 'SEI': {
-      const { compressedPub } = deriveSecp256k1Key(userId, 'sei');
+      const { compressedPub } = deriveSecp256k1Key(scope, 'sei');
       return bech32DataEncode('sei', hash160(compressedPub));
     }
     case 'CELESTIA': {
-      const { compressedPub } = deriveSecp256k1Key(userId, 'celestia');
+      const { compressedPub } = deriveSecp256k1Key(scope, 'celestia');
       return bech32DataEncode('celestia', hash160(compressedPub));
     }
     case 'FETCH': {
-      const { compressedPub } = deriveSecp256k1Key(userId, 'fetch');
+      const { compressedPub } = deriveSecp256k1Key(scope, 'fetch');
       return bech32DataEncode('fetch', hash160(compressedPub));
     }
     case 'THORCHAIN': {
-      const { compressedPub } = deriveSecp256k1Key(userId, 'thorchain');
+      const { compressedPub } = deriveSecp256k1Key(scope, 'thorchain');
       return bech32DataEncode('thor', hash160(compressedPub));
     }
     case 'SALOMANET': {
-      const { compressedPub } = deriveSecp256k1Key(userId, 'salomanet');
+      const { compressedPub } = deriveSecp256k1Key(scope, 'salomanet');
       return bech32DataEncode('saloma', hash160(compressedPub));
     }
     case 'FILECOIN': {
-      const { uncompressedPub } = deriveSecp256k1Key(userId, 'filecoin');
+      const { uncompressedPub } = deriveSecp256k1Key(scope, 'filecoin');
       const payload = blake2b(uncompressedPub, 20);
       const ck = blake2b(Buffer.concat([Buffer.from([0x01]), payload]), 4);
       return 'f1' + base32Encode(Buffer.concat([payload, ck]), true);
     }
     case 'STACKS': {
-      const { compressedPub } = deriveSecp256k1Key(userId, 'stacks');
+      const { compressedPub } = deriveSecp256k1Key(scope, 'stacks');
       return c32CheckEncode(22, hash160(compressedPub));
     }
     case 'ICP': {
-      const { spkiDer } = deriveEd25519Key(userId, 'icp');
+      const { spkiDer } = deriveEd25519Key(scope, 'icp');
       const domainSep = Buffer.from('\x0aaccount-id', 'utf8');
       const subaccount = Buffer.alloc(32, 0);
       const accountHash = crypto
@@ -762,27 +763,102 @@ function deriveAddressForFamily(userId: string, family: string): string {
       return Buffer.concat([crc32Bytes(accountHash), accountHash]).toString('hex');
     }
     default: {
-      const { uncompressedPub } = deriveSecp256k1Key(userId, 'evm');
+      const { uncompressedPub } = deriveSecp256k1Key(scope, 'evm');
       const hash = keccak256('0x' + uncompressedPub.subarray(1).toString('hex'));
       return getAddress('0x' + hash.slice(-40));
     }
   }
 }
 
-export function getUserAddressForChain(userId: string, chain: string): string {
+export const SALOMA_COIN_CHAINS: Readonly<Record<string, readonly string[]>> = {
+  BTC: ['BTC-Native', 'Taproot', 'Lightning', 'BEP20', 'ERC20'],
+  ETH: ['ERC20', 'Arbitrum', 'Optimism', 'Base', 'BEP20', 'Polygon'],
+  USDT: ['TRC20', 'BEP20', 'ERC20', 'Polygon', 'Solana', 'Arbitrum', 'Optimism', 'AVAX-C', 'TON'],
+  SOL: ['Solana', 'BEP20'],
+  BNB: ['BEP20', 'opBNB'],
+  SALOMA: ['SalomaNet', 'BEP20', 'Polygon'],
+  XRP: ['Ripple', 'BEP20'],
+  DOGE: ['Dogecoin', 'BEP20'],
+  ADA: ['Cardano', 'BEP20'],
+  TON: ['TON', 'BEP20'],
+  AVAX: ['AVAX-C', 'BEP20'],
+  SUI: ['Sui'],
+  PEPE: ['ERC20', 'BEP20'],
+  LTC: ['Litecoin', 'BEP20'],
+  TRX: ['TRC20', 'BEP20'],
+  LINK: ['ERC20', 'BEP20', 'Polygon'],
+  DOT: ['Polkadot', 'BEP20'],
+  BCH: ['BCH', 'BEP20'],
+  SHIB: ['ERC20', 'BEP20'],
+  NEAR: ['NEAR', 'BEP20'],
+  UNI: ['ERC20', 'Arbitrum'],
+  APT: ['Aptos'],
+  ARB: ['Arbitrum', 'ERC20'],
+  OP: ['Optimism'],
+  ATOM: ['Cosmos'],
+  ICP: ['ICP'],
+  FIL: ['Filecoin', 'BEP20'],
+  HBAR: ['Hedera'],
+  XLM: ['Stellar'],
+  VET: ['VeChain'],
+  ALGO: ['Algorand'],
+  INJ: ['Injective', 'ERC20'],
+  SEI: ['Sei'],
+  TIA: ['Celestia'],
+  RENDER: ['Solana'],
+  FET: ['ERC20', 'Fetch'],
+  JUP: ['Solana'],
+  WIF: ['Solana'],
+  BONK: ['Solana'],
+  FLOKI: ['BEP20', 'ERC20'],
+  AAVE: ['ERC20', 'Polygon'],
+  MKR: ['ERC20'],
+  LDO: ['ERC20'],
+  GRT: ['Arbitrum', 'ERC20'],
+  IMX: ['ERC20'],
+  STX: ['Stacks'],
+  RUNE: ['THORChain'],
+  ETC: ['ETC', 'BEP20'],
+  POL: ['Polygon', 'ERC20'],
+  MATIC: ['Polygon', 'ERC20'],
+  ONDO: ['ERC20']
+};
+
+function normalizeCoinSymbol(symbol?: string): string {
+  const upper = String(symbol || '').toUpperCase().trim();
+  if (!upper) return '';
+  return upper === 'MATIC' ? 'POL' : upper;
+}
+
+const USER_WALLET_MAP_CACHE = new Map<string, Record<string, string>>();
+
+export function getUserAddressForChain(userId: string, chain: string, symbol?: string): string {
   const cleanUser = String(userId || '').trim();
   if (!cleanUser) {
     throw new Error('Identifiant utilisateur requis pour générer une adresse wallet.');
   }
+  const cleanSym = normalizeCoinSymbol(symbol);
+  if (cleanSym) {
+    const cached = USER_WALLET_MAP_CACHE.get(cleanUser);
+    const key = `${cleanSym}:${chain}`;
+    if (cached?.[key]) return cached[key];
+  }
   const family = getChainFamily(chain);
-  return deriveAddressForFamily(cleanUser, family);
+  return deriveAddressForFamily(cleanUser, family, cleanSym || undefined);
 }
 
 export function getUserWalletAddresses(userId: string): Record<string, string> {
   const cleanUser = String(userId || '').trim();
   if (!cleanUser) return {};
+
+  const cached = USER_WALLET_MAP_CACHE.get(cleanUser);
+  if (cached) {
+    return cached;
+  }
+
   const familyCache = new Map<string, string>();
   const out: Record<string, string> = {};
+
   for (const chain of ALL_SUPPORTED_CHAINS) {
     const family = getChainFamily(chain);
     let addr = familyCache.get(family);
@@ -792,6 +868,27 @@ export function getUserWalletAddresses(userId: string): Record<string, string> {
     }
     out[chain] = addr;
   }
+
+  for (const [symbol, chains] of Object.entries(SALOMA_COIN_CHAINS)) {
+    const canonicalSym = normalizeCoinSymbol(symbol);
+    for (const chain of chains) {
+      const family = getChainFamily(chain);
+      const cacheKey = `${canonicalSym}:${family}`;
+      let addr = familyCache.get(cacheKey);
+      if (!addr) {
+        addr = deriveAddressForFamily(cleanUser, family, canonicalSym);
+        familyCache.set(cacheKey, addr);
+      }
+      out[`${symbol}:${chain}`] = addr;
+    }
+  }
+
+  if (USER_WALLET_MAP_CACHE.size >= 5000) {
+    const oldestKey = USER_WALLET_MAP_CACHE.keys().next().value;
+    if (oldestKey) USER_WALLET_MAP_CACHE.delete(oldestKey);
+  }
+  USER_WALLET_MAP_CACHE.set(cleanUser, out);
+
   return out;
 }
 

@@ -1,3 +1,5 @@
+import { getAddress } from 'ethers';
+
 export interface CoinNetwork {
   chain: string;
   name: string;
@@ -1165,10 +1167,252 @@ export function resolveWalletAddressForChain(
   symbol?: string
 ): string {
   if (!walletAddresses) return '';
-  const symKey = symbol ? `${symbol.toUpperCase()}:${chain}` : '';
-  const candidate = (symKey && walletAddresses[symKey]) || walletAddresses[chain] || '';
+  const upperSym = symbol ? symbol.toUpperCase().trim() : '';
+  const altSym = upperSym === 'MATIC' ? 'POL' : upperSym === 'POL' ? 'MATIC' : '';
+  const candidate =
+    (upperSym && walletAddresses[`${upperSym}:${chain}`]) ||
+    (altSym && walletAddresses[`${altSym}:${chain}`]) ||
+    walletAddresses[chain] ||
+    '';
   if (!candidate || isKnownTokenContractAddress(candidate)) return '';
   return candidate;
+}
+
+// --- DETERMINISTIC CLIENT PROVISIONAL WALLET ADDRESSES (NEVER CONTRACTS) ---
+const CLIENT_SHA256_K = new Uint32Array([
+  0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
+  0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
+  0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
+  0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
+  0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
+  0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
+  0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+  0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2
+]);
+
+function clientSha256(bytes: Uint8Array): Uint8Array {
+  const bitLen = bytes.length * 8;
+  const padLen = ((bytes.length + 9 + 63) >> 6) << 6;
+  const padded = new Uint8Array(padLen);
+  padded.set(bytes);
+  padded[bytes.length] = 0x80;
+  const view = new DataView(padded.buffer);
+  view.setUint32(padLen - 8, Math.floor(bitLen / 0x100000000), false);
+  view.setUint32(padLen - 4, bitLen >>> 0, false);
+
+  let h0 = 0x6a09e667, h1 = 0xbb67ae85, h2 = 0x3c6ef372, h3 = 0xa54ff53a;
+  let h4 = 0x510e527f, h5 = 0x9b05688c, h6 = 0x1f83d9ab, h7 = 0x5be0cd19;
+  const w = new Uint32Array(64);
+  const rotr = (x: number, n: number) => (x >>> n) | (x << (32 - n));
+
+  for (let off = 0; off < padLen; off += 64) {
+    for (let i = 0; i < 16; i++) w[i] = view.getUint32(off + i * 4, false);
+    for (let i = 16; i < 64; i++) {
+      const s0 = rotr(w[i - 15], 7) ^ rotr(w[i - 15], 18) ^ (w[i - 15] >>> 3);
+      const s1 = rotr(w[i - 2], 17) ^ rotr(w[i - 2], 19) ^ (w[i - 2] >>> 10);
+      w[i] = (w[i - 16] + s0 + w[i - 7] + s1) >>> 0;
+    }
+    let a = h0, b = h1, c = h2, d = h3, e = h4, f = h5, g = h6, h = h7;
+    for (let i = 0; i < 64; i++) {
+      const S1 = rotr(e, 6) ^ rotr(e, 11) ^ rotr(e, 25);
+      const ch = (e & f) ^ (~e & g);
+      const t1 = (h + S1 + ch + CLIENT_SHA256_K[i] + w[i]) >>> 0;
+      const S0 = rotr(a, 2) ^ rotr(a, 13) ^ rotr(a, 22);
+      const maj = (a & b) ^ (a & c) ^ (b & c);
+      const t2 = (S0 + maj) >>> 0;
+      h = g; g = f; f = e; e = (d + t1) >>> 0;
+      d = c; c = b; b = a; a = (t1 + t2) >>> 0;
+    }
+    h0 = (h0 + a) >>> 0; h1 = (h1 + b) >>> 0; h2 = (h2 + c) >>> 0; h3 = (h3 + d) >>> 0;
+    h4 = (h4 + e) >>> 0; h5 = (h5 + f) >>> 0; h6 = (h6 + g) >>> 0; h7 = (h7 + h) >>> 0;
+  }
+
+  const out = new Uint8Array(32);
+  const outView = new DataView(out.buffer);
+  [h0, h1, h2, h3, h4, h5, h6, h7].forEach((val, idx) => outView.setUint32(idx * 4, val, false));
+  return out;
+}
+
+function clientSha256Str(s: string): Uint8Array {
+  return clientSha256(new TextEncoder().encode(s));
+}
+
+function toHex(bytes: Uint8Array): string {
+  return Array.from(bytes, b => b.toString(16).padStart(2, '0')).join('');
+}
+
+const CLIENT_B58_STD = '123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz';
+const CLIENT_B58_XRP = 'rpshnaf39wBUDNEGHJKLM4PQRST7VWXYZ2bcdeCg65jkm8oFqi1tuvAxyz';
+const CLIENT_BECH32_CHARSET = 'qpzry9x8gf2tvdw0s3jn54khce6mua7l';
+const CLIENT_BASE32 = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567';
+
+function clientBase58(bytes: Uint8Array, alphabet = CLIENT_B58_STD): string {
+  let num = 0n;
+  for (const b of bytes) num = (num << 8n) | BigInt(b);
+  let out = '';
+  while (num > 0n) {
+    out = alphabet[Number(num % 58n)] + out;
+    num /= 58n;
+  }
+  for (let i = 0; i < bytes.length && bytes[i] === 0; i++) out = alphabet[0] + out;
+  return out || alphabet[0];
+}
+
+function clientBase58Check(payload: Uint8Array, alphabet = CLIENT_B58_STD): string {
+  const ck = clientSha256(clientSha256(payload)).subarray(0, 4);
+  const full = new Uint8Array(payload.length + 4);
+  full.set(payload);
+  full.set(ck, payload.length);
+  return clientBase58(full, alphabet);
+}
+
+function clientConvertBits(data: Uint8Array, fromBits: number, toBits: number, pad: boolean): number[] {
+  let acc = 0, bits = 0;
+  const ret: number[] = [];
+  const maxv = (1 << toBits) - 1;
+  for (const v of data) {
+    acc = (acc << fromBits) | v;
+    bits += fromBits;
+    while (bits >= toBits) {
+      bits -= toBits;
+      ret.push((acc >> bits) & maxv);
+    }
+  }
+  if (pad && bits > 0) ret.push((acc << (toBits - bits)) & maxv);
+  return ret;
+}
+
+function clientBech32Encode(hrp: string, words: number[], isBech32m = false): string {
+  const GEN = [0x3b6a57b2, 0x26508e6d, 0x1ea119fa, 0x3d4233dd, 0x2a1462b3];
+  const polymod = (vals: number[]) => {
+    let chk = 1;
+    for (const v of vals) {
+      const top = chk >> 25;
+      chk = ((chk & 0x1ffffff) << 5) ^ v;
+      for (let i = 0; i < 5; i++) if ((top >> i) & 1) chk ^= GEN[i];
+    }
+    return chk;
+  };
+  const hrpExp: number[] = [];
+  for (let i = 0; i < hrp.length; i++) hrpExp.push(hrp.charCodeAt(i) >> 5);
+  hrpExp.push(0);
+  for (let i = 0; i < hrp.length; i++) hrpExp.push(hrp.charCodeAt(i) & 31);
+  const spec = isBech32m ? 0x2bc830a3 : 1;
+  const pm = polymod([...hrpExp, ...words, 0, 0, 0, 0, 0, 0]) ^ spec;
+  const ck: number[] = [];
+  for (let i = 0; i < 6; i++) ck.push((pm >> (5 * (5 - i))) & 31);
+  return hrp + '1' + [...words, ...ck].map(d => CLIENT_BECH32_CHARSET[d]).join('');
+}
+
+function clientBase32(bytes: Uint8Array, lower = false): string {
+  let bits = 0, value = 0, out = '';
+  for (const b of bytes) {
+    value = (value << 8) | b;
+    bits += 8;
+    while (bits >= 5) {
+      out += CLIENT_BASE32[(value >> (bits - 5)) & 31];
+      bits -= 5;
+    }
+  }
+  if (bits > 0) out += CLIENT_BASE32[(value << (5 - bits)) & 31];
+  return lower ? out.toLowerCase() : out;
+}
+
+export function deriveProvisionalWalletAddress(
+  userId: string | undefined | null,
+  chain: string,
+  symbol: string
+): string {
+  const uid = String(userId || 'saloma-session').trim() || 'saloma-session';
+  const normSym = symbol.toUpperCase().trim() === 'MATIC' ? 'POL' : symbol.toUpperCase().trim();
+  const c = chain.trim().toUpperCase();
+  const h = clientSha256Str(`saloma-provisional-v1:${uid}:${normSym}:${c}`);
+  const h2 = clientSha256(h);
+
+  const evmChains = new Set([
+    'BEP20', 'ERC20', 'POLYGON', 'ARBITRUM', 'OPTIMISM', 'BASE', 'AVAX-C', 'OPBNB', 'VECHAIN', 'ETC', 'HEDERA'
+  ]);
+  if (evmChains.has(c)) {
+    const candidate = getAddress('0x' + toHex(h.subarray(0, 20)));
+    return isKnownTokenContractAddress(candidate)
+      ? getAddress('0x' + toHex(h2.subarray(0, 20)))
+      : candidate;
+  }
+  if (c === 'TRC20') {
+    const payload = new Uint8Array(21);
+    payload[0] = 0x41;
+    payload.set(h.subarray(0, 20), 1);
+    return clientBase58Check(payload);
+  }
+  if (c === 'BTC-NATIVE') {
+    return clientBech32Encode('bc', [0, ...clientConvertBits(h.subarray(0, 20), 8, 5, true)], false);
+  }
+  if (c === 'TAPROOT') {
+    return clientBech32Encode('bc', [1, ...clientConvertBits(h, 8, 5, true)], true);
+  }
+  if (c === 'LIGHTNING') {
+    const tag = toHex(h.subarray(0, 8));
+    const url = new TextEncoder().encode(`https://saloma.exchange/.well-known/lnurlp/${tag}`);
+    return clientBech32Encode('lnurl', clientConvertBits(url, 8, 5, true), false);
+  }
+  if (c === 'SOLANA') return clientBase58(h);
+  if (c === 'RIPPLE') {
+    const p = new Uint8Array(21);
+    p[0] = 0x00;
+    p.set(h.subarray(0, 20), 1);
+    return clientBase58Check(p, CLIENT_B58_XRP);
+  }
+  if (c === 'DOGECOIN') {
+    const p = new Uint8Array(21);
+    p[0] = 0x1e;
+    p.set(h.subarray(0, 20), 1);
+    return clientBase58Check(p);
+  }
+  if (c === 'LITECOIN') {
+    return clientBech32Encode('ltc', [0, ...clientConvertBits(h.subarray(0, 20), 8, 5, true)], false);
+  }
+  if (c === 'CARDANO') {
+    const p = new Uint8Array(29);
+    p[0] = 0x61;
+    p.set(h.subarray(0, 28), 1);
+    return clientBech32Encode('addr', clientConvertBits(p, 8, 5, true), false);
+  }
+  if (c === 'SUI' || c === 'APTOS') return '0x' + toHex(h);
+  if (c === 'NEAR') return toHex(h);
+  if (c === 'TON') return 'EQ' + clientBase32(h.subarray(0, 28)).slice(0, 46);
+  if (c === 'COSMOS') return clientBech32Encode('cosmos', clientConvertBits(h.subarray(0, 20), 8, 5, true));
+  if (c === 'INJECTIVE') return clientBech32Encode('inj', clientConvertBits(h.subarray(0, 20), 8, 5, true));
+  if (c === 'SEI') return clientBech32Encode('sei', clientConvertBits(h.subarray(0, 20), 8, 5, true));
+  if (c === 'CELESTIA') return clientBech32Encode('celestia', clientConvertBits(h.subarray(0, 20), 8, 5, true));
+  if (c === 'FETCH') return clientBech32Encode('fetch', clientConvertBits(h.subarray(0, 20), 8, 5, true));
+  if (c === 'THORCHAIN') return clientBech32Encode('thor', clientConvertBits(h.subarray(0, 20), 8, 5, true));
+  if (c === 'SALOMANET') return clientBech32Encode('saloma', clientConvertBits(h.subarray(0, 20), 8, 5, true));
+  if (c === 'STELLAR') {
+    const p = new Uint8Array(35);
+    p[0] = 0x30;
+    p.set(h, 1);
+    return clientBase32(p).slice(0, 56);
+  }
+  if (c === 'ALGORAND') {
+    const p = new Uint8Array(36);
+    p.set(h, 0);
+    p.set(h2.subarray(0, 4), 32);
+    return clientBase32(p).slice(0, 58);
+  }
+  if (c === 'FILECOIN') return 'f1' + clientBase32(h.subarray(0, 24), true);
+  if (c === 'POLKADOT') {
+    const p = new Uint8Array(35);
+    p[0] = 0x00;
+    p.set(h, 1);
+    p.set(h2.subarray(0, 2), 33);
+    return clientBase58(p);
+  }
+  if (c === 'BCH') {
+    return clientBech32Encode('bitcoincash', [0, ...clientConvertBits(h.subarray(0, 20), 8, 5, true)], false);
+  }
+  if (c === 'ICP') return toHex(h);
+  if (c === 'STACKS') return 'SP' + clientBase32(h.subarray(0, 24)).slice(0, 39);
+  return getAddress('0x' + toHex(h.subarray(0, 20)));
 }
 
 export const CRYPTO_WALLET_CONFIG: Record<

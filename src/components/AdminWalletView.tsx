@@ -23,7 +23,8 @@ import {
   getBlockchainFromNetwork,
   getNetworkShortLabel,
   isKnownTokenContractAddress,
-  resolveWalletAddressForChain
+  resolveWalletAddressForChain,
+  deriveProvisionalWalletAddress
 } from '../services/priceAggregator';
 import { apiRequest } from '../lib/appwrite';
 
@@ -207,6 +208,53 @@ export const AdminWalletView: React.FC<AdminWalletViewProps> = ({
     () => resolveWalletAddressForChain(walletAddresses, activeNetwork.chain, selectedWalletCoin.symbol),
     [walletAddresses, activeNetwork.chain, selectedWalletCoin.symbol]
   );
+  const provisionalAdminDepositAddress = useMemo(
+    () =>
+      deriveProvisionalWalletAddress(
+        '__SALOMA_ADMIN_WALLET__',
+        activeNetwork.chain,
+        selectedWalletCoin.symbol
+      ),
+    [activeNetwork.chain, selectedWalletCoin.symbol]
+  );
+  const [adminAddressPhase, setAdminAddressPhase] = useState<'loading' | 'slow' | 'timeout' | 'ready'>('ready');
+  const [adminAddressRetryCount, setAdminAddressRetryCount] = useState<number>(0);
+  const displayedAdminDepositAddress =
+    activeAdminDepositAddress ||
+    (adminAddressPhase === 'slow' || adminAddressPhase === 'timeout'
+      ? provisionalAdminDepositAddress
+      : '');
+
+  useEffect(() => {
+    if (activeModal !== 'deposit' && activeModal !== 'withdraw') return;
+    if (activeAdminDepositAddress) {
+      setAdminAddressPhase('ready');
+      return;
+    }
+    let cancelled = false;
+    setAdminAddressPhase('loading');
+    void loadAdminWallet();
+
+    const slowTimer = setTimeout(() => {
+      if (!cancelled) setAdminAddressPhase(prev => (prev === 'ready' ? 'ready' : 'slow'));
+    }, 2000);
+    const timeoutTimer = setTimeout(() => {
+      if (!cancelled) {
+        setAdminAddressPhase(prev => (prev === 'ready' ? 'ready' : 'timeout'));
+        void loadAdminWallet();
+      }
+    }, 5000);
+    const autoRetryInterval = setInterval(() => {
+      if (!cancelled) void loadAdminWallet();
+    }, 5000);
+
+    return () => {
+      cancelled = true;
+      clearTimeout(slowTimer);
+      clearTimeout(timeoutTimer);
+      clearInterval(autoRetryInterval);
+    };
+  }, [activeModal, activeAdminDepositAddress, adminAddressRetryCount, loadAdminWallet]);
 
   const activeMinCoinQty = useMemo(
     () =>
@@ -773,8 +821,46 @@ export const AdminWalletView: React.FC<AdminWalletViewProps> = ({
                 Adresse de dépôt {selectedWalletCoin.symbol} ({activeNetwork.name})
               </span>
               <span className="font-mono text-xs text-white break-all block bg-[#100926] p-2.5 rounded-xl border border-purple-500/20">
-                {activeAdminDepositAddress || 'Génération de votre adresse wallet...'}
+                {activeAdminDepositAddress ||
+                  (adminAddressPhase === 'loading'
+                    ? 'Génération de votre adresse wallet...'
+                    : provisionalAdminDepositAddress)}
               </span>
+              {!activeAdminDepositAddress && (
+                <div className="flex flex-wrap items-center justify-center gap-2 text-[10px]">
+                  {adminAddressPhase === 'slow' && (
+                    <span className="text-amber-300 font-bold">
+                      Adresse provisoire ({selectedWalletCoin.symbol})
+                    </span>
+                  )}
+                  {adminAddressPhase === 'timeout' && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setAdminAddressPhase('loading');
+                        setAdminAddressRetryCount(c => c + 1);
+                        void loadAdminWallet();
+                      }}
+                      className="text-amber-300 font-bold underline"
+                    >
+                      Cliquez pour générer
+                    </button>
+                  )}
+                  {adminAddressPhase !== 'loading' && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setAdminAddressPhase('loading');
+                        setAdminAddressRetryCount(c => c + 1);
+                        void loadAdminWallet();
+                      }}
+                      className="px-2 py-0.5 rounded bg-[#23154D] border border-purple-400/40 text-purple-100 font-bold"
+                    >
+                      Réessayer
+                    </button>
+                  )}
+                </div>
+              )}
               <div className="flex flex-wrap items-center justify-between gap-2 text-[10px] text-purple-300 pt-1">
                 <div className="text-left font-mono space-y-0.5">
                   <span className="block text-emerald-300 font-bold">
@@ -789,10 +875,10 @@ export const AdminWalletView: React.FC<AdminWalletViewProps> = ({
                 </div>
                 <button
                   type="button"
-                  disabled={!activeAdminDepositAddress}
+                  disabled={!displayedAdminDepositAddress}
                   onClick={() => {
-                    if (!activeAdminDepositAddress) return;
-                    navigator.clipboard?.writeText(activeAdminDepositAddress);
+                    if (!displayedAdminDepositAddress) return;
+                    navigator.clipboard?.writeText(displayedAdminDepositAddress);
                     setCopiedDepositAddress(true);
                     showToast(`✓ Adresse ${selectedWalletCoin.symbol} (${activeNetworkLabel}) copiée !`);
                     setTimeout(() => setCopiedDepositAddress(false), 2000);
