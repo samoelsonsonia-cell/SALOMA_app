@@ -89,7 +89,9 @@ import {
   MIN_LEVIER_USD,
   KYC_LEVEL2_WITHDRAW_THRESHOLD_USD,
   computeMinCoinForUsd,
-  formatMinCoinQty
+  formatMinCoinQty,
+  isKnownTokenContractAddress,
+  resolveWalletAddressForChain
 } from './services/priceAggregator';
 import {
   ENV_CONFIG,
@@ -464,6 +466,7 @@ export default function App() {
   const [depotsRetraitsList, setDepotsRetraitsList] = useState<AppwriteDepotRetraitRow[]>([]);
   const [earnList, setEarnList] = useState<AppwriteEarnRow[]>([]);
   const [notificationsList, setNotificationsList] = useState<AppwriteNotificationRow[]>([]);
+  const [userWalletAddresses, setUserWalletAddresses] = useState<Record<string, string>>({});
 
   const [displayCurrency, setDisplayCurrency] = useState<'MGA' | 'USD'>('MGA');
 
@@ -529,6 +532,10 @@ export default function App() {
   const activeNetwork = selectedWalletCoin.networks[selectedNetworkIndex] || selectedWalletCoin.networks[0];
   const activeBlockchain = getBlockchainFromNetwork(activeNetwork);
   const activeNetworkLabel = getNetworkShortLabel(activeNetwork);
+  const activeClientDepositAddress = useMemo(
+    () => resolveWalletAddressForChain(userWalletAddresses, activeNetwork.chain, selectedWalletCoin.symbol),
+    [userWalletAddresses, activeNetwork.chain, selectedWalletCoin.symbol]
+  );
   const activeMinCoinQty = useMemo(
     () =>
       computeMinCoinForUsd(selectedWalletCoin.price, selectedWalletCoin.symbol, MIN_WITHDRAW_USD) ||
@@ -725,6 +732,7 @@ export default function App() {
         depotsRetraits: AppwriteDepotRetraitRow[];
         earn: AppwriteEarnRow[];
         notifications: AppwriteNotificationRow[];
+        walletAddresses?: Record<string, string>;
       }>('/api/me/dashboard', { token });
 
       setUserRow(data.user);
@@ -734,6 +742,9 @@ export default function App() {
       setDepotsRetraitsList(data.depotsRetraits || []);
       setEarnList(data.earn || []);
       setNotificationsList(data.notifications || []);
+      if (data.walletAddresses && typeof data.walletAddresses === 'object') {
+        setUserWalletAddresses(data.walletAddresses);
+      }
     } catch (err) {
       if (isApiNotFoundError(err)) {
         const sess = await directAppwriteGetSession();
@@ -744,6 +755,26 @@ export default function App() {
       throw err;
     }
   }, []);
+
+  useEffect(() => {
+    if (!sessionToken || sessionToken === COOKIE_SESSION_MARKER || !userRow?.email_verifie) return;
+    if (Object.keys(userWalletAddresses).length > 0) return;
+    let cancelled = false;
+    apiRequest<{ walletAddresses?: Record<string, string> }>('/api/wallet/addresses', {
+      token: sessionToken
+    })
+      .then(res => {
+        if (!cancelled && res.walletAddresses && typeof res.walletAddresses === 'object') {
+          setUserWalletAddresses(res.walletAddresses);
+        }
+      })
+      .catch(() => {
+        // non-blocking fallback; dashboard fetch also populates walletAddresses
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [sessionToken, userRow?.email_verifie, userWalletAddresses]);
 
   const clearAuthSession = useCallback(() => {
     try {
@@ -759,6 +790,7 @@ export default function App() {
     setDepotsRetraitsList([]);
     setEarnList([]);
     setNotificationsList([]);
+    setUserWalletAddresses({});
   }, []);
 
   useEffect(() => {
@@ -2332,6 +2364,10 @@ export default function App() {
       showToast(`Veuillez entrer une adresse de réception ${coinSym} (${activeBlockchain} • ${activeNetworkLabel}) valide.`);
       return;
     }
+    if (isKnownTokenContractAddress(withdrawAccountInput)) {
+      showToast('Adresse refusée : ceci est une adresse de contrat token, pas une adresse wallet.');
+      return;
+    }
     setWithdrawSubmitting(true);
     try {
       const sendWithdraw = async (tok: string) =>
@@ -2733,6 +2769,7 @@ export default function App() {
   const [adminTransactions, setAdminTransactions] = useState<AppwriteDepotRetraitRow[]>([]);
   const [adminOwnWallet, setAdminOwnWallet] = useState<AdminWalletRow | null>(null);
   const [adminOwnWalletTxs, setAdminOwnWalletTxs] = useState<AdminWalletTxRow[]>([]);
+  const [adminOwnWalletAddresses, setAdminOwnWalletAddresses] = useState<Record<string, string>>({});
   const [adminTrades, setAdminTrades] = useState<AppwriteTradeRow[]>([]);
   const [adminEchanges, setAdminEchanges] = useState<AppwriteEchangeRow[]>([]);
   const [adminProblems, setAdminProblems] = useState<AppwriteProblemRow[]>([]);
@@ -2881,6 +2918,7 @@ export default function App() {
           liquidityAlerts?: AdminLiquidityAlert[];
           adminWallet?: AdminWalletRow;
           adminWalletTransactions?: AdminWalletTxRow[];
+          adminWalletAddresses?: Record<string, string>;
           bybitStatus?: {
             online: boolean;
             latencyMs: number;
@@ -2900,6 +2938,9 @@ export default function App() {
         }
         if (Array.isArray(data.adminWalletTransactions)) {
           setAdminOwnWalletTxs(data.adminWalletTransactions);
+        }
+        if (data.adminWalletAddresses && typeof data.adminWalletAddresses === 'object') {
+          setAdminOwnWalletAddresses(data.adminWalletAddresses);
         }
         setAdminTrades(data.trades || []);
         setAdminEchanges(data.echanges || []);
@@ -6866,7 +6907,7 @@ export default function App() {
                 Adresse de dépôt {selectedWalletCoin.symbol} ({activeNetwork.name})
               </span>
               <span className="font-mono text-xs text-white break-all block bg-[#100926] p-2.5 rounded-xl border border-purple-500/20">
-                {activeNetwork.addressExample}
+                {activeClientDepositAddress || 'Génération de votre adresse wallet...'}
               </span>
               <div className="flex flex-wrap items-center justify-between gap-2 text-[10px] text-purple-300 pt-1">
                 <div className="text-left font-mono space-y-0.5">
@@ -6880,13 +6921,15 @@ export default function App() {
                 </div>
                 <button
                   type="button"
+                  disabled={!activeClientDepositAddress}
                   onClick={() => {
-                    navigator.clipboard?.writeText(activeNetwork.addressExample);
+                    if (!activeClientDepositAddress) return;
+                    navigator.clipboard?.writeText(activeClientDepositAddress);
                     setCopiedDepositAddress(true);
                     showToast(`✓ Adresse ${selectedWalletCoin.symbol} (${activeNetworkLabel}) copiée !`);
                     setTimeout(() => setCopiedDepositAddress(false), 2000);
                   }}
-                  className="px-3 py-1.5 rounded-lg bg-[#7C3AED] text-white text-[11px] font-bold inline-flex items-center gap-1"
+                  className="px-3 py-1.5 rounded-lg bg-[#7C3AED] text-white text-[11px] font-bold inline-flex items-center gap-1 disabled:opacity-50"
                 >
                   {copiedDepositAddress ? <Check className="w-3.5 h-3.5" /> : <Copy className="w-3.5 h-3.5" />}
                   <span>{copiedDepositAddress ? 'Adresse copiée ✓' : 'Copier adresse'}</span>
@@ -7112,9 +7155,20 @@ export default function App() {
               </div>
 
               <div>
-                <label className="font-bold text-purple-300 block mb-1">
-                  Adresse de réception {selectedWalletCoin.symbol} ({activeBlockchain} • {activeNetworkLabel}) *
-                </label>
+                <div className="flex items-center justify-between gap-2 mb-1">
+                  <label className="font-bold text-purple-300 block">
+                    Adresse de réception {selectedWalletCoin.symbol} ({activeBlockchain} • {activeNetworkLabel}) *
+                  </label>
+                  {activeClientDepositAddress && (
+                    <button
+                      type="button"
+                      onClick={() => setWithdrawAccountInput(activeClientDepositAddress)}
+                      className="text-[10px] font-bold text-emerald-300 underline shrink-0"
+                    >
+                      Mon adresse
+                    </button>
+                  )}
+                </div>
                 <input
                   type="text"
                   value={withdrawAccountInput}
@@ -8611,6 +8665,7 @@ export default function App() {
               showToast={showToast}
               initialWallet={adminOwnWallet}
               initialTransactions={adminOwnWalletTxs}
+              initialWalletAddresses={adminOwnWalletAddresses}
               onWalletUpdated={(nextWallet, nextTxs) => {
                 setAdminOwnWallet(nextWallet);
                 setAdminOwnWalletTxs(nextTxs);

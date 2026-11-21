@@ -37,6 +37,11 @@ import {
   getSeparatedTradesSnapshot,
   type SalomaWalletAdapter
 } from './salomaExchange';
+import {
+  getUserWalletAddresses,
+  getUserAddressForChain,
+  validateWalletAddressForChain
+} from './walletAddresses';
 
 const PORT = 3000;
 const USD_TO_MGA = 4750;
@@ -1339,27 +1344,24 @@ async function validateTurnstileSubmission(req: Request): Promise<boolean> {
   }
 }
 
-const CRYPTO_NETWORK_FEES: Record<string, { chain: string; fee: number; minDeposit: number; minWithdraw: number; depositAddress: string }> = {
+const CRYPTO_NETWORK_FEES: Record<string, { chain: string; fee: number; minDeposit: number; minWithdraw: number }> = {
   USDT: {
     chain: 'TRC20',
     fee: 1.2,
     minDeposit: 1,
-    minWithdraw: 1,
-    depositAddress: 'TJX9zK2B7YmNQ9sLo2481A2026SalomaTRC'
+    minWithdraw: 1
   },
   BTC: {
     chain: 'Bitcoin',
     fee: 0.00025,
     minDeposit: computeMinCoinForUsd(68420, 'BTC', MIN_DEPOSIT_USD),
-    minWithdraw: computeMinCoinForUsd(68420, 'BTC', MIN_WITHDRAW_USD),
-    depositAddress: 'bc1q9h6x743j2y0z5v4km89x2026saloma'
+    minWithdraw: computeMinCoinForUsd(68420, 'BTC', MIN_WITHDRAW_USD)
   },
   ETH: {
     chain: 'ERC20',
     fee: 0.0035,
     minDeposit: computeMinCoinForUsd(3580, 'ETH', MIN_DEPOSIT_USD),
-    minWithdraw: computeMinCoinForUsd(3580, 'ETH', MIN_WITHDRAW_USD),
-    depositAddress: '0x992B28B3eB9229555C09F6eF83A8992026'
+    minWithdraw: computeMinCoinForUsd(3580, 'ETH', MIN_WITHDRAW_USD)
   }
 };
 
@@ -3117,6 +3119,7 @@ export function createSalomaApiApp() {
       res.json({
         user: req.userRow ? sanitizeUserRow(req.userRow) : null,
         wallet: serializeWallet(wallet as unknown as Record<string, unknown>),
+        walletAddresses: getUserWalletAddresses(userId),
         trades: tradesRes.rows,
         echanges: echangesRes.rows,
         depotsRetraits: depotsRes.rows,
@@ -3206,6 +3209,15 @@ export function createSalomaApiApp() {
   // 3. DÉPÔTS & RETRAITS CRYPTO UNIQUEMENT (50 COINS + CHAÎNE & RÉSEAU)
   // ========================================================
 
+  app.get('/api/wallet/addresses', requireAuth, requireVerified, (req: AuthedRequest, res: Response) => {
+    try {
+      const userId = req.authUser!.$id;
+      res.json({ walletAddresses: getUserWalletAddresses(userId) });
+    } catch (err) {
+      res.status(400).json({ error: formatAppwriteErrorFr(err, 'Erreur génération adresses wallet.') });
+    }
+  });
+
   app.post('/api/wallet/deposit', requireAuth, requireVerified, async (req: AuthedRequest, res: Response) => {
     try {
       try {
@@ -3259,6 +3271,7 @@ export function createSalomaApiApp() {
       }
 
       const displayNetwork = networkName ? `${resolvedChain} • ${networkName}` : resolvedChain;
+      const userDepositAddress = getUserAddressForChain(userId, resolvedChain);
 
       const txRow = await adminDb.createRow({
         databaseId: APPWRITE_DATABASE_ID,
@@ -3271,7 +3284,9 @@ export function createSalomaApiApp() {
           methode: 'Crypto',
           numero_compte: txHash,
           statut: 'en_attente',
-          preuve: preuve || `Crypto ${devise} (${displayNetwork}) • TX: ${txHash}`,
+          preuve:
+            preuve ||
+            `Crypto ${devise} (${displayNetwork}) • Wallet: ${userDepositAddress} • TX: ${txHash}`,
           date: new Date().toISOString(),
           devise,
           frais: 0
@@ -3285,7 +3300,7 @@ export function createSalomaApiApp() {
         'wallet'
       );
 
-      res.status(201).json({ transaction: txRow, notification: notif });
+      res.status(201).json({ transaction: txRow, depositAddress: userDepositAddress, notification: notif });
     } catch (err) {
       res.status(400).json({ error: formatAppwriteErrorFr(err, 'Erreur lors du dépôt.') });
     }
@@ -3380,10 +3395,16 @@ export function createSalomaApiApp() {
         return;
       }
 
-      if (!numero_compte || numero_compte.length < 6) {
-        res.status(400).json({ error: `Veuillez entrer une adresse de réception ${devise} (${resolvedChain}) valide.` });
+      const addrCheck = validateWalletAddressForChain(numero_compte, resolvedChain);
+      if (!addrCheck.valid) {
+        res.status(400).json({
+          error:
+            addrCheck.error ||
+            `Veuillez entrer une adresse de réception ${devise} (${resolvedChain}) valide.`
+        });
         return;
       }
+      const cleanRecipientAddress = addrCheck.normalized || numero_compte;
 
       const wallet = await getOrCreateWalletRow(userId);
       const soldeDisp = Number(wallet.solde_disponible) || 0;
@@ -3440,9 +3461,9 @@ export function createSalomaApiApp() {
           type: 'retrait',
           montant,
           methode: 'Crypto',
-          numero_compte,
+          numero_compte: cleanRecipientAddress,
           statut: 'en_attente',
-          preuve: `Crypto (${displayNetwork}) → ${numero_compte} • Frais SALOMA ${publicFees.withdrawFeePct}%: ${salomaWithdrawFee} ${devise} + Frais Réseau: ${networkFee} ${devise} • Net: ${netReceived} ${devise} ${deductAr > 0 ? '[AR]' : '[COIN]'}`,
+          preuve: `Crypto (${displayNetwork}) → ${cleanRecipientAddress} • Frais SALOMA ${publicFees.withdrawFeePct}%: ${salomaWithdrawFee} ${devise} + Frais Réseau: ${networkFee} ${devise} • Net: ${netReceived} ${devise} ${deductAr > 0 ? '[AR]' : '[COIN]'}`,
           date: new Date().toISOString(),
           devise,
           frais: totalFrais
@@ -5399,6 +5420,7 @@ export function createSalomaApiApp() {
         profits,
         adminWallet: adminOwnWalletData.wallet,
         adminWalletTransactions: adminOwnWalletData.transactions,
+        adminWalletAddresses: getUserWalletAddresses(ADMIN_WALLET_USER_ID),
         exchangeSummary: {
           totalBybitLiquidityUsdt,
           bybitLiquidityConnected: bybitLiveBal.connected,
@@ -6181,7 +6203,11 @@ export function createSalomaApiApp() {
   app.get('/api/admin/wallet', requireAdminPin, async (_req: Request, res: Response) => {
     try {
       const data = await loadAdminOwnWalletAndTxs();
-      res.json({ wallet: data.wallet, transactions: data.transactions });
+      res.json({
+        wallet: data.wallet,
+        transactions: data.transactions,
+        walletAddresses: getUserWalletAddresses(ADMIN_WALLET_USER_ID)
+      });
     } catch (err) {
       res.status(400).json({ error: formatAppwriteErrorFr(err, 'Erreur chargement Portefeuille Admin.') });
     }
@@ -6243,6 +6269,7 @@ export function createSalomaApiApp() {
 
       const montantAr = livePriceUsd > 0 ? Math.round(montant * livePriceUsd * USD_TO_MGA) : 0;
       const displayNetwork = networkName ? `${resolvedChain} • ${networkName}` : resolvedChain;
+      const adminDepositAddress = getUserAddressForChain(ADMIN_WALLET_USER_ID, resolvedChain);
       const nowIso = new Date().toISOString();
       const txPayload = {
         user_id: ADMIN_WALLET_USER_ID,
@@ -6251,7 +6278,9 @@ export function createSalomaApiApp() {
         methode: 'Crypto',
         numero_compte: txHash,
         statut: 'valide',
-        preuve: preuve || `Admin Crypto ${devise} (${displayNetwork}) • TX: ${txHash}`,
+        preuve:
+          preuve ||
+          `Admin Crypto ${devise} (${displayNetwork}) • Wallet: ${adminDepositAddress} • TX: ${txHash}`,
         date: nowIso,
         devise,
         frais: 0
@@ -6387,10 +6416,16 @@ export function createSalomaApiApp() {
         });
         return;
       }
-      if (!numero_compte || numero_compte.length < 6) {
-        res.status(400).json({ error: `Veuillez entrer une adresse de réception ${devise} (${resolvedChain}) valide.` });
+      const adminAddrCheck = validateWalletAddressForChain(numero_compte, resolvedChain);
+      if (!adminAddrCheck.valid) {
+        res.status(400).json({
+          error:
+            adminAddrCheck.error ||
+            `Veuillez entrer une adresse de réception ${devise} (${resolvedChain}) valide.`
+        });
         return;
       }
+      const cleanAdminRecipient = adminAddrCheck.normalized || numero_compte;
 
       const state = await loadAdminOwnWalletAndTxs();
       let soldeDisp = Number(state.wallet.solde_disponible) || 0;
@@ -6428,9 +6463,9 @@ export function createSalomaApiApp() {
         type: 'retrait',
         montant,
         methode: 'Crypto',
-        numero_compte,
+        numero_compte: cleanAdminRecipient,
         statut: 'valide',
-        preuve: `Admin Crypto (${displayNetwork}) → ${numero_compte} • Frais SALOMA ${publicFees.withdrawFeePct}%: ${salomaWithdrawFee} ${devise} + Frais Réseau: ${networkFee} ${devise} • Net: ${netReceived} ${devise}`,
+        preuve: `Admin Crypto (${displayNetwork}) → ${cleanAdminRecipient} • Frais SALOMA ${publicFees.withdrawFeePct}%: ${salomaWithdrawFee} ${devise} + Frais Réseau: ${networkFee} ${devise} • Net: ${netReceived} ${devise}`,
         date: nowIso,
         devise,
         frais: totalFrais

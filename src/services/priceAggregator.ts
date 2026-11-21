@@ -91,11 +91,11 @@ const RAW_INITIAL_COINS: Coin[] = [
     bestSource: 'bybit',
     apiPrices: { binance: 68420.0, bybit: 68420.0, okx: 68420.0 },
     networks: [
-      { chain: 'BTC-Native', name: 'Bitcoin (Native SegWit bech32)', depositFee: 0, withdrawFee: 0.00025, feeSymbol: 'BTC', minDeposit: 0.0001, minWithdraw: 0.0005, addressExample: 'bc1q9h6x743j2y0z5v4km89x2026saloma' },
-      { chain: 'Taproot', name: 'Bitcoin (Taproot bech32m)', depositFee: 0, withdrawFee: 0.0002, feeSymbol: 'BTC', minDeposit: 0.0001, minWithdraw: 0.0005, addressExample: 'bc1p5d7rjq7g6e8z8e9q8v8026saloma' },
-      { chain: 'Lightning', name: 'Lightning Network (Instantané)', depositFee: 0, withdrawFee: 0.00001, feeSymbol: 'BTC', minDeposit: 0.00001, minWithdraw: 0.0001, addressExample: 'lnbc10u1p3saloma9823610924' },
-      { chain: 'BEP20', name: 'BNB Smart Chain (BEP20)', depositFee: 0, withdrawFee: 0.00008, feeSymbol: 'BTC', minDeposit: 0.0002, minWithdraw: 0.0004, addressExample: '0x71C8A331c2612745345719329705E32bA' },
-      { chain: 'ERC20', name: 'Ethereum ERC20 (WBTC)', depositFee: 0, withdrawFee: 0.00035, feeSymbol: 'BTC', minDeposit: 0.0005, minWithdraw: 0.001, addressExample: '0x2260FAC5E5542a773Aa44fBCfeDf7C193bc2C599' }
+      { chain: 'BTC-Native', name: 'Bitcoin (Native SegWit bech32)', depositFee: 0, withdrawFee: 0.00025, feeSymbol: 'BTC', minDeposit: 0.0001, minWithdraw: 0.0005, addressExample: '' },
+      { chain: 'Taproot', name: 'Bitcoin (Taproot bech32m)', depositFee: 0, withdrawFee: 0.0002, feeSymbol: 'BTC', minDeposit: 0.0001, minWithdraw: 0.0005, addressExample: '' },
+      { chain: 'Lightning', name: 'Lightning Network (Instantané)', depositFee: 0, withdrawFee: 0.00001, feeSymbol: 'BTC', minDeposit: 0.00001, minWithdraw: 0.0001, addressExample: '' },
+      { chain: 'BEP20', name: 'BNB Smart Chain (BEP20)', depositFee: 0, withdrawFee: 0.00008, feeSymbol: 'BTC', minDeposit: 0.0002, minWithdraw: 0.0004, addressExample: '' },
+      { chain: 'ERC20', name: 'Ethereum ERC20 (WBTC)', depositFee: 0, withdrawFee: 0.00035, feeSymbol: 'BTC', minDeposit: 0.0005, minWithdraw: 0.001, addressExample: '' }
     ]
   },
   {
@@ -113,12 +113,12 @@ const RAW_INITIAL_COINS: Coin[] = [
     bestSource: 'bybit',
     apiPrices: { binance: 3580.0, bybit: 3580.0, okx: 3580.0 },
     networks: [
-      { chain: 'ERC20', name: 'Ethereum Mainnet (ERC20)', depositFee: 0, withdrawFee: 0.0035, feeSymbol: 'ETH', minDeposit: 0.005, minWithdraw: 0.01, addressExample: '0x992B28B3eB9229555C09F6eF83A8992026' },
-      { chain: 'Arbitrum', name: 'Arbitrum One (L2 Rapide)', depositFee: 0, withdrawFee: 0.0006, feeSymbol: 'ETH', minDeposit: 0.001, minWithdraw: 0.002, addressExample: '0x992B28B3eB9229555C09F6eF83A8992026' },
-      { chain: 'Optimism', name: 'OP Mainnet (Optimism)', depositFee: 0, withdrawFee: 0.0006, feeSymbol: 'ETH', minDeposit: 0.001, minWithdraw: 0.002, addressExample: '0x992B28B3eB9229555C09F6eF83A8992026' },
-      { chain: 'Base', name: 'Base Network (L2)', depositFee: 0, withdrawFee: 0.0004, feeSymbol: 'ETH', minDeposit: 0.001, minWithdraw: 0.002, addressExample: '0x992B28B3eB9229555C09F6eF83A8992026' },
-      { chain: 'BEP20', name: 'BNB Smart Chain (BEP20)', depositFee: 0, withdrawFee: 0.0008, feeSymbol: 'ETH', minDeposit: 0.002, minWithdraw: 0.005, addressExample: '0x992B28B3eB9229555C09F6eF83A8992026' },
-      { chain: 'Polygon', name: 'Polygon POS (WETH)', depositFee: 0, withdrawFee: 0.0005, feeSymbol: 'ETH', minDeposit: 0.001, minWithdraw: 0.002, addressExample: '0x992B28B3eB9229555C09F6eF83A8992026' }
+      { chain: 'ERC20', name: 'Ethereum Mainnet (ERC20)', depositFee: 0, withdrawFee: 0.0035, feeSymbol: 'ETH', minDeposit: 0.005, minWithdraw: 0.01, addressExample: '' },
+      { chain: 'Arbitrum', name: 'Arbitrum One (L2 Rapide)', depositFee: 0, withdrawFee: 0.0006, feeSymbol: 'ETH', minDeposit: 0.001, minWithdraw: 0.002, addressExample: '' },
+      { chain: 'Optimism', name: 'OP Mainnet (Optimism)', depositFee: 0, withdrawFee: 0.0006, feeSymbol: 'ETH', minDeposit: 0.001, minWithdraw: 0.002, addressExample: '' },
+      { chain: 'Base', name: 'Base Network (L2)', depositFee: 0, withdrawFee: 0.0004, feeSymbol: 'ETH', minDeposit: 0.001, minWithdraw: 0.002, addressExample: '' },
+      { chain: 'BEP20', name: 'BNB Smart Chain (BEP20)', depositFee: 0, withdrawFee: 0.0008, feeSymbol: 'ETH', minDeposit: 0.002, minWithdraw: 0.005, addressExample: '' },
+      { chain: 'Polygon', name: 'Polygon POS (WETH)', depositFee: 0, withdrawFee: 0.0005, feeSymbol: 'ETH', minDeposit: 0.001, minWithdraw: 0.002, addressExample: '' }
     ]
   },
   {
@@ -136,15 +136,15 @@ const RAW_INITIAL_COINS: Coin[] = [
     bestSource: 'bybit',
     apiPrices: { binance: 1.0, bybit: 1.0, okx: 1.0 },
     networks: [
-      { chain: 'TRC20', name: 'TRON (TRC20 - Rapide & Populaire)', depositFee: 0, withdrawFee: 1.2, feeSymbol: 'USDT', minDeposit: 5, minWithdraw: 5, addressExample: 'TJX9zK2B7YmNQ9sLo2481A2026SalomaTRC' },
-      { chain: 'BEP20', name: 'BNB Smart Chain (BEP20 - Frais bas)', depositFee: 0, withdrawFee: 0.35, feeSymbol: 'USDT', minDeposit: 5, minWithdraw: 5, addressExample: '0x882a4C82b28F03294E83b271391781290' },
-      { chain: 'ERC20', name: 'Ethereum (ERC20 Mainnet)', depositFee: 0, withdrawFee: 4.5, feeSymbol: 'USDT', minDeposit: 10, minWithdraw: 20, addressExample: '0x43bFa92104192bC18E9712aD90176882a' },
-      { chain: 'Polygon', name: 'Polygon POS Network', depositFee: 0, withdrawFee: 0.4, feeSymbol: 'USDT', minDeposit: 5, minWithdraw: 5, addressExample: '0x43bFa92104192bC18E9712aD90176882a' },
-      { chain: 'Solana', name: 'Solana (SPL Token)', depositFee: 0, withdrawFee: 0.8, feeSymbol: 'USDT', minDeposit: 5, minWithdraw: 5, addressExample: '4k3Dyjzvzp8eMZWUXbBCjEvwSkkk9817' },
-      { chain: 'Arbitrum', name: 'Arbitrum One (L2)', depositFee: 0, withdrawFee: 0.5, feeSymbol: 'USDT', minDeposit: 5, minWithdraw: 5, addressExample: '0x43bFa92104192bC18E9712aD90176882a' },
-      { chain: 'Optimism', name: 'OP Mainnet (L2)', depositFee: 0, withdrawFee: 0.5, feeSymbol: 'USDT', minDeposit: 5, minWithdraw: 5, addressExample: '0x43bFa92104192bC18E9712aD90176882a' },
-      { chain: 'AVAX-C', name: 'Avalanche C-Chain', depositFee: 0, withdrawFee: 0.6, feeSymbol: 'USDT', minDeposit: 5, minWithdraw: 5, addressExample: '0x43bFa92104192bC18E9712aD90176882a' },
-      { chain: 'TON', name: 'TON Network (Telegram)', depositFee: 0, withdrawFee: 0.2, feeSymbol: 'USDT', minDeposit: 5, minWithdraw: 5, addressExample: 'EQBvW8Z5huBkMJYdn3PCDnHo4619' }
+      { chain: 'TRC20', name: 'TRON (TRC20 - Rapide & Populaire)', depositFee: 0, withdrawFee: 1.2, feeSymbol: 'USDT', minDeposit: 5, minWithdraw: 5, addressExample: '' },
+      { chain: 'BEP20', name: 'BNB Smart Chain (BEP20 - Frais bas)', depositFee: 0, withdrawFee: 0.35, feeSymbol: 'USDT', minDeposit: 5, minWithdraw: 5, addressExample: '' },
+      { chain: 'ERC20', name: 'Ethereum (ERC20 Mainnet)', depositFee: 0, withdrawFee: 4.5, feeSymbol: 'USDT', minDeposit: 10, minWithdraw: 20, addressExample: '' },
+      { chain: 'Polygon', name: 'Polygon POS Network', depositFee: 0, withdrawFee: 0.4, feeSymbol: 'USDT', minDeposit: 5, minWithdraw: 5, addressExample: '' },
+      { chain: 'Solana', name: 'Solana (SPL Token)', depositFee: 0, withdrawFee: 0.8, feeSymbol: 'USDT', minDeposit: 5, minWithdraw: 5, addressExample: '' },
+      { chain: 'Arbitrum', name: 'Arbitrum One (L2)', depositFee: 0, withdrawFee: 0.5, feeSymbol: 'USDT', minDeposit: 5, minWithdraw: 5, addressExample: '' },
+      { chain: 'Optimism', name: 'OP Mainnet (L2)', depositFee: 0, withdrawFee: 0.5, feeSymbol: 'USDT', minDeposit: 5, minWithdraw: 5, addressExample: '' },
+      { chain: 'AVAX-C', name: 'Avalanche C-Chain', depositFee: 0, withdrawFee: 0.6, feeSymbol: 'USDT', minDeposit: 5, minWithdraw: 5, addressExample: '' },
+      { chain: 'TON', name: 'TON Network (Telegram)', depositFee: 0, withdrawFee: 0.2, feeSymbol: 'USDT', minDeposit: 5, minWithdraw: 5, addressExample: '' }
     ]
   },
   {
@@ -162,8 +162,8 @@ const RAW_INITIAL_COINS: Coin[] = [
     bestSource: 'bybit',
     apiPrices: { binance: 184.5, bybit: 184.5, okx: 184.5 },
     networks: [
-      { chain: 'Solana', name: 'Solana Native Mainnet (Ultra-Rapide)', depositFee: 0, withdrawFee: 0.01, feeSymbol: 'SOL', minDeposit: 0.05, minWithdraw: 0.1, addressExample: '7Np41oeYqPefeNQEHSv13918z88fSalomaSol' },
-      { chain: 'BEP20', name: 'BNB Smart Chain (BEP20)', depositFee: 0, withdrawFee: 0.015, feeSymbol: 'SOL', minDeposit: 0.05, minWithdraw: 0.1, addressExample: '0x38Bc491A2026aD728F6b2819876291' }
+      { chain: 'Solana', name: 'Solana Native Mainnet (Ultra-Rapide)', depositFee: 0, withdrawFee: 0.01, feeSymbol: 'SOL', minDeposit: 0.05, minWithdraw: 0.1, addressExample: '' },
+      { chain: 'BEP20', name: 'BNB Smart Chain (BEP20)', depositFee: 0, withdrawFee: 0.015, feeSymbol: 'SOL', minDeposit: 0.05, minWithdraw: 0.1, addressExample: '' }
     ]
   },
   {
@@ -181,8 +181,8 @@ const RAW_INITIAL_COINS: Coin[] = [
     bestSource: 'bybit',
     apiPrices: { binance: 598.0, bybit: 598.0, okx: 598.0 },
     networks: [
-      { chain: 'BEP20', name: 'BNB Smart Chain (BEP20 Native)', depositFee: 0, withdrawFee: 0.001, feeSymbol: 'BNB', minDeposit: 0.01, minWithdraw: 0.02, addressExample: '0x55d398326f99059fF775485246999027B3197955' },
-      { chain: 'opBNB', name: 'opBNB Mainnet (L2)', depositFee: 0, withdrawFee: 0.0005, feeSymbol: 'BNB', minDeposit: 0.01, minWithdraw: 0.02, addressExample: '0x55d398326f99059fF775485246999027B3197955' }
+      { chain: 'BEP20', name: 'BNB Smart Chain (BEP20 Native)', depositFee: 0, withdrawFee: 0.001, feeSymbol: 'BNB', minDeposit: 0.01, minWithdraw: 0.02, addressExample: '' },
+      { chain: 'opBNB', name: 'opBNB Mainnet (L2)', depositFee: 0, withdrawFee: 0.0005, feeSymbol: 'BNB', minDeposit: 0.01, minWithdraw: 0.02, addressExample: '' }
     ]
   },
   {
@@ -200,9 +200,9 @@ const RAW_INITIAL_COINS: Coin[] = [
     bestSource: 'bybit',
     apiPrices: { binance: 1.25, bybit: 1.25, okx: 1.25 },
     networks: [
-      { chain: 'SalomaNet', name: 'Saloma High-Speed Mainnet (0 Gas)', depositFee: 0, withdrawFee: 0.0, feeSymbol: 'SALOMA', minDeposit: 1, minWithdraw: 2, addressExample: 'saloma1vola98273645gasy2026official' },
-      { chain: 'BEP20', name: 'BNB Smart Chain (BEP20 Wrapped)', depositFee: 0, withdrawFee: 0.5, feeSymbol: 'SALOMA', minDeposit: 5, minWithdraw: 10, addressExample: '0x2170Ed0880ac9A755fd29B2688956BD959F933F8' },
-      { chain: 'Polygon', name: 'Polygon POS Bridge', depositFee: 0, withdrawFee: 0.2, feeSymbol: 'SALOMA', minDeposit: 5, minWithdraw: 10, addressExample: '0x2170Ed0880ac9A755fd29B2688956BD959F933F8' }
+      { chain: 'SalomaNet', name: 'Saloma High-Speed Mainnet (0 Gas)', depositFee: 0, withdrawFee: 0.0, feeSymbol: 'SALOMA', minDeposit: 1, minWithdraw: 2, addressExample: '' },
+      { chain: 'BEP20', name: 'BNB Smart Chain (BEP20 Wrapped)', depositFee: 0, withdrawFee: 0.5, feeSymbol: 'SALOMA', minDeposit: 5, minWithdraw: 10, addressExample: '' },
+      { chain: 'Polygon', name: 'Polygon POS Bridge', depositFee: 0, withdrawFee: 0.2, feeSymbol: 'SALOMA', minDeposit: 5, minWithdraw: 10, addressExample: '' }
     ]
   },
   {
@@ -220,8 +220,8 @@ const RAW_INITIAL_COINS: Coin[] = [
     bestSource: 'bybit',
     apiPrices: { binance: 0.62, bybit: 0.62, okx: 0.62 },
     networks: [
-      { chain: 'Ripple', name: 'XRP Ledger (Ripple Native)', depositFee: 0, withdrawFee: 0.25, feeSymbol: 'XRP', minDeposit: 1, minWithdraw: 5, addressExample: 'rEb8TK3gBgk5auZyyb6328026Saloma' },
-      { chain: 'BEP20', name: 'BNB Smart Chain (BEP20)', depositFee: 0, withdrawFee: 0.3, feeSymbol: 'XRP', minDeposit: 1, minWithdraw: 5, addressExample: '0x1d2f0da169ceb9fc7b3144628db156f3f6c60dbe' }
+      { chain: 'Ripple', name: 'XRP Ledger (Ripple Native)', depositFee: 0, withdrawFee: 0.25, feeSymbol: 'XRP', minDeposit: 1, minWithdraw: 5, addressExample: '' },
+      { chain: 'BEP20', name: 'BNB Smart Chain (BEP20)', depositFee: 0, withdrawFee: 0.3, feeSymbol: 'XRP', minDeposit: 1, minWithdraw: 5, addressExample: '' }
     ]
   },
   {
@@ -239,8 +239,8 @@ const RAW_INITIAL_COINS: Coin[] = [
     bestSource: 'bybit',
     apiPrices: { binance: 0.165, bybit: 0.165, okx: 0.165 },
     networks: [
-      { chain: 'Dogecoin', name: 'Dogecoin Core Network', depositFee: 0, withdrawFee: 2.0, feeSymbol: 'DOGE', minDeposit: 10, minWithdraw: 20, addressExample: 'D8vG43901kLx2026SalomaMadagascar' },
-      { chain: 'BEP20', name: 'BNB Smart Chain (BEP20)', depositFee: 0, withdrawFee: 1.5, feeSymbol: 'DOGE', minDeposit: 10, minWithdraw: 20, addressExample: '0xba2ae424d960c26247dd6c32edc70b295c744c43' }
+      { chain: 'Dogecoin', name: 'Dogecoin Core Network', depositFee: 0, withdrawFee: 2.0, feeSymbol: 'DOGE', minDeposit: 10, minWithdraw: 20, addressExample: '' },
+      { chain: 'BEP20', name: 'BNB Smart Chain (BEP20)', depositFee: 0, withdrawFee: 1.5, feeSymbol: 'DOGE', minDeposit: 10, minWithdraw: 20, addressExample: '' }
     ]
   },
   {
@@ -258,8 +258,8 @@ const RAW_INITIAL_COINS: Coin[] = [
     bestSource: 'bybit',
     apiPrices: { binance: 0.495, bybit: 0.495, okx: 0.495 },
     networks: [
-      { chain: 'Cardano', name: 'Cardano Native (Shelley)', depositFee: 0, withdrawFee: 0.8, feeSymbol: 'ADA', minDeposit: 2, minWithdraw: 5, addressExample: 'addr1q9h6x743j2y0z5v4km89x2026saloma' },
-      { chain: 'BEP20', name: 'BNB Smart Chain (BEP20)', depositFee: 0, withdrawFee: 0.5, feeSymbol: 'ADA', minDeposit: 2, minWithdraw: 5, addressExample: '0x3ee2200efb3400fabb9aacf31297cbdd1d435d47' }
+      { chain: 'Cardano', name: 'Cardano Native (Shelley)', depositFee: 0, withdrawFee: 0.8, feeSymbol: 'ADA', minDeposit: 2, minWithdraw: 5, addressExample: '' },
+      { chain: 'BEP20', name: 'BNB Smart Chain (BEP20)', depositFee: 0, withdrawFee: 0.5, feeSymbol: 'ADA', minDeposit: 2, minWithdraw: 5, addressExample: '' }
     ]
   },
   {
@@ -277,8 +277,8 @@ const RAW_INITIAL_COINS: Coin[] = [
     bestSource: 'bybit',
     apiPrices: { binance: 5.85, bybit: 5.85, okx: 5.85 },
     networks: [
-      { chain: 'TON', name: 'The Open Network (TON Native)', depositFee: 0, withdrawFee: 0.05, feeSymbol: 'TON', minDeposit: 0.2, minWithdraw: 0.5, addressExample: 'EQBvW8Z5huBkMJYdn3PCDnHo4619SalomaTON' },
-      { chain: 'BEP20', name: 'BNB Smart Chain (BEP20)', depositFee: 0, withdrawFee: 0.08, feeSymbol: 'TON', minDeposit: 0.5, minWithdraw: 1, addressExample: '0x76a797a59ba2c17726896976b7b3747bfd1d220f' }
+      { chain: 'TON', name: 'The Open Network (TON Native)', depositFee: 0, withdrawFee: 0.05, feeSymbol: 'TON', minDeposit: 0.2, minWithdraw: 0.5, addressExample: '' },
+      { chain: 'BEP20', name: 'BNB Smart Chain (BEP20)', depositFee: 0, withdrawFee: 0.08, feeSymbol: 'TON', minDeposit: 0.5, minWithdraw: 1, addressExample: '' }
     ]
   },
   {
@@ -296,8 +296,8 @@ const RAW_INITIAL_COINS: Coin[] = [
     bestSource: 'bybit',
     apiPrices: { binance: 34.2, bybit: 34.2, okx: 34.2 },
     networks: [
-      { chain: 'AVAX-C', name: 'Avalanche C-Chain Native', depositFee: 0, withdrawFee: 0.01, feeSymbol: 'AVAX', minDeposit: 0.1, minWithdraw: 0.2, addressExample: '0x1ceb83918a2026salomaavax0192' },
-      { chain: 'BEP20', name: 'BNB Smart Chain (BEP20)', depositFee: 0, withdrawFee: 0.02, feeSymbol: 'AVAX', minDeposit: 0.1, minWithdraw: 0.2, addressExample: '0x1ceb83918a2026salomaavax0192' }
+      { chain: 'AVAX-C', name: 'Avalanche C-Chain Native', depositFee: 0, withdrawFee: 0.01, feeSymbol: 'AVAX', minDeposit: 0.1, minWithdraw: 0.2, addressExample: '' },
+      { chain: 'BEP20', name: 'BNB Smart Chain (BEP20)', depositFee: 0, withdrawFee: 0.02, feeSymbol: 'AVAX', minDeposit: 0.1, minWithdraw: 0.2, addressExample: '' }
     ]
   },
   {
@@ -315,7 +315,7 @@ const RAW_INITIAL_COINS: Coin[] = [
     bestSource: 'bybit',
     apiPrices: { binance: 2.15, bybit: 2.15, okx: 2.15 },
     networks: [
-      { chain: 'Sui', name: 'Sui Native Mainnet', depositFee: 0, withdrawFee: 0.05, feeSymbol: 'SUI', minDeposit: 1, minWithdraw: 2, addressExample: '0x43bFa92104192bC18E9712aD90176882aSalomaSui' }
+      { chain: 'Sui', name: 'Sui Native Mainnet', depositFee: 0, withdrawFee: 0.05, feeSymbol: 'SUI', minDeposit: 1, minWithdraw: 2, addressExample: '' }
     ]
   },
   {
@@ -333,8 +333,8 @@ const RAW_INITIAL_COINS: Coin[] = [
     bestSource: 'bybit',
     apiPrices: { binance: 0.0000098, bybit: 0.0000098, okx: 0.0000098 },
     networks: [
-      { chain: 'ERC20', name: 'Ethereum Mainnet (ERC20)', depositFee: 0, withdrawFee: 250000, feeSymbol: 'PEPE', minDeposit: 500000, minWithdraw: 1000000, addressExample: '0x6982508145454Ce325dDbE47a25d4ec3d2311933' },
-      { chain: 'BEP20', name: 'BNB Smart Chain (BEP20)', depositFee: 0, withdrawFee: 100000, feeSymbol: 'PEPE', minDeposit: 200000, minWithdraw: 500000, addressExample: '0x25d887ce7a35172C62FeBFD67a1856620DAEb000' }
+      { chain: 'ERC20', name: 'Ethereum Mainnet (ERC20)', depositFee: 0, withdrawFee: 250000, feeSymbol: 'PEPE', minDeposit: 500000, minWithdraw: 1000000, addressExample: '' },
+      { chain: 'BEP20', name: 'BNB Smart Chain (BEP20)', depositFee: 0, withdrawFee: 100000, feeSymbol: 'PEPE', minDeposit: 200000, minWithdraw: 500000, addressExample: '' }
     ]
   },
   {
@@ -352,8 +352,8 @@ const RAW_INITIAL_COINS: Coin[] = [
     bestSource: 'bybit',
     apiPrices: { binance: 86.4, bybit: 86.4, okx: 86.4 },
     networks: [
-      { chain: 'Litecoin', name: 'Litecoin Native (bech32)', depositFee: 0, withdrawFee: 0.001, feeSymbol: 'LTC', minDeposit: 0.01, minWithdraw: 0.02, addressExample: 'ltc1q9h6x743j2y0z5v4km89x2026saloma' },
-      { chain: 'BEP20', name: 'BNB Smart Chain (BEP20)', depositFee: 0, withdrawFee: 0.002, feeSymbol: 'LTC', minDeposit: 0.01, minWithdraw: 0.02, addressExample: '0x4338665cbb7b2485a8855a139b75d5e34ab0db94' }
+      { chain: 'Litecoin', name: 'Litecoin Native (bech32)', depositFee: 0, withdrawFee: 0.001, feeSymbol: 'LTC', minDeposit: 0.01, minWithdraw: 0.02, addressExample: '' },
+      { chain: 'BEP20', name: 'BNB Smart Chain (BEP20)', depositFee: 0, withdrawFee: 0.002, feeSymbol: 'LTC', minDeposit: 0.01, minWithdraw: 0.02, addressExample: '' }
     ]
   },
   {
@@ -371,8 +371,8 @@ const RAW_INITIAL_COINS: Coin[] = [
     bestSource: 'bybit',
     apiPrices: { binance: 0.162, bybit: 0.162, okx: 0.162 },
     networks: [
-      { chain: 'TRC20', name: 'TRON Mainnet (TRC20)', depositFee: 0, withdrawFee: 1.0, feeSymbol: 'TRX', minDeposit: 10, minWithdraw: 15, addressExample: 'TJX9zK2B7YmNQ9sLo2481A2026SalomaTRC' },
-      { chain: 'BEP20', name: 'BNB Smart Chain (BEP20)', depositFee: 0, withdrawFee: 1.2, feeSymbol: 'TRX', minDeposit: 10, minWithdraw: 15, addressExample: '0xce7de646e7208a4ef112cb6ed5038fa6cc6b12e3' }
+      { chain: 'TRC20', name: 'TRON Mainnet (TRC20)', depositFee: 0, withdrawFee: 1.0, feeSymbol: 'TRX', minDeposit: 10, minWithdraw: 15, addressExample: '' },
+      { chain: 'BEP20', name: 'BNB Smart Chain (BEP20)', depositFee: 0, withdrawFee: 1.2, feeSymbol: 'TRX', minDeposit: 10, minWithdraw: 15, addressExample: '' }
     ]
   },
   {
@@ -390,9 +390,9 @@ const RAW_INITIAL_COINS: Coin[] = [
     bestSource: 'bybit',
     apiPrices: { binance: 17.8, bybit: 17.8, okx: 17.8 },
     networks: [
-      { chain: 'ERC20', name: 'Ethereum (ERC20)', depositFee: 0, withdrawFee: 0.25, feeSymbol: 'LINK', minDeposit: 0.5, minWithdraw: 1, addressExample: '0x514910771AF9Ca656af840dff83E8264EcF986CA' },
-      { chain: 'BEP20', name: 'BNB Smart Chain (BEP20)', depositFee: 0, withdrawFee: 0.05, feeSymbol: 'LINK', minDeposit: 0.2, minWithdraw: 0.5, addressExample: '0xF8A0BF9cF54Bb92F17374d9e9A321E6a111a51bD' },
-      { chain: 'Polygon', name: 'Polygon POS', depositFee: 0, withdrawFee: 0.04, feeSymbol: 'LINK', minDeposit: 0.2, minWithdraw: 0.5, addressExample: '0x53E0bca35eC356BD5ddDFebbD1Fc0fD03FaBad39' }
+      { chain: 'ERC20', name: 'Ethereum (ERC20)', depositFee: 0, withdrawFee: 0.25, feeSymbol: 'LINK', minDeposit: 0.5, minWithdraw: 1, addressExample: '' },
+      { chain: 'BEP20', name: 'BNB Smart Chain (BEP20)', depositFee: 0, withdrawFee: 0.05, feeSymbol: 'LINK', minDeposit: 0.2, minWithdraw: 0.5, addressExample: '' },
+      { chain: 'Polygon', name: 'Polygon POS', depositFee: 0, withdrawFee: 0.04, feeSymbol: 'LINK', minDeposit: 0.2, minWithdraw: 0.5, addressExample: '' }
     ]
   },
   {
@@ -410,8 +410,8 @@ const RAW_INITIAL_COINS: Coin[] = [
     bestSource: 'bybit',
     apiPrices: { binance: 6.45, bybit: 6.45, okx: 6.45 },
     networks: [
-      { chain: 'Polkadot', name: 'Polkadot Relay Chain', depositFee: 0, withdrawFee: 0.1, feeSymbol: 'DOT', minDeposit: 1, minWithdraw: 2, addressExample: '15oF4uVJwmo4TdGW7VfQxNLavjCXviqxT9S1MgbjMNHr6Sp5' },
-      { chain: 'BEP20', name: 'BNB Smart Chain (BEP20)', depositFee: 0, withdrawFee: 0.08, feeSymbol: 'DOT', minDeposit: 1, minWithdraw: 2, addressExample: '0x7083609fCE4d1d8Dc0C979AAb8c869Ea2C873402' }
+      { chain: 'Polkadot', name: 'Polkadot Relay Chain', depositFee: 0, withdrawFee: 0.1, feeSymbol: 'DOT', minDeposit: 1, minWithdraw: 2, addressExample: '' },
+      { chain: 'BEP20', name: 'BNB Smart Chain (BEP20)', depositFee: 0, withdrawFee: 0.08, feeSymbol: 'DOT', minDeposit: 1, minWithdraw: 2, addressExample: '' }
     ]
   },
   {
@@ -429,8 +429,8 @@ const RAW_INITIAL_COINS: Coin[] = [
     bestSource: 'bybit',
     apiPrices: { binance: 445.0, bybit: 445.0, okx: 445.0 },
     networks: [
-      { chain: 'BCH', name: 'Bitcoin Cash Native', depositFee: 0, withdrawFee: 0.001, feeSymbol: 'BCH', minDeposit: 0.01, minWithdraw: 0.02, addressExample: 'bitcoincash:qpm2qsznhks23z7629mms6s4cwef74vcwvy22gdx6a' },
-      { chain: 'BEP20', name: 'BNB Smart Chain (BEP20)', depositFee: 0, withdrawFee: 0.001, feeSymbol: 'BCH', minDeposit: 0.01, minWithdraw: 0.02, addressExample: '0x8fF795a6F4D97E7887C79beA79aba5cc76444aDf' }
+      { chain: 'BCH', name: 'Bitcoin Cash Native', depositFee: 0, withdrawFee: 0.001, feeSymbol: 'BCH', minDeposit: 0.01, minWithdraw: 0.02, addressExample: '' },
+      { chain: 'BEP20', name: 'BNB Smart Chain (BEP20)', depositFee: 0, withdrawFee: 0.001, feeSymbol: 'BCH', minDeposit: 0.01, minWithdraw: 0.02, addressExample: '' }
     ]
   },
   {
@@ -448,8 +448,8 @@ const RAW_INITIAL_COINS: Coin[] = [
     bestSource: 'bybit',
     apiPrices: { binance: 0.0000245, bybit: 0.0000245, okx: 0.0000245 },
     networks: [
-      { chain: 'ERC20', name: 'Ethereum Mainnet (ERC20)', depositFee: 0, withdrawFee: 200000, feeSymbol: 'SHIB', minDeposit: 400000, minWithdraw: 800000, addressExample: '0x95aD61b0a150d79219dCF64E1E6Cc01f0B64C4cE' },
-      { chain: 'BEP20', name: 'BNB Smart Chain (BEP20)', depositFee: 0, withdrawFee: 60000, feeSymbol: 'SHIB', minDeposit: 150000, minWithdraw: 300000, addressExample: '0x2859e4544C4bB03966803b044A93563Bd2D0DD4D' }
+      { chain: 'ERC20', name: 'Ethereum Mainnet (ERC20)', depositFee: 0, withdrawFee: 200000, feeSymbol: 'SHIB', minDeposit: 400000, minWithdraw: 800000, addressExample: '' },
+      { chain: 'BEP20', name: 'BNB Smart Chain (BEP20)', depositFee: 0, withdrawFee: 60000, feeSymbol: 'SHIB', minDeposit: 150000, minWithdraw: 300000, addressExample: '' }
     ]
   },
   {
@@ -467,8 +467,8 @@ const RAW_INITIAL_COINS: Coin[] = [
     bestSource: 'bybit',
     apiPrices: { binance: 5.75, bybit: 5.75, okx: 5.75 },
     networks: [
-      { chain: 'NEAR', name: 'NEAR Protocol Native', depositFee: 0, withdrawFee: 0.01, feeSymbol: 'NEAR', minDeposit: 0.2, minWithdraw: 0.5, addressExample: 'saloma2026.near' },
-      { chain: 'BEP20', name: 'BNB Smart Chain (BEP20)', depositFee: 0, withdrawFee: 0.02, feeSymbol: 'NEAR', minDeposit: 0.2, minWithdraw: 0.5, addressExample: '0x1Fa4a73a3F0133f0025378af00236f3aBX2026' }
+      { chain: 'NEAR', name: 'NEAR Protocol Native', depositFee: 0, withdrawFee: 0.01, feeSymbol: 'NEAR', minDeposit: 0.2, minWithdraw: 0.5, addressExample: '' },
+      { chain: 'BEP20', name: 'BNB Smart Chain (BEP20)', depositFee: 0, withdrawFee: 0.02, feeSymbol: 'NEAR', minDeposit: 0.2, minWithdraw: 0.5, addressExample: '' }
     ]
   },
   {
@@ -486,8 +486,8 @@ const RAW_INITIAL_COINS: Coin[] = [
     bestSource: 'bybit',
     apiPrices: { binance: 9.85, bybit: 9.85, okx: 9.85 },
     networks: [
-      { chain: 'ERC20', name: 'Ethereum Mainnet (ERC20)', depositFee: 0, withdrawFee: 0.45, feeSymbol: 'UNI', minDeposit: 0.5, minWithdraw: 1, addressExample: '0x1f9840a85d5aF5bf1D1762F925BDADdC4201F984' },
-      { chain: 'Arbitrum', name: 'Arbitrum One (L2)', depositFee: 0, withdrawFee: 0.08, feeSymbol: 'UNI', minDeposit: 0.2, minWithdraw: 0.5, addressExample: '0xFa7F8980b0f1E64A2062791cc3b0871572f1F7f0' }
+      { chain: 'ERC20', name: 'Ethereum Mainnet (ERC20)', depositFee: 0, withdrawFee: 0.45, feeSymbol: 'UNI', minDeposit: 0.5, minWithdraw: 1, addressExample: '' },
+      { chain: 'Arbitrum', name: 'Arbitrum One (L2)', depositFee: 0, withdrawFee: 0.08, feeSymbol: 'UNI', minDeposit: 0.2, minWithdraw: 0.5, addressExample: '' }
     ]
   },
   {
@@ -505,7 +505,7 @@ const RAW_INITIAL_COINS: Coin[] = [
     bestSource: 'bybit',
     apiPrices: { binance: 9.4, bybit: 9.4, okx: 9.4 },
     networks: [
-      { chain: 'Aptos', name: 'Aptos Native Mainnet', depositFee: 0, withdrawFee: 0.01, feeSymbol: 'APT', minDeposit: 0.2, minWithdraw: 0.5, addressExample: '0x882a4c82b28f03294e83b271391781290salomaapt' }
+      { chain: 'Aptos', name: 'Aptos Native Mainnet', depositFee: 0, withdrawFee: 0.01, feeSymbol: 'APT', minDeposit: 0.2, minWithdraw: 0.5, addressExample: '' }
     ]
   },
   {
@@ -523,8 +523,8 @@ const RAW_INITIAL_COINS: Coin[] = [
     bestSource: 'bybit',
     apiPrices: { binance: 0.89, bybit: 0.89, okx: 0.89 },
     networks: [
-      { chain: 'Arbitrum', name: 'Arbitrum One Native', depositFee: 0, withdrawFee: 0.5, feeSymbol: 'ARB', minDeposit: 1, minWithdraw: 3, addressExample: '0x912CE59144191C1204E64559FE8253a0e49E6548' },
-      { chain: 'ERC20', name: 'Ethereum Mainnet (ERC20)', depositFee: 0, withdrawFee: 3.5, feeSymbol: 'ARB', minDeposit: 5, minWithdraw: 10, addressExample: '0xB50721BCf8d664c30412Cfbc6cf7a15145234ad1' }
+      { chain: 'Arbitrum', name: 'Arbitrum One Native', depositFee: 0, withdrawFee: 0.5, feeSymbol: 'ARB', minDeposit: 1, minWithdraw: 3, addressExample: '' },
+      { chain: 'ERC20', name: 'Ethereum Mainnet (ERC20)', depositFee: 0, withdrawFee: 3.5, feeSymbol: 'ARB', minDeposit: 5, minWithdraw: 10, addressExample: '' }
     ]
   },
   {
@@ -542,7 +542,7 @@ const RAW_INITIAL_COINS: Coin[] = [
     bestSource: 'bybit',
     apiPrices: { binance: 1.92, bybit: 1.92, okx: 1.92 },
     networks: [
-      { chain: 'Optimism', name: 'OP Mainnet Native', depositFee: 0, withdrawFee: 0.25, feeSymbol: 'OP', minDeposit: 1, minWithdraw: 2, addressExample: '0x4200000000000000000000000000000000000042' }
+      { chain: 'Optimism', name: 'OP Mainnet Native', depositFee: 0, withdrawFee: 0.25, feeSymbol: 'OP', minDeposit: 1, minWithdraw: 2, addressExample: '' }
     ]
   },
   {
@@ -560,7 +560,7 @@ const RAW_INITIAL_COINS: Coin[] = [
     bestSource: 'bybit',
     apiPrices: { binance: 7.35, bybit: 7.35, okx: 7.35 },
     networks: [
-      { chain: 'Cosmos', name: 'Cosmos Hub (ATOM Native)', depositFee: 0, withdrawFee: 0.02, feeSymbol: 'ATOM', minDeposit: 0.2, minWithdraw: 0.5, addressExample: 'cosmos1h6x743j2y0z5v4km89x2026saloma' }
+      { chain: 'Cosmos', name: 'Cosmos Hub (ATOM Native)', depositFee: 0, withdrawFee: 0.02, feeSymbol: 'ATOM', minDeposit: 0.2, minWithdraw: 0.5, addressExample: '' }
     ]
   },
   {
@@ -578,7 +578,7 @@ const RAW_INITIAL_COINS: Coin[] = [
     bestSource: 'bybit',
     apiPrices: { binance: 10.4, bybit: 10.4, okx: 10.4 },
     networks: [
-      { chain: 'ICP', name: 'Internet Computer Mainnet', depositFee: 0, withdrawFee: 0.005, feeSymbol: 'ICP', minDeposit: 0.1, minWithdraw: 0.2, addressExample: 'saloma2026-icp-principal-account' }
+      { chain: 'ICP', name: 'Internet Computer Mainnet', depositFee: 0, withdrawFee: 0.005, feeSymbol: 'ICP', minDeposit: 0.1, minWithdraw: 0.2, addressExample: '' }
     ]
   },
   {
@@ -596,8 +596,8 @@ const RAW_INITIAL_COINS: Coin[] = [
     bestSource: 'bybit',
     apiPrices: { binance: 4.85, bybit: 4.85, okx: 4.85 },
     networks: [
-      { chain: 'Filecoin', name: 'Filecoin Mainnet (f1/f4)', depositFee: 0, withdrawFee: 0.01, feeSymbol: 'FIL', minDeposit: 0.2, minWithdraw: 0.5, addressExample: 'f1abjxfbp274xpdqcpuaykwkfb43omjotacm2p3za' },
-      { chain: 'BEP20', name: 'BNB Smart Chain (BEP20)', depositFee: 0, withdrawFee: 0.02, feeSymbol: 'FIL', minDeposit: 0.2, minWithdraw: 0.5, addressExample: '0x0D8Ce2A99Bb6e3B7Db580eD848240e4a0F9aE153' }
+      { chain: 'Filecoin', name: 'Filecoin Mainnet (f1/f4)', depositFee: 0, withdrawFee: 0.01, feeSymbol: 'FIL', minDeposit: 0.2, minWithdraw: 0.5, addressExample: '' },
+      { chain: 'BEP20', name: 'BNB Smart Chain (BEP20)', depositFee: 0, withdrawFee: 0.02, feeSymbol: 'FIL', minDeposit: 0.2, minWithdraw: 0.5, addressExample: '' }
     ]
   },
   {
@@ -615,7 +615,7 @@ const RAW_INITIAL_COINS: Coin[] = [
     bestSource: 'bybit',
     apiPrices: { binance: 0.145, bybit: 0.145, okx: 0.145 },
     networks: [
-      { chain: 'Hedera', name: 'Hedera Hashgraph Mainnet', depositFee: 0, withdrawFee: 1.0, feeSymbol: 'HBAR', minDeposit: 5, minWithdraw: 10, addressExample: '0.0.4829104' }
+      { chain: 'Hedera', name: 'Hedera Hashgraph Mainnet', depositFee: 0, withdrawFee: 1.0, feeSymbol: 'HBAR', minDeposit: 5, minWithdraw: 10, addressExample: '' }
     ]
   },
   {
@@ -633,7 +633,7 @@ const RAW_INITIAL_COINS: Coin[] = [
     bestSource: 'bybit',
     apiPrices: { binance: 0.285, bybit: 0.285, okx: 0.285 },
     networks: [
-      { chain: 'Stellar', name: 'Stellar Lumens Network', depositFee: 0, withdrawFee: 0.1, feeSymbol: 'XLM', minDeposit: 5, minWithdraw: 10, addressExample: 'GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN' }
+      { chain: 'Stellar', name: 'Stellar Lumens Network', depositFee: 0, withdrawFee: 0.1, feeSymbol: 'XLM', minDeposit: 5, minWithdraw: 10, addressExample: '' }
     ]
   },
   {
@@ -651,7 +651,7 @@ const RAW_INITIAL_COINS: Coin[] = [
     bestSource: 'bybit',
     apiPrices: { binance: 0.036, bybit: 0.036, okx: 0.036 },
     networks: [
-      { chain: 'VeChain', name: 'VeChainThor Mainnet', depositFee: 0, withdrawFee: 10, feeSymbol: 'VET', minDeposit: 50, minWithdraw: 100, addressExample: '0x992B28B3eB9229555C09F6eF83A8992026' }
+      { chain: 'VeChain', name: 'VeChainThor Mainnet', depositFee: 0, withdrawFee: 10, feeSymbol: 'VET', minDeposit: 50, minWithdraw: 100, addressExample: '' }
     ]
   },
   {
@@ -669,7 +669,7 @@ const RAW_INITIAL_COINS: Coin[] = [
     bestSource: 'bybit',
     apiPrices: { binance: 0.245, bybit: 0.245, okx: 0.245 },
     networks: [
-      { chain: 'Algorand', name: 'Algorand Mainnet', depositFee: 0, withdrawFee: 0.1, feeSymbol: 'ALGO', minDeposit: 2, minWithdraw: 5, addressExample: 'SALOMA743J2Y0Z5V4KM89X2026ALGORANDADDRESS' }
+      { chain: 'Algorand', name: 'Algorand Mainnet', depositFee: 0, withdrawFee: 0.1, feeSymbol: 'ALGO', minDeposit: 2, minWithdraw: 5, addressExample: '' }
     ]
   },
   {
@@ -687,8 +687,8 @@ const RAW_INITIAL_COINS: Coin[] = [
     bestSource: 'bybit',
     apiPrices: { binance: 23.4, bybit: 23.4, okx: 23.4 },
     networks: [
-      { chain: 'Injective', name: 'Injective Native Mainnet', depositFee: 0, withdrawFee: 0.02, feeSymbol: 'INJ', minDeposit: 0.1, minWithdraw: 0.2, addressExample: 'inj1h6x743j2y0z5v4km89x2026saloma' },
-      { chain: 'ERC20', name: 'Ethereum Mainnet (ERC20)', depositFee: 0, withdrawFee: 0.25, feeSymbol: 'INJ', minDeposit: 0.2, minWithdraw: 0.5, addressExample: '0xe28b3B32B6c345A34Ff64674606124d55ca0a778' }
+      { chain: 'Injective', name: 'Injective Native Mainnet', depositFee: 0, withdrawFee: 0.02, feeSymbol: 'INJ', minDeposit: 0.1, minWithdraw: 0.2, addressExample: '' },
+      { chain: 'ERC20', name: 'Ethereum Mainnet (ERC20)', depositFee: 0, withdrawFee: 0.25, feeSymbol: 'INJ', minDeposit: 0.2, minWithdraw: 0.5, addressExample: '' }
     ]
   },
   {
@@ -706,7 +706,7 @@ const RAW_INITIAL_COINS: Coin[] = [
     bestSource: 'bybit',
     apiPrices: { binance: 0.48, bybit: 0.48, okx: 0.48 },
     networks: [
-      { chain: 'Sei', name: 'Sei Native Mainnet', depositFee: 0, withdrawFee: 0.1, feeSymbol: 'SEI', minDeposit: 2, minWithdraw: 5, addressExample: 'sei1h6x743j2y0z5v4km89x2026saloma' }
+      { chain: 'Sei', name: 'Sei Native Mainnet', depositFee: 0, withdrawFee: 0.1, feeSymbol: 'SEI', minDeposit: 2, minWithdraw: 5, addressExample: '' }
     ]
   },
   {
@@ -724,7 +724,7 @@ const RAW_INITIAL_COINS: Coin[] = [
     bestSource: 'bybit',
     apiPrices: { binance: 6.15, bybit: 6.15, okx: 6.15 },
     networks: [
-      { chain: 'Celestia', name: 'Celestia Native Mainnet', depositFee: 0, withdrawFee: 0.02, feeSymbol: 'TIA', minDeposit: 0.5, minWithdraw: 1, addressExample: 'celestia1h6x743j2y0z5v4km89x2026saloma' }
+      { chain: 'Celestia', name: 'Celestia Native Mainnet', depositFee: 0, withdrawFee: 0.02, feeSymbol: 'TIA', minDeposit: 0.5, minWithdraw: 1, addressExample: '' }
     ]
   },
   {
@@ -742,7 +742,7 @@ const RAW_INITIAL_COINS: Coin[] = [
     bestSource: 'bybit',
     apiPrices: { binance: 7.4, bybit: 7.4, okx: 7.4 },
     networks: [
-      { chain: 'Solana', name: 'Solana SPL Mainnet', depositFee: 0, withdrawFee: 0.1, feeSymbol: 'RENDER', minDeposit: 0.5, minWithdraw: 1, addressExample: 'rndrizKT3MK1iimdxRdWabcF7Zg7AR5T4nud4EkHBof' }
+      { chain: 'Solana', name: 'Solana SPL Mainnet', depositFee: 0, withdrawFee: 0.1, feeSymbol: 'RENDER', minDeposit: 0.5, minWithdraw: 1, addressExample: '' }
     ]
   },
   {
@@ -760,8 +760,8 @@ const RAW_INITIAL_COINS: Coin[] = [
     bestSource: 'bybit',
     apiPrices: { binance: 1.48, bybit: 1.48, okx: 1.48 },
     networks: [
-      { chain: 'ERC20', name: 'Ethereum Mainnet (ERC20)', depositFee: 0, withdrawFee: 2.5, feeSymbol: 'FET', minDeposit: 5, minWithdraw: 10, addressExample: '0xaea46A60368A7bD060eec7DF8CBa43b7EF41Ad85' },
-      { chain: 'Fetch', name: 'Fetch.ai Native Mainnet', depositFee: 0, withdrawFee: 0.1, feeSymbol: 'FET', minDeposit: 1, minWithdraw: 2, addressExample: 'fetch1h6x743j2y0z5v4km89x2026saloma' }
+      { chain: 'ERC20', name: 'Ethereum Mainnet (ERC20)', depositFee: 0, withdrawFee: 2.5, feeSymbol: 'FET', minDeposit: 5, minWithdraw: 10, addressExample: '' },
+      { chain: 'Fetch', name: 'Fetch.ai Native Mainnet', depositFee: 0, withdrawFee: 0.1, feeSymbol: 'FET', minDeposit: 1, minWithdraw: 2, addressExample: '' }
     ]
   },
   {
@@ -779,7 +779,7 @@ const RAW_INITIAL_COINS: Coin[] = [
     bestSource: 'bybit',
     apiPrices: { binance: 1.08, bybit: 1.08, okx: 1.08 },
     networks: [
-      { chain: 'Solana', name: 'Solana SPL (Jupiter)', depositFee: 0, withdrawFee: 0.2, feeSymbol: 'JUP', minDeposit: 1, minWithdraw: 2, addressExample: 'JUPyiwrYJFskUPiHa7hkeR8VUtAeFoSYbKedZNsDvCN' }
+      { chain: 'Solana', name: 'Solana SPL (Jupiter)', depositFee: 0, withdrawFee: 0.2, feeSymbol: 'JUP', minDeposit: 1, minWithdraw: 2, addressExample: '' }
     ]
   },
   {
@@ -797,7 +797,7 @@ const RAW_INITIAL_COINS: Coin[] = [
     bestSource: 'bybit',
     apiPrices: { binance: 2.65, bybit: 2.65, okx: 2.65 },
     networks: [
-      { chain: 'Solana', name: 'Solana SPL Mainnet', depositFee: 0, withdrawFee: 0.1, feeSymbol: 'WIF', minDeposit: 1, minWithdraw: 2, addressExample: 'EKpQGSJtjMFqKZ9KQanSqYXRcF8fBopzLHYxdM65zcjm' }
+      { chain: 'Solana', name: 'Solana SPL Mainnet', depositFee: 0, withdrawFee: 0.1, feeSymbol: 'WIF', minDeposit: 1, minWithdraw: 2, addressExample: '' }
     ]
   },
   {
@@ -815,7 +815,7 @@ const RAW_INITIAL_COINS: Coin[] = [
     bestSource: 'bybit',
     apiPrices: { binance: 0.000032, bybit: 0.000032, okx: 0.000032 },
     networks: [
-      { chain: 'Solana', name: 'Solana SPL Mainnet', depositFee: 0, withdrawFee: 10000, feeSymbol: 'BONK', minDeposit: 50000, minWithdraw: 100000, addressExample: 'DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263' }
+      { chain: 'Solana', name: 'Solana SPL Mainnet', depositFee: 0, withdrawFee: 10000, feeSymbol: 'BONK', minDeposit: 50000, minWithdraw: 100000, addressExample: '' }
     ]
   },
   {
@@ -833,8 +833,8 @@ const RAW_INITIAL_COINS: Coin[] = [
     bestSource: 'bybit',
     apiPrices: { binance: 0.000185, bybit: 0.000185, okx: 0.000185 },
     networks: [
-      { chain: 'BEP20', name: 'BNB Smart Chain (BEP20)', depositFee: 0, withdrawFee: 5000, feeSymbol: 'FLOKI', minDeposit: 20000, minWithdraw: 40000, addressExample: '0xfb5B838b6cfEEdC2873aB27866079AC55363D37E' },
-      { chain: 'ERC20', name: 'Ethereum Mainnet (ERC20)', depositFee: 0, withdrawFee: 25000, feeSymbol: 'FLOKI', minDeposit: 50000, minWithdraw: 100000, addressExample: '0xcf0C122c6b73ff809C693DB761e7BaeBe62b6a2E' }
+      { chain: 'BEP20', name: 'BNB Smart Chain (BEP20)', depositFee: 0, withdrawFee: 5000, feeSymbol: 'FLOKI', minDeposit: 20000, minWithdraw: 40000, addressExample: '' },
+      { chain: 'ERC20', name: 'Ethereum Mainnet (ERC20)', depositFee: 0, withdrawFee: 25000, feeSymbol: 'FLOKI', minDeposit: 50000, minWithdraw: 100000, addressExample: '' }
     ]
   },
   {
@@ -852,8 +852,8 @@ const RAW_INITIAL_COINS: Coin[] = [
     bestSource: 'bybit',
     apiPrices: { binance: 168.5, bybit: 168.5, okx: 168.5 },
     networks: [
-      { chain: 'ERC20', name: 'Ethereum Mainnet (ERC20)', depositFee: 0, withdrawFee: 0.03, feeSymbol: 'AAVE', minDeposit: 0.05, minWithdraw: 0.1, addressExample: '0x7Fc66500c84A76Ad7e9c93437bFc5Ac33E2DDaE9' },
-      { chain: 'Polygon', name: 'Polygon POS', depositFee: 0, withdrawFee: 0.005, feeSymbol: 'AAVE', minDeposit: 0.02, minWithdraw: 0.05, addressExample: '0xD6DF932A45C0f255f85145f286eA0b292B21C90B' }
+      { chain: 'ERC20', name: 'Ethereum Mainnet (ERC20)', depositFee: 0, withdrawFee: 0.03, feeSymbol: 'AAVE', minDeposit: 0.05, minWithdraw: 0.1, addressExample: '' },
+      { chain: 'Polygon', name: 'Polygon POS', depositFee: 0, withdrawFee: 0.005, feeSymbol: 'AAVE', minDeposit: 0.02, minWithdraw: 0.05, addressExample: '' }
     ]
   },
   {
@@ -871,7 +871,7 @@ const RAW_INITIAL_COINS: Coin[] = [
     bestSource: 'bybit',
     apiPrices: { binance: 1740.0, bybit: 1740.0, okx: 1740.0 },
     networks: [
-      { chain: 'ERC20', name: 'Ethereum Mainnet (ERC20)', depositFee: 0, withdrawFee: 0.003, feeSymbol: 'MKR', minDeposit: 0.005, minWithdraw: 0.01, addressExample: '0x9f8F72aA9304c8B593d555F12eF6589cC3A579A2' }
+      { chain: 'ERC20', name: 'Ethereum Mainnet (ERC20)', depositFee: 0, withdrawFee: 0.003, feeSymbol: 'MKR', minDeposit: 0.005, minWithdraw: 0.01, addressExample: '' }
     ]
   },
   {
@@ -889,7 +889,7 @@ const RAW_INITIAL_COINS: Coin[] = [
     bestSource: 'bybit',
     apiPrices: { binance: 1.54, bybit: 1.54, okx: 1.54 },
     networks: [
-      { chain: 'ERC20', name: 'Ethereum Mainnet (ERC20)', depositFee: 0, withdrawFee: 2.0, feeSymbol: 'LDO', minDeposit: 5, minWithdraw: 10, addressExample: '0x5A98FcBEA516Cf06857215779Fd812CA3beF1B32' }
+      { chain: 'ERC20', name: 'Ethereum Mainnet (ERC20)', depositFee: 0, withdrawFee: 2.0, feeSymbol: 'LDO', minDeposit: 5, minWithdraw: 10, addressExample: '' }
     ]
   },
   {
@@ -907,8 +907,8 @@ const RAW_INITIAL_COINS: Coin[] = [
     bestSource: 'bybit',
     apiPrices: { binance: 0.225, bybit: 0.225, okx: 0.225 },
     networks: [
-      { chain: 'Arbitrum', name: 'Arbitrum One (L2)', depositFee: 0, withdrawFee: 1.0, feeSymbol: 'GRT', minDeposit: 5, minWithdraw: 10, addressExample: '0x9623063377AD1B27544C965cCd7342f7EA7e88C7' },
-      { chain: 'ERC20', name: 'Ethereum Mainnet (ERC20)', depositFee: 0, withdrawFee: 15.0, feeSymbol: 'GRT', minDeposit: 30, minWithdraw: 50, addressExample: '0xc944E90C64B2c07662A292be6244BDf05Cda44a7' }
+      { chain: 'Arbitrum', name: 'Arbitrum One (L2)', depositFee: 0, withdrawFee: 1.0, feeSymbol: 'GRT', minDeposit: 5, minWithdraw: 10, addressExample: '' },
+      { chain: 'ERC20', name: 'Ethereum Mainnet (ERC20)', depositFee: 0, withdrawFee: 15.0, feeSymbol: 'GRT', minDeposit: 30, minWithdraw: 50, addressExample: '' }
     ]
   },
   {
@@ -926,7 +926,7 @@ const RAW_INITIAL_COINS: Coin[] = [
     bestSource: 'bybit',
     apiPrices: { binance: 1.62, bybit: 1.62, okx: 1.62 },
     networks: [
-      { chain: 'ERC20', name: 'Ethereum Mainnet (ERC20)', depositFee: 0, withdrawFee: 2.0, feeSymbol: 'IMX', minDeposit: 5, minWithdraw: 10, addressExample: '0xF57e7e7C23978C3cAEC3C3548E3D615c346e79fF' }
+      { chain: 'ERC20', name: 'Ethereum Mainnet (ERC20)', depositFee: 0, withdrawFee: 2.0, feeSymbol: 'IMX', minDeposit: 5, minWithdraw: 10, addressExample: '' }
     ]
   },
   {
@@ -944,7 +944,7 @@ const RAW_INITIAL_COINS: Coin[] = [
     bestSource: 'bybit',
     apiPrices: { binance: 1.98, bybit: 1.98, okx: 1.98 },
     networks: [
-      { chain: 'Stacks', name: 'Stacks Bitcoin L2 Mainnet', depositFee: 0, withdrawFee: 0.2, feeSymbol: 'STX', minDeposit: 1, minWithdraw: 2, addressExample: 'SP3FBR2AGK5H9QBDH3EEN6DF8EK8JY7RX8QJ5SVTE' }
+      { chain: 'Stacks', name: 'Stacks Bitcoin L2 Mainnet', depositFee: 0, withdrawFee: 0.2, feeSymbol: 'STX', minDeposit: 1, minWithdraw: 2, addressExample: '' }
     ]
   },
   {
@@ -962,7 +962,7 @@ const RAW_INITIAL_COINS: Coin[] = [
     bestSource: 'bybit',
     apiPrices: { binance: 5.42, bybit: 5.42, okx: 5.42 },
     networks: [
-      { chain: 'THORChain', name: 'THORChain Native Mainnet', depositFee: 0, withdrawFee: 0.05, feeSymbol: 'RUNE', minDeposit: 0.5, minWithdraw: 1, addressExample: 'thor1h6x743j2y0z5v4km89x2026saloma' }
+      { chain: 'THORChain', name: 'THORChain Native Mainnet', depositFee: 0, withdrawFee: 0.05, feeSymbol: 'RUNE', minDeposit: 0.5, minWithdraw: 1, addressExample: '' }
     ]
   },
   {
@@ -980,8 +980,8 @@ const RAW_INITIAL_COINS: Coin[] = [
     bestSource: 'bybit',
     apiPrices: { binance: 24.8, bybit: 24.8, okx: 24.8 },
     networks: [
-      { chain: 'ETC', name: 'Ethereum Classic Native', depositFee: 0, withdrawFee: 0.01, feeSymbol: 'ETC', minDeposit: 0.1, minWithdraw: 0.2, addressExample: '0x992B28B3eB9229555C09F6eF83A8992026' },
-      { chain: 'BEP20', name: 'BNB Smart Chain (BEP20)', depositFee: 0, withdrawFee: 0.01, feeSymbol: 'ETC', minDeposit: 0.1, minWithdraw: 0.2, addressExample: '0x3d6545b08693daE087E957cb1180ee38B9e3c25E' }
+      { chain: 'ETC', name: 'Ethereum Classic Native', depositFee: 0, withdrawFee: 0.01, feeSymbol: 'ETC', minDeposit: 0.1, minWithdraw: 0.2, addressExample: '' },
+      { chain: 'BEP20', name: 'BNB Smart Chain (BEP20)', depositFee: 0, withdrawFee: 0.01, feeSymbol: 'ETC', minDeposit: 0.1, minWithdraw: 0.2, addressExample: '' }
     ]
   },
   {
@@ -999,8 +999,8 @@ const RAW_INITIAL_COINS: Coin[] = [
     bestSource: 'bybit',
     apiPrices: { binance: 0.44, bybit: 0.44, okx: 0.44 },
     networks: [
-      { chain: 'Polygon', name: 'Polygon POS Mainnet', depositFee: 0, withdrawFee: 0.2, feeSymbol: 'POL', minDeposit: 2, minWithdraw: 5, addressExample: '0x0000000000000000000000000000000000001010' },
-      { chain: 'ERC20', name: 'Ethereum Mainnet (ERC20)', depositFee: 0, withdrawFee: 8.0, feeSymbol: 'POL', minDeposit: 20, minWithdraw: 40, addressExample: '0x455e53CBB86018Ac2B8092FdCd39d8444aFFC3F6' }
+      { chain: 'Polygon', name: 'Polygon POS Mainnet', depositFee: 0, withdrawFee: 0.2, feeSymbol: 'POL', minDeposit: 2, minWithdraw: 5, addressExample: '' },
+      { chain: 'ERC20', name: 'Ethereum Mainnet (ERC20)', depositFee: 0, withdrawFee: 8.0, feeSymbol: 'POL', minDeposit: 20, minWithdraw: 40, addressExample: '' }
     ]
   },
   {
@@ -1018,7 +1018,7 @@ const RAW_INITIAL_COINS: Coin[] = [
     bestSource: 'bybit',
     apiPrices: { binance: 0.96, bybit: 0.96, okx: 0.96 },
     networks: [
-      { chain: 'ERC20', name: 'Ethereum Mainnet (ERC20)', depositFee: 0, withdrawFee: 3.0, feeSymbol: 'ONDO', minDeposit: 10, minWithdraw: 20, addressExample: '0xfAbA6f8e4a5E8Ab82F62fe7C39859FA577269BE3' }
+      { chain: 'ERC20', name: 'Ethereum Mainnet (ERC20)', depositFee: 0, withdrawFee: 3.0, feeSymbol: 'ONDO', minDeposit: 10, minWithdraw: 20, addressExample: '' }
     ]
   }
 ];
@@ -1141,6 +1141,36 @@ export function findCoinNetwork(
   };
 }
 
+export const KNOWN_TOKEN_CONTRACT_ADDRESSES_CLIENT = new Set<string>([
+  '0x0000000000000000000000000000000000000000',
+  '0x000000000000000000000000000000000000dead',
+  '0x0000000000000000000000000000000000001010',
+  '0x55d398326f99059ff775485246999027b3197955',
+  '0xdac17f958d2ee523a2206206994597c13d831ec7',
+  '0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48',
+  '0x8ac76a51cc950d9822d68b83fe1ad97b32cd580d',
+  '0x2260fac5e5542a773aa44fbcfedf7c193bc2c599',
+  'tr7nhqjekqxgtci8q8zy4pl8otszgjlj6t'
+]);
+
+export function isKnownTokenContractAddress(addr: string): boolean {
+  const norm = String(addr || '').trim().toLowerCase();
+  if (!norm) return false;
+  return KNOWN_TOKEN_CONTRACT_ADDRESSES_CLIENT.has(norm);
+}
+
+export function resolveWalletAddressForChain(
+  walletAddresses: Record<string, string> | undefined | null,
+  chain: string,
+  symbol?: string
+): string {
+  if (!walletAddresses) return '';
+  const symKey = symbol ? `${symbol.toUpperCase()}:${chain}` : '';
+  const candidate = (symKey && walletAddresses[symKey]) || walletAddresses[chain] || '';
+  if (!candidate || isKnownTokenContractAddress(candidate)) return '';
+  return candidate;
+}
+
 export const CRYPTO_WALLET_CONFIG: Record<
   'USDT' | 'BTC' | 'ETH',
   {
@@ -1159,7 +1189,7 @@ export const CRYPTO_WALLET_CONFIG: Record<
     label: 'Tether USD (TRC20)',
     chain: 'TRC20',
     networkLabel: 'TRON (TRC20)',
-    depositAddress: 'TJX9zK2B7YmNQ9sLo2481A2026SalomaTRC',
+    depositAddress: '',
     withdrawFee: 1.2,
     minDeposit: 1,
     minWithdraw: 1
@@ -1169,7 +1199,7 @@ export const CRYPTO_WALLET_CONFIG: Record<
     label: 'Bitcoin (BTC)',
     chain: 'BTC-Native',
     networkLabel: 'Bitcoin (Native SegWit bech32)',
-    depositAddress: 'bc1q9h6x743j2y0z5v4km89x2026saloma',
+    depositAddress: '',
     withdrawFee: 0.00025,
     minDeposit: computeMinCoinForUsd(68420, 'BTC', MIN_DEPOSIT_USD),
     minWithdraw: computeMinCoinForUsd(68420, 'BTC', MIN_WITHDRAW_USD)
@@ -1179,7 +1209,7 @@ export const CRYPTO_WALLET_CONFIG: Record<
     label: 'Ethereum (ERC20)',
     chain: 'ERC20',
     networkLabel: 'Ethereum Mainnet (ERC20)',
-    depositAddress: '0x992B28B3eB9229555C09F6eF83A8992026',
+    depositAddress: '',
     withdrawFee: 0.0035,
     minDeposit: computeMinCoinForUsd(3580, 'ETH', MIN_DEPOSIT_USD),
     minWithdraw: computeMinCoinForUsd(3580, 'ETH', MIN_WITHDRAW_USD)

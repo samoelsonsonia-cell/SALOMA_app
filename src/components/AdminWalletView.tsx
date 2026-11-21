@@ -21,7 +21,9 @@ import {
   formatCoinPrice,
   formatMinCoinQty,
   getBlockchainFromNetwork,
-  getNetworkShortLabel
+  getNetworkShortLabel,
+  isKnownTokenContractAddress,
+  resolveWalletAddressForChain
 } from '../services/priceAggregator';
 import { apiRequest } from '../lib/appwrite';
 
@@ -62,6 +64,7 @@ interface AdminWalletViewProps {
   showToast: (msg: string) => void;
   initialWallet?: AdminWalletRow | null;
   initialTransactions?: AdminWalletTxRow[];
+  initialWalletAddresses?: Record<string, string>;
   onWalletUpdated?: (wallet: AdminWalletRow, transactions: AdminWalletTxRow[]) => void;
 }
 
@@ -85,10 +88,12 @@ export const AdminWalletView: React.FC<AdminWalletViewProps> = ({
   showToast,
   initialWallet = null,
   initialTransactions = [],
+  initialWalletAddresses = {},
   onWalletUpdated
 }) => {
   const [walletRow, setWalletRow] = useState<AdminWalletRow | null>(initialWallet);
   const [txList, setTxList] = useState<AdminWalletTxRow[]>(initialTransactions);
+  const [walletAddresses, setWalletAddresses] = useState<Record<string, string>>(initialWalletAddresses);
   const [displayCurrency, setDisplayCurrency] = useState<'MGA' | 'USD'>('MGA');
   const [loading, setLoading] = useState<boolean>(false);
 
@@ -123,12 +128,19 @@ export const AdminWalletView: React.FC<AdminWalletViewProps> = ({
     if (Array.isArray(initialTransactions)) setTxList(initialTransactions);
   }, [initialTransactions]);
 
+  useEffect(() => {
+    if (initialWalletAddresses && Object.keys(initialWalletAddresses).length > 0) {
+      setWalletAddresses(initialWalletAddresses);
+    }
+  }, [initialWalletAddresses]);
+
   const loadAdminWallet = useCallback(async () => {
     setLoading(true);
     try {
       const data = await apiRequest<{
         wallet: AdminWalletRow;
         transactions: AdminWalletTxRow[];
+        walletAddresses?: Record<string, string>;
       }>('/api/admin/wallet', {
         adminPin,
         adminEmail,
@@ -136,6 +148,9 @@ export const AdminWalletView: React.FC<AdminWalletViewProps> = ({
       });
       if (data.wallet) setWalletRow(data.wallet);
       if (Array.isArray(data.transactions)) setTxList(data.transactions);
+      if (data.walletAddresses && typeof data.walletAddresses === 'object') {
+        setWalletAddresses(data.walletAddresses);
+      }
       if (data.wallet) {
         onWalletUpdated?.(data.wallet, data.transactions || []);
       }
@@ -188,6 +203,10 @@ export const AdminWalletView: React.FC<AdminWalletViewProps> = ({
   const activeNetwork = selectedWalletCoin.networks[selectedNetworkIndex] || selectedWalletCoin.networks[0];
   const activeBlockchain = getBlockchainFromNetwork(activeNetwork);
   const activeNetworkLabel = getNetworkShortLabel(activeNetwork);
+  const activeAdminDepositAddress = useMemo(
+    () => resolveWalletAddressForChain(walletAddresses, activeNetwork.chain, selectedWalletCoin.symbol),
+    [walletAddresses, activeNetwork.chain, selectedWalletCoin.symbol]
+  );
 
   const activeMinCoinQty = useMemo(
     () =>
@@ -304,6 +323,10 @@ export const AdminWalletView: React.FC<AdminWalletViewProps> = ({
       showToast(
         `Veuillez entrer une adresse de réception ${coinSym} (${activeBlockchain} • ${activeNetworkLabel}) valide.`
       );
+      return;
+    }
+    if (isKnownTokenContractAddress(withdrawAccountInput)) {
+      showToast('Adresse refusée : ceci est une adresse de contrat token, pas une adresse wallet.');
       return;
     }
 
@@ -750,7 +773,7 @@ export const AdminWalletView: React.FC<AdminWalletViewProps> = ({
                 Adresse de dépôt {selectedWalletCoin.symbol} ({activeNetwork.name})
               </span>
               <span className="font-mono text-xs text-white break-all block bg-[#100926] p-2.5 rounded-xl border border-purple-500/20">
-                {activeNetwork.addressExample}
+                {activeAdminDepositAddress || 'Génération de votre adresse wallet...'}
               </span>
               <div className="flex flex-wrap items-center justify-between gap-2 text-[10px] text-purple-300 pt-1">
                 <div className="text-left font-mono space-y-0.5">
@@ -766,13 +789,15 @@ export const AdminWalletView: React.FC<AdminWalletViewProps> = ({
                 </div>
                 <button
                   type="button"
+                  disabled={!activeAdminDepositAddress}
                   onClick={() => {
-                    navigator.clipboard?.writeText(activeNetwork.addressExample);
+                    if (!activeAdminDepositAddress) return;
+                    navigator.clipboard?.writeText(activeAdminDepositAddress);
                     setCopiedDepositAddress(true);
                     showToast(`✓ Adresse ${selectedWalletCoin.symbol} (${activeNetworkLabel}) copiée !`);
                     setTimeout(() => setCopiedDepositAddress(false), 2000);
                   }}
-                  className="px-3 py-1.5 rounded-lg bg-[#7C3AED] text-white text-[11px] font-bold inline-flex items-center gap-1"
+                  className="px-3 py-1.5 rounded-lg bg-[#7C3AED] text-white text-[11px] font-bold inline-flex items-center gap-1 disabled:opacity-50"
                 >
                   {copiedDepositAddress ? <Check className="w-3.5 h-3.5" /> : <Copy className="w-3.5 h-3.5" />}
                   <span>{copiedDepositAddress ? 'Adresse copiée ✓' : 'Copier adresse'}</span>
@@ -1026,9 +1051,20 @@ export const AdminWalletView: React.FC<AdminWalletViewProps> = ({
               </div>
 
               <div>
-                <label className="font-bold text-purple-300 block mb-1">
-                  Adresse de réception {selectedWalletCoin.symbol} ({activeBlockchain} • {activeNetworkLabel}) *
-                </label>
+                <div className="flex items-center justify-between gap-2 mb-1">
+                  <label className="font-bold text-purple-300 block">
+                    Adresse de réception {selectedWalletCoin.symbol} ({activeBlockchain} • {activeNetworkLabel}) *
+                  </label>
+                  {activeAdminDepositAddress && (
+                    <button
+                      type="button"
+                      onClick={() => setWithdrawAccountInput(activeAdminDepositAddress)}
+                      className="text-[10px] font-bold text-emerald-300 underline shrink-0"
+                    >
+                      Mon adresse
+                    </button>
+                  )}
+                </div>
                 <input
                   type="text"
                   value={withdrawAccountInput}
