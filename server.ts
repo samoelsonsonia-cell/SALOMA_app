@@ -21,7 +21,10 @@ import {
 import {
   TEST_MIN_USD,
   MIN_DEPOSIT_USD,
+  MIN_WITHDRAW_USD,
   MIN_SPOT_USD,
+  MIN_LEVIER_USD,
+  KYC_LEVEL2_WITHDRAW_THRESHOLD_USD,
   computeMinCoinForUsd,
   findCoinNetwork,
   formatMinCoinQty
@@ -37,7 +40,17 @@ import {
 
 const PORT = 3000;
 const USD_TO_MGA = 4750;
-const MIN_TRADE_AR = Math.round(TEST_MIN_USD * USD_TO_MGA);
+const MIN_TRADE_AR = Math.round(MIN_LEVIER_USD * USD_TO_MGA);
+
+function getEffectiveKycLevel(
+  userRow?: Record<string, unknown> | null,
+  authUser?: { emailVerification?: boolean } | null
+): number {
+  const dbLevel = Number(userRow?.kyc_level ?? 0) || 0;
+  const isEmailVerified = Boolean(userRow?.email_verifie) || Boolean(authUser?.emailVerification);
+  const isKyc2Validated = String(userRow?.kyc_statut || '').toLowerCase() === 'valide';
+  return Math.max(dbLevel, isEmailVerified ? 1 : 0, isKyc2Validated ? 2 : 0);
+}
 const SALOMA_SPREAD_RATE = 0; // PRIX SALOMA = PRIX EXACT BYBIT / OKX / BINANCE (1:1 temps réel)
 const BYBIT_HIDDEN_FEE_RATE = 0.001; // 0.1% Sponsor execution fee recovered inside Prix_Client = Prix_Bybit * (1 + Marge%)
 const TRADE_AR_KEY = '_trade_ar';
@@ -1326,21 +1339,21 @@ const CRYPTO_NETWORK_FEES: Record<string, { chain: string; fee: number; minDepos
     chain: 'TRC20',
     fee: 1.2,
     minDeposit: 1,
-    minWithdraw: 0.5,
+    minWithdraw: 1,
     depositAddress: 'TJX9zK2B7YmNQ9sLo2481A2026SalomaTRC'
   },
   BTC: {
     chain: 'Bitcoin',
     fee: 0.00025,
     minDeposit: computeMinCoinForUsd(68420, 'BTC', MIN_DEPOSIT_USD),
-    minWithdraw: computeMinCoinForUsd(68420, 'BTC', TEST_MIN_USD),
+    minWithdraw: computeMinCoinForUsd(68420, 'BTC', MIN_WITHDRAW_USD),
     depositAddress: 'bc1q9h6x743j2y0z5v4km89x2026saloma'
   },
   ETH: {
     chain: 'ERC20',
     fee: 0.0035,
     minDeposit: computeMinCoinForUsd(3580, 'ETH', MIN_DEPOSIT_USD),
-    minWithdraw: computeMinCoinForUsd(3580, 'ETH', TEST_MIN_USD),
+    minWithdraw: computeMinCoinForUsd(3580, 'ETH', MIN_WITHDRAW_USD),
     depositAddress: '0x992B28B3eB9229555C09F6eF83A8992026'
   }
 };
@@ -2866,7 +2879,10 @@ export function createSalomaApiApp() {
           databaseId: APPWRITE_DATABASE_ID,
           tableId: TABLES.USERS,
           rowId: req.userRow.$id,
-          data: { email_verifie: true }
+          data: {
+            email_verifie: true,
+            kyc_level: Math.max(Number(req.userRow.kyc_level || 0), 1)
+          }
         })) as unknown as Record<string, unknown> & { $id: string };
       }
 
@@ -3316,13 +3332,21 @@ export function createSalomaApiApp() {
           : fallbackCoinNetFee;
       const minWithdraw =
         effectivePriceUsd > 0
-          ? computeMinCoinForUsd(effectivePriceUsd, devise, TEST_MIN_USD)
+          ? computeMinCoinForUsd(effectivePriceUsd, devise, MIN_WITHDRAW_USD)
           : coinNet
           ? coinNet.minWithdraw
           : fallbackCfg.minWithdraw;
       const minWithdrawAccepted = Number((minWithdraw * 0.98).toFixed(8));
       const resolvedChain = chainLabel || coinNet?.chain || fallbackCfg?.chain || devise;
       const totalFrais = Number((salomaWithdrawFee + networkFee).toFixed(8));
+
+      const effectiveKycLevel = getEffectiveKycLevel(req.userRow, req.authUser);
+      if (effectiveKycLevel < 1) {
+        res.status(403).json({
+          error: 'Veuillez compléter la vérification email (KYC Niveau 1) avant de retirer.'
+        });
+        return;
+      }
 
       if (Number.isNaN(montant) || montant <= totalFrais) {
         res.status(400).json({
@@ -3332,10 +3356,25 @@ export function createSalomaApiApp() {
       }
       if (montant < minWithdrawAccepted) {
         res.status(400).json({
-          error: `Min Retrait : 0.5$ équivalent (${formatMinCoinQty(minWithdraw)} ${devise}).`
+          error: `Min Retrait : 1$ équivalent (${formatMinCoinQty(minWithdraw)} ${devise}).`
         });
         return;
       }
+
+      const withdrawUsdValue =
+        devise === 'USDT'
+          ? montant
+          : effectivePriceUsd > 0
+          ? Number((montant * effectivePriceUsd).toFixed(4))
+          : 0;
+      if (withdrawUsdValue > KYC_LEVEL2_WITHDRAW_THRESHOLD_USD && effectiveKycLevel < 2) {
+        res.status(403).json({
+          requiresKycLevel2: true,
+          error: 'Retrait supérieur à 1 000$ : vérification KYC Niveau 2 requise.'
+        });
+        return;
+      }
+
       if (!numero_compte || numero_compte.length < 6) {
         res.status(400).json({ error: `Veuillez entrer une adresse de réception ${devise} (${resolvedChain}) valide.` });
         return;
@@ -3599,12 +3638,22 @@ export function createSalomaApiApp() {
 
       let usdtAmount = 0;
       let cryptoQty = 0;
-      if (rawUnit === 'USDT' || rawUnit === 'USD') {
+      const isCryptoUnit = rawUnit !== 'USDT' && rawUnit !== 'USD';
+      if (!isCryptoUnit) {
         usdtAmount = Number(rawAmount.toFixed(4));
         cryptoQty = Number((usdtAmount / clientPrice).toFixed(8));
       } else {
         cryptoQty = Number(rawAmount.toFixed(8));
         usdtAmount = Number((cryptoQty * clientPrice).toFixed(4));
+        const minCoinSpot = computeMinCoinForUsd(clientPrice, baseSym, MIN_SPOT_USD);
+        if (
+          usdtAmount < MIN_SPOT_USD &&
+          usdtAmount >= 0.985 &&
+          minCoinSpot > 0 &&
+          cryptoQty >= Number((minCoinSpot * 0.99).toFixed(8))
+        ) {
+          usdtAmount = MIN_SPOT_USD;
+        }
       }
 
       if (usdtAmount < MIN_SPOT_USD || cryptoQty <= 0) {
@@ -3792,7 +3841,25 @@ export function createSalomaApiApp() {
       }
 
       const rawPair = String(req.body?.pair || req.body?.symbol || 'BTC/USDT').trim();
-      const amountUsdt = Number(req.body?.amount ?? req.body?.amountUsdt);
+      const baseSym = rawPair.toUpperCase().replace(/\/USDT$/i, '').trim();
+      const rawUnit = String(req.body?.unit || 'USDT').toUpperCase().trim();
+      const rawAmt = Number(req.body?.amount ?? req.body?.amountUsdt);
+      let amountUsdt = rawAmt;
+      if (rawUnit && rawUnit !== 'USDT' && rawUnit !== 'USD') {
+        const livePrice = getSalomaPriceUsd(baseSym);
+        if (livePrice > 0 && Number.isFinite(rawAmt) && rawAmt > 0) {
+          amountUsdt = Number((rawAmt * livePrice).toFixed(4));
+          const minCoinSpot = computeMinCoinForUsd(livePrice, baseSym, MIN_SPOT_USD);
+          if (
+            amountUsdt < MIN_SPOT_USD &&
+            amountUsdt >= 0.985 &&
+            minCoinSpot > 0 &&
+            rawAmt >= Number((minCoinSpot * 0.99).toFixed(8))
+          ) {
+            amountUsdt = MIN_SPOT_USD;
+          }
+        }
+      }
 
       const result = await executeBuy(salomaWalletAdapter, clientId, rawPair, amountUsdt);
       if (!result.ok) {
@@ -3868,7 +3935,7 @@ export function createSalomaApiApp() {
 
       if (Number.isNaN(montant) || montant < MIN_TRADE_AR) {
         res.status(400).json({
-          error: `Montant minimum de trading : ${MIN_TRADE_AR.toLocaleString('fr-FR')} Ar (Min : 0.5$).`
+          error: `Montant minimum de trading : ${MIN_TRADE_AR.toLocaleString('fr-FR')} Ar (Min : 5$).`
         });
         return;
       }

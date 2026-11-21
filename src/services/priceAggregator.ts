@@ -38,25 +38,32 @@ export interface Coin {
   networks: CoinNetwork[];
 }
 
-export const TEST_MIN_USD = 0.5;
+export const TEST_MIN_USD = 1;
 export const MIN_DEPOSIT_USD = 1;
+export const MIN_WITHDRAW_USD = 1;
 export const MIN_SPOT_USD = 1;
+export const MIN_LEVIER_USD = 5;
+export const KYC_LEVEL2_WITHDRAW_THRESHOLD_USD = 1000;
 
 export function computeMinCoinForUsd(
   priceUsd: number,
   symbol?: string,
-  targetUsd = TEST_MIN_USD
+  targetUsd = MIN_WITHDRAW_USD
 ): number {
   const cleanSym = String(symbol || '').toUpperCase().trim();
   if (cleanSym === 'USDT') return Number(targetUsd.toFixed(2));
   if (!Number.isFinite(priceUsd) || priceUsd <= 0) return 0;
 
   const raw = targetUsd / priceUsd;
-  if (raw >= 1000) return Math.round(raw);
-  if (raw >= 1) return Number(raw.toFixed(2));
-  if (raw >= 0.01) return Number(raw.toFixed(4));
-  if (raw >= 0.0001) return Number(raw.toFixed(5));
-  return Number(raw.toFixed(7));
+  let decimals = 7;
+  if (raw >= 1000) decimals = 0;
+  else if (raw >= 1) decimals = 2;
+  else if (raw >= 0.01) decimals = 4;
+  else if (raw >= 0.0001) decimals = 5;
+
+  const factor = Math.pow(10, decimals);
+  const ceiled = Math.ceil(raw * factor - 1e-9) / factor;
+  return Number(ceiled.toFixed(decimals));
 }
 
 export function formatMinCoinQty(qty: number): string {
@@ -1018,7 +1025,7 @@ const RAW_INITIAL_COINS: Coin[] = [
 
 export const INITIAL_COINS: Coin[] = RAW_INITIAL_COINS.map(coin => {
   const minDepositEquiv = computeMinCoinForUsd(coin.price, coin.symbol, MIN_DEPOSIT_USD);
-  const minWithdrawEquiv = computeMinCoinForUsd(coin.price, coin.symbol, TEST_MIN_USD);
+  const minWithdrawEquiv = computeMinCoinForUsd(coin.price, coin.symbol, MIN_WITHDRAW_USD);
   return {
     ...coin,
     networks: coin.networks.map(net => ({
@@ -1126,7 +1133,7 @@ export function findCoinNetwork(
       ? Number(livePriceUsd)
       : coin.price;
   const minDepositEquiv = computeMinCoinForUsd(effectivePrice, coin.symbol, MIN_DEPOSIT_USD);
-  const minWithdrawEquiv = computeMinCoinForUsd(effectivePrice, coin.symbol, TEST_MIN_USD);
+  const minWithdrawEquiv = computeMinCoinForUsd(effectivePrice, coin.symbol, MIN_WITHDRAW_USD);
   return {
     ...baseNet,
     minDeposit: minDepositEquiv > 0 ? minDepositEquiv : baseNet.minDeposit,
@@ -1155,7 +1162,7 @@ export const CRYPTO_WALLET_CONFIG: Record<
     depositAddress: 'TJX9zK2B7YmNQ9sLo2481A2026SalomaTRC',
     withdrawFee: 1.2,
     minDeposit: 1,
-    minWithdraw: 0.5
+    minWithdraw: 1
   },
   BTC: {
     symbol: 'BTC',
@@ -1165,7 +1172,7 @@ export const CRYPTO_WALLET_CONFIG: Record<
     depositAddress: 'bc1q9h6x743j2y0z5v4km89x2026saloma',
     withdrawFee: 0.00025,
     minDeposit: computeMinCoinForUsd(68420, 'BTC', MIN_DEPOSIT_USD),
-    minWithdraw: computeMinCoinForUsd(68420, 'BTC', TEST_MIN_USD)
+    minWithdraw: computeMinCoinForUsd(68420, 'BTC', MIN_WITHDRAW_USD)
   },
   ETH: {
     symbol: 'ETH',
@@ -1175,7 +1182,7 @@ export const CRYPTO_WALLET_CONFIG: Record<
     depositAddress: '0x992B28B3eB9229555C09F6eF83A8992026',
     withdrawFee: 0.0035,
     minDeposit: computeMinCoinForUsd(3580, 'ETH', MIN_DEPOSIT_USD),
-    minWithdraw: computeMinCoinForUsd(3580, 'ETH', TEST_MIN_USD)
+    minWithdraw: computeMinCoinForUsd(3580, 'ETH', MIN_WITHDRAW_USD)
   }
 };
 
@@ -1260,7 +1267,7 @@ export function mergeSalomaMarketPrices(
     const fresh = map.get(coin.symbol.toUpperCase());
     if (!fresh) return coin;
     const minDepositEquiv = computeMinCoinForUsd(fresh.price, coin.symbol, MIN_DEPOSIT_USD);
-    const minWithdrawEquiv = computeMinCoinForUsd(fresh.price, coin.symbol, TEST_MIN_USD);
+    const minWithdrawEquiv = computeMinCoinForUsd(fresh.price, coin.symbol, MIN_WITHDRAW_USD);
     return {
       ...coin,
       price: fresh.price,

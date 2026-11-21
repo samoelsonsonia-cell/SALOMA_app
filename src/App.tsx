@@ -79,7 +79,10 @@ import {
   formatCoinPrice,
   TEST_MIN_USD,
   MIN_DEPOSIT_USD,
+  MIN_WITHDRAW_USD,
   MIN_SPOT_USD,
+  MIN_LEVIER_USD,
+  KYC_LEVEL2_WITHDRAW_THRESHOLD_USD,
   computeMinCoinForUsd,
   formatMinCoinQty
 } from './services/priceAggregator';
@@ -101,7 +104,7 @@ import {
 
 const SESSION_STORAGE_KEY = 'saloma_session_secret';
 const USD_TO_MGA = 4750;
-const MIN_TRADE_AR = Math.round(TEST_MIN_USD * USD_TO_MGA);
+const MIN_TRADE_AR = Math.round(MIN_LEVIER_USD * USD_TO_MGA);
 
 // --- APPWRITE DOCUMENT INTERFACES ---
 
@@ -523,7 +526,7 @@ export default function App() {
   const activeNetworkLabel = getNetworkShortLabel(activeNetwork);
   const activeMinCoinQty = useMemo(
     () =>
-      computeMinCoinForUsd(selectedWalletCoin.price, selectedWalletCoin.symbol, TEST_MIN_USD) ||
+      computeMinCoinForUsd(selectedWalletCoin.price, selectedWalletCoin.symbol, MIN_WITHDRAW_USD) ||
       activeNetwork.minWithdraw,
     [selectedWalletCoin.price, selectedWalletCoin.symbol, activeNetwork.minWithdraw]
   );
@@ -1331,7 +1334,7 @@ export default function App() {
   const [selectedTimeframe, setSelectedTimeframe] = useState<'1m' | '5m' | '15m' | '1h' | '4h' | '1D'>('1m');
   const [leverageInput, setLeverageInput] = useState<string>('5');
   const [tradeAmountCurrency, setTradeAmountCurrency] = useState<string>('ARIARY');
-  const [tradeAmountInput, setTradeAmountInput] = useState<string>('5000');
+  const [tradeAmountInput, setTradeAmountInput] = useState<string>('25000');
   const [selectedTradePercent, setSelectedTradePercent] = useState<number | 'MAX' | null>(null);
   const [spotOrderUnit, setSpotOrderUnit] = useState<'USDT' | 'CRYPTO'>('USDT');
   const [spotAmountInput, setSpotAmountInput] = useState<string>('1');
@@ -1348,7 +1351,7 @@ export default function App() {
   // --- AUTO STRATEGIE (BOTS BINANCE: Spot Grid Bot & DCA Bot) ---
   const [selectedBotType, setSelectedBotType] = useState<'SPOT_GRID' | 'DCA'>('SPOT_GRID');
   const [botAmountCurrency, setBotAmountCurrency] = useState<string>('ARIARY');
-  const [botAmountInput, setBotAmountInput] = useState<string>('10000');
+  const [botAmountInput, setBotAmountInput] = useState<string>('25000');
   const [botGridProfile, setBotGridProfile] = useState<'Prudent (5 grilles)' | 'Équilibré (10 grilles)' | 'Dynamique (20 grilles)'>('Équilibré (10 grilles)');
   const [botDcaFreq, setBotDcaFreq] = useState<'Toutes les 1h' | 'Toutes les 4h' | 'Quotidien'>('Toutes les 4h');
   const [botDcaTp, setBotDcaTp] = useState<'+2%' | '+5%' | '+10%'>('+5%');
@@ -1595,15 +1598,26 @@ export default function App() {
       }
 
       const feeRate = (salomaFees.tradeFeePct || 0.1) / 100;
+      const minSpotCoinQty = computeMinCoinForUsd(selectedCoin.price, selectedCoin.symbol, MIN_SPOT_USD);
+      const isSpotMinValid =
+        spotOrderUsdtEquiv >= MIN_SPOT_USD ||
+        (spotOrderUnit === 'CRYPTO' &&
+          minSpotCoinQty > 0 &&
+          spotNumericInput >= Number((minSpotCoinQty * 0.99).toFixed(8)) &&
+          spotOrderUsdtEquiv >= 0.985);
+      const effectiveSpotUsdtAmount =
+        spotOrderUnit === 'CRYPTO' && isSpotMinValid
+          ? Math.max(MIN_SPOT_USD, Number(spotOrderUsdtEquiv.toFixed(4)))
+          : Number(spotOrderUsdtEquiv.toFixed(4));
 
       // BUY -> executeBuy(clientId, pair, amountUsdt) : crée ClientTrade interne + hedge BYBIT en arrière-plan
       if (side === 'BUY') {
-        if (spotNumericInput <= 0 || spotOrderUsdtEquiv < MIN_SPOT_USD) {
+        if (spotNumericInput <= 0 || !isSpotMinValid) {
           showToast('Min : 1$ (1.00 USDT).');
           return false;
         }
-        const estimatedFeeUsdt = Number((spotOrderUsdtEquiv * feeRate).toFixed(6));
-        const requiredBuyUsdt = Number((spotOrderUsdtEquiv + estimatedFeeUsdt).toFixed(6));
+        const estimatedFeeUsdt = Number((effectiveSpotUsdtAmount * feeRate).toFixed(6));
+        const requiredBuyUsdt = Number((effectiveSpotUsdtAmount + estimatedFeeUsdt).toFixed(6));
 
         if (clientUsdtBalance <= 0 || requiredBuyUsdt > clientUsdtBalance + 1e-8) {
           showToast(
@@ -1632,7 +1646,8 @@ export default function App() {
             token: sessionToken,
             body: {
               pair: `${selectedCoin.symbol}/USDT`,
-              amount: Number(spotOrderUsdtEquiv.toFixed(4))
+              amount: effectiveSpotUsdtAmount,
+              unit: 'USDT'
             }
           });
           await loadDashboard(sessionToken);
@@ -1699,7 +1714,7 @@ export default function App() {
       }
 
       // Sinon vente d'actifs crypto détenus dans le wallet Spot SALOMA
-      if (spotNumericInput <= 0 || spotOrderUsdtEquiv < MIN_SPOT_USD) {
+      if (spotNumericInput <= 0 || !isSpotMinValid) {
         showToast('Min : 1$ (1.00 USDT).');
         return false;
       }
@@ -1796,7 +1811,7 @@ export default function App() {
       const totalRequiredAr = numericAmountAr + estimatedFeeAr;
 
       if (numericAmountAr < MIN_TRADE_AR) {
-        showToast(`Min : 0.5$ (${MIN_TRADE_AR.toLocaleString('fr-FR')} Ar).`);
+        showToast(`Min : 5$ (${MIN_TRADE_AR.toLocaleString('fr-FR')} Ar).`);
         return false;
       }
       if (soldeCompteTradeAr <= 0 || totalRequiredAr > soldeCompteTradeAr) {
@@ -1867,8 +1882,15 @@ export default function App() {
     if (!(await ensureOnlineOrBlock())) return;
 
     if (tradingModeType === 'SPOT') {
+      const minSpotCoinQty = computeMinCoinForUsd(selectedCoin.price, selectedCoin.symbol, MIN_SPOT_USD);
+      const isSpotMinValid =
+        spotOrderUsdtEquiv >= MIN_SPOT_USD ||
+        (spotOrderUnit === 'CRYPTO' &&
+          minSpotCoinQty > 0 &&
+          spotNumericInput >= Number((minSpotCoinQty * 0.99).toFixed(8)) &&
+          spotOrderUsdtEquiv >= 0.985);
       if (side === 'BUY') {
-        if (spotOrderUsdtEquiv < MIN_SPOT_USD) {
+        if (!isSpotMinValid) {
           showToast('Min : 1$ (1.00 USDT).');
           return;
         }
@@ -1880,7 +1902,7 @@ export default function App() {
         showToast(`🤖 AUTO BUY Spot activé sur ${selectedCoin.symbol}/USDT`);
         void handleExecuteSpotOrder('BUY');
       } else {
-        if (spotOrderUsdtEquiv < MIN_SPOT_USD) {
+        if (!isSpotMinValid) {
           showToast('Min : 1$ (1.00 USDT).');
           return;
         }
@@ -1896,7 +1918,7 @@ export default function App() {
     }
 
     if (numericAmountAr < MIN_TRADE_AR) {
-      showToast(`Min : 0.5$ (${MIN_TRADE_AR.toLocaleString('fr-FR')} Ar).`);
+      showToast(`Min : 5$ (${MIN_TRADE_AR.toLocaleString('fr-FR')} Ar).`);
       return;
     }
     if (soldeCompteTradeAr <= 0 || numericAmountAr > soldeCompteTradeAr) {
@@ -1974,7 +1996,7 @@ export default function App() {
       return;
     }
     if (numericBotAmountAr < MIN_TRADE_AR) {
-      showToast(`Min : 0.5$ (${MIN_TRADE_AR.toLocaleString('fr-FR')} Ar).`);
+      showToast(`Min : 5$ (${MIN_TRADE_AR.toLocaleString('fr-FR')} Ar).`);
       return;
     }
 
@@ -2208,8 +2230,13 @@ export default function App() {
   };
 
   const handleOpenWithdraw = () => {
-    if ((userRow?.kyc_level ?? 0) < 2) {
-      showToast('Veuillez compléter votre KYC avant de retirer');
+    const effectiveKycLevel = Math.max(
+      userRow?.kyc_level ?? 0,
+      userRow?.email_verifie ? 1 : 0,
+      userRow?.kyc_statut === 'valide' ? 2 : 0
+    );
+    if (effectiveKycLevel < 1) {
+      showToast('Veuillez vérifier votre email (KYC Niveau 1) avant de retirer');
       setActiveModal('kyc');
       return;
     }
@@ -2279,15 +2306,27 @@ export default function App() {
       return;
     }
     if (amt < Number((activeMinCoinQty * 0.98).toFixed(8))) {
-      showToast(`Min Retrait : 0.5$ équivalent (${activeMinCoinQtyLabel} ${coinSym}).`);
-      return;
-    }
-    if (!withdrawAccountInput.trim() || withdrawAccountInput.trim().length < 6) {
-      showToast(`Veuillez entrer une adresse de réception ${coinSym} (${activeBlockchain} • ${activeNetworkLabel}) valide.`);
+      showToast(`Min Retrait : 1$ équivalent (${activeMinCoinQtyLabel} ${coinSym}).`);
       return;
     }
 
     const coinPrice = selectedWalletCoin.price || 0;
+    const withdrawUsd = coinSym === 'USDT' ? amt : amt * coinPrice;
+    const effectiveKycLevel = Math.max(
+      userRow?.kyc_level ?? 0,
+      userRow?.email_verifie ? 1 : 0,
+      userRow?.kyc_statut === 'valide' ? 2 : 0
+    );
+    if (withdrawUsd > KYC_LEVEL2_WITHDRAW_THRESHOLD_USD && effectiveKycLevel < 2) {
+      showToast('Retrait supérieur à 1 000$ : vérification KYC Niveau 2 requise.');
+      setActiveModal('kyc');
+      return;
+    }
+
+    if (!withdrawAccountInput.trim() || withdrawAccountInput.trim().length < 6) {
+      showToast(`Veuillez entrer une adresse de réception ${coinSym} (${activeBlockchain} • ${activeNetworkLabel}) valide.`);
+      return;
+    }
     setWithdrawSubmitting(true);
     try {
       const sendWithdraw = async (tok: string) =>
@@ -2336,6 +2375,9 @@ export default function App() {
     } catch (err) {
       withdrawTurnstileTokenRef.current = '';
       setWithdrawTurnstileReset(k => k + 1);
+      if ((err as ApiError)?.requiresKycLevel2) {
+        setActiveModal('kyc');
+      }
       showToast(err instanceof Error ? err.message : 'Erreur lors du retrait.');
     } finally {
       setWithdrawSubmitting(false);
@@ -5868,7 +5910,7 @@ export default function App() {
                           <div className="space-y-1.5">
                             <div className="flex items-center justify-between text-[10px] font-bold text-purple-300 px-0.5">
                               <span>
-                                Montant ({selectedTradeCurrencyObj.shortLabel}) • <strong className="text-emerald-300">Min : 0.5$</strong>
+                                Montant ({selectedTradeCurrencyObj.shortLabel}) • <strong className="text-emerald-300">Min : 5$</strong>
                               </span>
                               <span className="font-mono text-emerald-300">
                                 {tradeAmountCurrency === 'ARIARY'
@@ -6154,7 +6196,7 @@ export default function App() {
                       <div>
                         <div className="flex justify-between items-center text-[11px] mb-1">
                           <label className="font-bold text-purple-300">
-                            Montant investi ({selectedBotCurrencyObj.shortLabel}) • <strong className="text-emerald-300">Min : 0.5$</strong>
+                            Montant investi ({selectedBotCurrencyObj.shortLabel}) • <strong className="text-emerald-300">Min : 5$</strong>
                           </label>
                           <span className="font-mono text-[10px] text-emerald-300">
                             {botAmountCurrency === 'ARIARY'
@@ -6168,7 +6210,7 @@ export default function App() {
                             inputMode="decimal"
                             value={botAmountInput}
                             onChange={e => setBotAmountInput(sanitizeDecimalInput(e.target.value))}
-                            placeholder={`Ex: ${botAmountCurrency === 'ARIARY' ? '10000' : '2.5'}`}
+                            placeholder={`Ex: ${botAmountCurrency === 'ARIARY' ? '25000' : '5'}`}
                             className="flex-1 px-3 py-2 rounded-xl bg-[#100926] border border-purple-500/40 text-white font-mono font-bold text-xs focus:outline-none focus:border-[#8B5CF6]"
                           />
                           <select
@@ -7022,7 +7064,7 @@ export default function App() {
                     Montant à retirer ({selectedWalletCoin.symbol}) *
                   </label>
                   <span className="text-[10px] font-mono text-emerald-300 font-bold">
-                    Min : {activeMinCoinQtyLabel} {selectedWalletCoin.symbol} (0.5$)
+                    Min : {activeMinCoinQtyLabel} {selectedWalletCoin.symbol} (1$)
                   </span>
                 </div>
                 <div className="relative">
@@ -7031,7 +7073,7 @@ export default function App() {
                     inputMode="decimal"
                     value={withdrawAmountInput}
                     onChange={e => setWithdrawAmountInput(e.target.value.replace(/[^0-9.]/g, ''))}
-                    placeholder={`Min: ${activeMinCoinQtyLabel} ${selectedWalletCoin.symbol} (0.5$)`}
+                    placeholder={`Min: ${activeMinCoinQtyLabel} ${selectedWalletCoin.symbol} (1$)`}
                     className="w-full px-3 py-2.5 pr-16 rounded-xl bg-[#150D2E] border-2 border-[#8B5CF6]/40 text-white font-mono font-bold"
                   />
                   <button

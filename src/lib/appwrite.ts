@@ -40,6 +40,7 @@ export interface ApiError extends Error {
   status?: number;
   turnstileRetry?: boolean;
   liquidityUnavailable?: boolean;
+  requiresKycLevel2?: boolean;
   isNetworkError?: boolean;
 }
 
@@ -224,6 +225,9 @@ export async function apiRequest<T>(
     }
     if (data?.liquidityUnavailable) {
       err.liquidityUnavailable = true;
+    }
+    if (data?.requiresKycLevel2) {
+      err.requiresKycLevel2 = true;
     }
     throw err;
   }
