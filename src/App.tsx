@@ -78,6 +78,8 @@ import {
   subscribeToPricesWebSocket,
   formatCoinPrice,
   TEST_MIN_USD,
+  MIN_DEPOSIT_USD,
+  MIN_SPOT_USD,
   computeMinCoinForUsd,
   formatMinCoinQty
 } from './services/priceAggregator';
@@ -522,12 +524,22 @@ export default function App() {
   const activeMinCoinQty = useMemo(
     () =>
       computeMinCoinForUsd(selectedWalletCoin.price, selectedWalletCoin.symbol, TEST_MIN_USD) ||
-      activeNetwork.minDeposit,
-    [selectedWalletCoin.price, selectedWalletCoin.symbol, activeNetwork.minDeposit]
+      activeNetwork.minWithdraw,
+    [selectedWalletCoin.price, selectedWalletCoin.symbol, activeNetwork.minWithdraw]
   );
   const activeMinCoinQtyLabel = useMemo(
     () => formatMinCoinQty(activeMinCoinQty),
     [activeMinCoinQty]
+  );
+  const activeMinDepositCoinQty = useMemo(
+    () =>
+      computeMinCoinForUsd(selectedWalletCoin.price, selectedWalletCoin.symbol, MIN_DEPOSIT_USD) ||
+      activeNetwork.minDeposit,
+    [selectedWalletCoin.price, selectedWalletCoin.symbol, activeNetwork.minDeposit]
+  );
+  const activeMinDepositCoinQtyLabel = useMemo(
+    () => formatMinCoinQty(activeMinDepositCoinQty),
+    [activeMinDepositCoinQty]
   );
   const availableBlockchains = useMemo(
     () => Array.from(new Set(selectedWalletCoin.networks.map(getBlockchainFromNetwork))),
@@ -1313,16 +1325,16 @@ export default function App() {
   };
 
   // --- TRADING STATE & ACTIONS (APPWRITE) ---
-  const LEVERAGE_PRESETS = [1, 5, 10, 25, 50, 100] as const;
+  const LEVERAGE_PRESETS = [1, 2, 3, 4, 5] as const;
   const [tradeStrategyChoice, setTradeStrategyChoice] = useState<'MANUEL' | 'BOT'>('MANUEL');
   const [tradingModeType, setTradingModeType] = useState<'SPOT' | 'LEVIER'>('LEVIER');
   const [selectedTimeframe, setSelectedTimeframe] = useState<'1m' | '5m' | '15m' | '1h' | '4h' | '1D'>('1m');
-  const [leverageInput, setLeverageInput] = useState<string>('10');
+  const [leverageInput, setLeverageInput] = useState<string>('5');
   const [tradeAmountCurrency, setTradeAmountCurrency] = useState<string>('ARIARY');
   const [tradeAmountInput, setTradeAmountInput] = useState<string>('5000');
   const [selectedTradePercent, setSelectedTradePercent] = useState<number | 'MAX' | null>(null);
   const [spotOrderUnit, setSpotOrderUnit] = useState<'USDT' | 'CRYPTO'>('USDT');
-  const [spotAmountInput, setSpotAmountInput] = useState<string>('10');
+  const [spotAmountInput, setSpotAmountInput] = useState<string>('1');
   const [selectedSpotPercent, setSelectedSpotPercent] = useState<number | 'MAX' | null>(null);
   const [spotUnavailableNotice, setSpotUnavailableNotice] = useState<string | null>(null);
   const [tradeSubmitting, setTradeSubmitting] = useState<boolean>(false);
@@ -1486,8 +1498,8 @@ export default function App() {
 
   const numericLeverage = useMemo(() => {
     const val = parseFloat(leverageInput);
-    if (isNaN(val) || val <= 0) return 1;
-    return Math.min(500, Math.round(val));
+    if (isNaN(val) || val <= 0) return 5;
+    return Math.min(5, Math.max(1, Math.round(val)));
   }, [leverageInput]);
 
   const numericAmountAr = useMemo(() => {
@@ -1586,8 +1598,8 @@ export default function App() {
 
       // BUY -> executeBuy(clientId, pair, amountUsdt) : crée ClientTrade interne + hedge BYBIT en arrière-plan
       if (side === 'BUY') {
-        if (spotNumericInput <= 0 || spotOrderUsdtEquiv < TEST_MIN_USD) {
-          showToast('Min : 0.5$ (0.50 USDT).');
+        if (spotNumericInput <= 0 || spotOrderUsdtEquiv < MIN_SPOT_USD) {
+          showToast('Min : 1$ (1.00 USDT).');
           return false;
         }
         const estimatedFeeUsdt = Number((spotOrderUsdtEquiv * feeRate).toFixed(6));
@@ -1687,8 +1699,8 @@ export default function App() {
       }
 
       // Sinon vente d'actifs crypto détenus dans le wallet Spot SALOMA
-      if (spotNumericInput <= 0 || spotOrderUsdtEquiv < TEST_MIN_USD) {
-        showToast('Min : 0.5$ (0.50 USDT).');
+      if (spotNumericInput <= 0 || spotOrderUsdtEquiv < MIN_SPOT_USD) {
+        showToast('Min : 1$ (1.00 USDT).');
         return false;
       }
       const estimatedFeeUsdt = Number((spotOrderUsdtEquiv * feeRate).toFixed(6));
@@ -1856,8 +1868,8 @@ export default function App() {
 
     if (tradingModeType === 'SPOT') {
       if (side === 'BUY') {
-        if (spotOrderUsdtEquiv < TEST_MIN_USD) {
-          showToast('Min : 0.5$ (0.50 USDT).');
+        if (spotOrderUsdtEquiv < MIN_SPOT_USD) {
+          showToast('Min : 1$ (1.00 USDT).');
           return;
         }
         if (spotOrderUsdtEquiv > clientUsdtBalance) {
@@ -1868,8 +1880,8 @@ export default function App() {
         showToast(`🤖 AUTO BUY Spot activé sur ${selectedCoin.symbol}/USDT`);
         void handleExecuteSpotOrder('BUY');
       } else {
-        if (spotOrderUsdtEquiv < TEST_MIN_USD) {
-          showToast('Min : 0.5$ (0.50 USDT).');
+        if (spotOrderUsdtEquiv < MIN_SPOT_USD) {
+          showToast('Min : 1$ (1.00 USDT).');
           return;
         }
         if (spotOrderCryptoEquiv > clientSelectedCryptoBalance) {
@@ -2213,8 +2225,8 @@ export default function App() {
     if (!(await ensureOnlineOrBlock())) return;
     const coinSym = selectedWalletCoin.symbol.toUpperCase();
     const amt = parseFloat(depositAmountInput);
-    if (isNaN(amt) || amt < Number((activeMinCoinQty * 0.98).toFixed(8))) {
-      showToast(`Min Dépôt : 0.5$ équivalent (${activeMinCoinQtyLabel} ${coinSym}).`);
+    if (isNaN(amt) || amt < Number((activeMinDepositCoinQty * 0.98).toFixed(8))) {
+      showToast(`Min Dépôt : 1$ équivalent (${activeMinDepositCoinQtyLabel} ${coinSym}).`);
       return;
     }
     if (!depositAccountInput.trim() || depositAccountInput.trim().length < 6) {
@@ -3882,7 +3894,7 @@ export default function App() {
               <div className="bg-[#1F1042]/90 border border-[#8B5CF6]/50 p-2.5 rounded-2xl flex flex-col items-center">
                 <BarChart2 className="w-5 h-5 text-emerald-400 mb-1" />
                 <span className="text-[11px] font-bold text-white">Trading</span>
-                <span className="text-[9px] text-purple-300/70">x500</span>
+                <span className="text-[9px] text-purple-300/70">x5</span>
               </div>
               <div className="bg-[#1F1042]/90 border border-[#8B5CF6]/50 p-2.5 rounded-2xl flex flex-col items-center">
                 <Gift className="w-5 h-5 text-amber-400 mb-1" />
@@ -5656,7 +5668,7 @@ export default function App() {
                             : 'text-purple-300 hover:text-white'
                         }`}
                       >
-                        LEVIER (x1 à x500)
+                        LEVIER (x1 à x5)
                       </button>
                     </div>
 
@@ -5692,7 +5704,7 @@ export default function App() {
                           <div className="space-y-1.5">
                             <div className="flex items-center justify-between text-[10px] font-bold text-purple-300 px-0.5">
                               <span>
-                                Montant ({spotOrderUnit === 'USDT' ? 'USDT' : selectedCoin.symbol}) • <strong className="text-emerald-300">Min : 0.5$</strong>
+                                Montant ({spotOrderUnit === 'USDT' ? 'USDT' : selectedCoin.symbol}) • <strong className="text-emerald-300">Min : 1$</strong>
                               </span>
                               <span className="font-mono text-emerald-300">
                                 {spotOrderUnit === 'USDT'
@@ -5713,8 +5725,8 @@ export default function App() {
                                   }}
                                   placeholder={
                                     spotOrderUnit === 'USDT'
-                                      ? 'Min : 0.5$ (0.5 USDT)'
-                                      : `Min : 0.5$ (${formatMinCoinQty(computeMinCoinForUsd(selectedCoin.price, selectedCoin.symbol, TEST_MIN_USD))} ${selectedCoin.symbol})`
+                                      ? 'Min : 1$ (1 USDT)'
+                                      : `Min : 1$ (${formatMinCoinQty(computeMinCoinForUsd(selectedCoin.price, selectedCoin.symbol, MIN_SPOT_USD))} ${selectedCoin.symbol})`
                                   }
                                   className="w-full px-2.5 py-1.5 rounded-xl bg-[#150D2E] border border-purple-500/40 text-white text-xs font-mono font-bold focus:outline-none focus:border-[#8B5CF6]"
                                 />
@@ -5800,7 +5812,9 @@ export default function App() {
                         <div className="space-y-2">
                           <div className="p-2.5 rounded-xl bg-[#150D2E] border border-[#8B5CF6]/50 space-y-2">
                             <div className="flex justify-between items-center">
-                              <span className="text-[10px] font-black text-purple-200">LEVIER (x1–x500)</span>
+                              <span className="text-[10px] font-black text-purple-200">
+                                Levier : {numericLeverage}x (Max 5x)
+                              </span>
                               <button
                                 type="button"
                                 onClick={() => setTradingModeType('SPOT')}
@@ -5809,7 +5823,7 @@ export default function App() {
                                 <ArrowLeft className="w-2.5 h-2.5" /> SPOT
                               </button>
                             </div>
-                            <div className="grid grid-cols-6 gap-1">
+                            <div className="grid grid-cols-5 gap-1">
                               {LEVERAGE_PRESETS.map(levPreset => {
                                 const isSelected = numericLeverage === levPreset;
                                 return (
@@ -5833,7 +5847,15 @@ export default function App() {
                                 type="text"
                                 inputMode="numeric"
                                 value={leverageInput}
-                                onChange={e => setLeverageInput(e.target.value.replace(/[^0-9]/g, ''))}
+                                onChange={e => {
+                                  const digits = e.target.value.replace(/[^0-9]/g, '');
+                                  if (!digits) {
+                                    setLeverageInput('');
+                                    return;
+                                  }
+                                  const clamped = Math.min(5, Math.max(1, parseInt(digits, 10)));
+                                  setLeverageInput(String(clamped));
+                                }}
                                 className="w-full px-2.5 py-1.5 rounded-lg bg-[#1F1042] border border-[#8B5CF6]/60 text-white font-mono font-black text-xs text-center"
                               />
                               <span className="font-mono font-black text-purple-200 text-xs">x</span>
@@ -6792,10 +6814,10 @@ export default function App() {
               <div className="flex flex-wrap items-center justify-between gap-2 text-[10px] text-purple-300 pt-1">
                 <div className="text-left font-mono space-y-0.5">
                   <span className="block text-emerald-300 font-bold">
-                    Min Dépôt : 0.5$ équivalent (ex: 0.5 USDT)
+                    Min Dépôt : 1$ équivalent (ex: 1 USDT)
                   </span>
                   <span className="block text-purple-200">
-                    Min {selectedWalletCoin.symbol} : {activeMinCoinQtyLabel} {selectedWalletCoin.symbol}
+                    Min {selectedWalletCoin.symbol} : {activeMinDepositCoinQtyLabel} {selectedWalletCoin.symbol}
                   </span>
                   <span className="block text-purple-400">Coût réseau : {activeNetwork.withdrawFee} {selectedWalletCoin.symbol}</span>
                 </div>
@@ -6825,7 +6847,7 @@ export default function App() {
                   inputMode="decimal"
                   value={depositAmountInput}
                   onChange={e => setDepositAmountInput(e.target.value.replace(/[^0-9.]/g, ''))}
-                  placeholder={`Min: ${activeMinCoinQtyLabel} ${selectedWalletCoin.symbol} (0.5$)`}
+                  placeholder={`Min: ${activeMinDepositCoinQtyLabel} ${selectedWalletCoin.symbol} (1$)`}
                   className="w-full px-3 py-2.5 rounded-xl bg-[#150D2E] border-2 border-[#8B5CF6]/40 text-white font-mono font-bold"
                 />
               </div>

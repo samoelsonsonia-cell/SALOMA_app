@@ -20,6 +20,8 @@ import {
 } from 'node-appwrite';
 import {
   TEST_MIN_USD,
+  MIN_DEPOSIT_USD,
+  MIN_SPOT_USD,
   computeMinCoinForUsd,
   findCoinNetwork,
   formatMinCoinQty
@@ -1323,21 +1325,21 @@ const CRYPTO_NETWORK_FEES: Record<string, { chain: string; fee: number; minDepos
   USDT: {
     chain: 'TRC20',
     fee: 1.2,
-    minDeposit: 0.5,
+    minDeposit: 1,
     minWithdraw: 0.5,
     depositAddress: 'TJX9zK2B7YmNQ9sLo2481A2026SalomaTRC'
   },
   BTC: {
     chain: 'Bitcoin',
     fee: 0.00025,
-    minDeposit: computeMinCoinForUsd(68420, 'BTC', TEST_MIN_USD),
+    minDeposit: computeMinCoinForUsd(68420, 'BTC', MIN_DEPOSIT_USD),
     minWithdraw: computeMinCoinForUsd(68420, 'BTC', TEST_MIN_USD),
     depositAddress: 'bc1q9h6x743j2y0z5v4km89x2026saloma'
   },
   ETH: {
     chain: 'ERC20',
     fee: 0.0035,
-    minDeposit: computeMinCoinForUsd(3580, 'ETH', TEST_MIN_USD),
+    minDeposit: computeMinCoinForUsd(3580, 'ETH', MIN_DEPOSIT_USD),
     minWithdraw: computeMinCoinForUsd(3580, 'ETH', TEST_MIN_USD),
     depositAddress: '0x992B28B3eB9229555C09F6eF83A8992026'
   }
@@ -3217,7 +3219,7 @@ export function createSalomaApiApp() {
       }
       const minDeposit =
         livePriceUsd > 0
-          ? computeMinCoinForUsd(livePriceUsd, devise, TEST_MIN_USD)
+          ? computeMinCoinForUsd(livePriceUsd, devise, MIN_DEPOSIT_USD)
           : coinNet
           ? coinNet.minDeposit
           : fallbackCfg.minDeposit;
@@ -3226,7 +3228,7 @@ export function createSalomaApiApp() {
 
       if (Number.isNaN(montant) || montant < minDepositAccepted) {
         res.status(400).json({
-          error: `Min Dépôt : 0.5$ équivalent (${formatMinCoinQty(minDeposit)} ${devise}).`
+          error: `Min Dépôt : 1$ équivalent (${formatMinCoinQty(minDeposit)} ${devise}).`
         });
         return;
       }
@@ -3605,8 +3607,8 @@ export function createSalomaApiApp() {
         usdtAmount = Number((cryptoQty * clientPrice).toFixed(4));
       }
 
-      if (usdtAmount < TEST_MIN_USD || cryptoQty <= 0) {
-        res.status(400).json({ error: 'Montant minimum Spot SALOMA : 0.50 USDT (Min : 0.5$).' });
+      if (usdtAmount < MIN_SPOT_USD || cryptoQty <= 0) {
+        res.status(400).json({ error: 'Montant minimum Spot SALOMA : 1.00 USDT (Min : 1$).' });
         return;
       }
 
@@ -3860,7 +3862,7 @@ export function createSalomaApiApp() {
       const montant = Number(req.body?.montant); // in Ar from Compte Trade
       const liveSalomaPrice = getSalomaPriceUsd(baseSym);
       const prix = liveSalomaPrice > 0 ? liveSalomaPrice : Number(req.body?.prix);
-      const leverage = Math.min(500, Math.max(1, Math.round(Number(req.body?.leverage) || 1)));
+      const leverage = Math.min(5, Math.max(1, Math.round(Number(req.body?.leverage) || 5)));
       const baseMode = String(req.body?.mode || 'Manuel').replace(/\s*\[(BYBIT|OKX|BINANCE)\]/gi, '').trim();
       const mode = baseMode || 'Manuel';
 
