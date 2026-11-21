@@ -54,6 +54,11 @@ function getEffectiveKycLevel(
 const SALOMA_SPREAD_RATE = 0; // PRIX SALOMA = PRIX EXACT BYBIT / OKX / BINANCE (1:1 temps réel)
 const BYBIT_HIDDEN_FEE_RATE = 0.001; // 0.1% Sponsor execution fee recovered inside Prix_Client = Prix_Bybit * (1 + Marge%)
 const TRADE_AR_KEY = '_trade_ar';
+const ADMIN_WALLET_USER_ID = '__SALOMA_ADMIN_WALLET__';
+const ADMIN_WALLET_FALLBACK_FILE =
+  process.env.VERCEL || process.env.VERCEL_ENV || process.env.AWS_LAMBDA_FUNCTION_NAME
+    ? path.join(os.tmpdir(), '.saloma-admin-wallet.json')
+    : path.resolve(process.cwd(), '.saloma-admin-wallet.json');
 const APIS_CONFIG_FILE =
   process.env.VERCEL || process.env.VERCEL_ENV || process.env.AWS_LAMBDA_FUNCTION_NAME
     ? path.join(os.tmpdir(), '.saloma-apis.json')
@@ -3929,7 +3934,7 @@ export function createSalomaApiApp() {
       const montant = Number(req.body?.montant); // in Ar from Compte Trade
       const liveSalomaPrice = getSalomaPriceUsd(baseSym);
       const prix = liveSalomaPrice > 0 ? liveSalomaPrice : Number(req.body?.prix);
-      const leverage = Math.min(5, Math.max(1, Math.round(Number(req.body?.leverage) || 5)));
+      const leverage = Math.min(100, Math.max(1, Math.round(Number(req.body?.leverage) || 5)));
       const baseMode = String(req.body?.mode || 'Manuel').replace(/\s*\[(BYBIT|OKX|BINANCE)\]/gi, '').trim();
       const mode = baseMode || 'Manuel';
 
@@ -5302,7 +5307,10 @@ export function createSalomaApiApp() {
         addProfit(tsMs, 'echangeAr', Math.round(feeAr));
       }
 
-      for (const tx of txRes.rows) {
+      const clientTxRows = txRes.rows.filter(tx => String(tx.user_id || '') !== ADMIN_WALLET_USER_ID);
+      const clientWalletRows = walletsRes.rows.filter(w => String(w.user_id || '') !== ADMIN_WALLET_USER_ID);
+
+      for (const tx of clientTxRows) {
         if (tx.type !== 'retrait' || tx.statut === 'refuse') continue;
         const tsMs = Date.parse(String(tx.date || tx.$createdAt || '')) || nowMs;
         const dev = String(tx.devise || 'USDT').toUpperCase();
@@ -5312,9 +5320,9 @@ export function createSalomaApiApp() {
       }
 
       // SÉPARATION STRICTE DES FONDS :
-      // 1. Total Argent Clients dans SALOMA (Portefeuilles clients uniquement, JAMAIS mélangé avec Bybit)
+      // 1. Total Argent Clients dans SALOMA (Portefeuilles clients uniquement, JAMAIS mélangé avec Bybit ni Portefeuille Admin)
       let totalClientsBalanceAr = 0;
-      for (const w of walletsRes.rows) {
+      for (const w of clientWalletRows) {
         const serialized = serializeWallet(w as unknown as Record<string, unknown>);
         const fiatTotalAr = Number(serialized.solde_total) || 0;
         const coins = parseCoinsJson(w.coins_json);
@@ -5380,14 +5388,17 @@ export function createSalomaApiApp() {
       );
 
       const marketComparison = buildAdminMarketComparison();
+      const adminOwnWalletData = await loadAdminOwnWalletAndTxs();
 
       res.json({
         users: usersRes.rows.map(r => sanitizeUserRow(r as unknown as Record<string, unknown>)),
-        transactions: txRes.rows,
+        transactions: clientTxRows,
         trades: tradesRes.rows,
         echanges: echangesRes.rows,
         problemes: probRes.rows,
         profits,
+        adminWallet: adminOwnWalletData.wallet,
+        adminWalletTransactions: adminOwnWalletData.transactions,
         exchangeSummary: {
           totalBybitLiquidityUsdt,
           bybitLiquidityConnected: bybitLiveBal.connected,
@@ -6075,6 +6086,535 @@ export function createSalomaApiApp() {
           isCustomConfigured: false
         }
       });
+    }
+  });
+
+  // ========================================================
+  // 8C. PORTEFEUILLE ADMIN ISOLÉ (ARGENT PROPRE DE L'ADMIN UNIQUEMENT)
+  // ========================================================
+  interface FallbackAdminWalletStore {
+    wallet: Record<string, unknown>;
+    transactions: Array<Record<string, unknown>>;
+  }
+
+  function readAdminWalletFallback(): FallbackAdminWalletStore {
+    try {
+      if (fs.existsSync(ADMIN_WALLET_FALLBACK_FILE)) {
+        const raw = JSON.parse(fs.readFileSync(ADMIN_WALLET_FALLBACK_FILE, 'utf8')) as Partial<FallbackAdminWalletStore>;
+        if (raw && typeof raw === 'object' && raw.wallet) {
+          return {
+            wallet: raw.wallet,
+            transactions: Array.isArray(raw.transactions) ? raw.transactions : []
+          };
+        }
+      }
+    } catch {
+      // ignore fallback read errors
+    }
+    return {
+      wallet: {
+        $id: 'admin-wallet-local',
+        user_id: ADMIN_WALLET_USER_ID,
+        solde_total: 0,
+        solde_disponible: 0,
+        solde_bloque: 0,
+        devise: 'Ar',
+        date_maj: new Date().toISOString(),
+        coins_json: '{}'
+      },
+      transactions: []
+    };
+  }
+
+  function writeAdminWalletFallback(store: FallbackAdminWalletStore): void {
+    try {
+      fs.writeFileSync(
+        ADMIN_WALLET_FALLBACK_FILE,
+        JSON.stringify(
+          { wallet: store.wallet, transactions: store.transactions.slice(0, 200) },
+          null,
+          2
+        ),
+        { mode: 0o600 }
+      );
+    } catch {
+      // ignore read-only fs errors
+    }
+  }
+
+  async function loadAdminOwnWalletAndTxs(): Promise<{
+    walletId: string;
+    wallet: ReturnType<typeof serializeWallet>;
+    transactions: Array<Record<string, unknown>>;
+    usingFallback: boolean;
+  }> {
+    try {
+      const [walletRow, txRes] = await Promise.all([
+        getOrCreateWalletRow(ADMIN_WALLET_USER_ID),
+        adminDb.listRows({
+          databaseId: APPWRITE_DATABASE_ID,
+          tableId: TABLES.DEPOTS_RETRAITS,
+          queries: [
+            Query.equal('user_id', ADMIN_WALLET_USER_ID),
+            Query.orderDesc('$createdAt'),
+            Query.limit(100)
+          ]
+        })
+      ]);
+      return {
+        walletId: String(walletRow.$id),
+        wallet: serializeWallet(walletRow as unknown as Record<string, unknown>),
+        transactions: txRes.rows as unknown as Array<Record<string, unknown>>,
+        usingFallback: false
+      };
+    } catch {
+      const fb = readAdminWalletFallback();
+      return {
+        walletId: String((fb.wallet as { $id?: unknown }).$id || 'admin-wallet-local'),
+        wallet: serializeWallet(fb.wallet),
+        transactions: fb.transactions,
+        usingFallback: true
+      };
+    }
+  }
+
+  app.get('/api/admin/wallet', requireAdminPin, async (_req: Request, res: Response) => {
+    try {
+      const data = await loadAdminOwnWalletAndTxs();
+      res.json({ wallet: data.wallet, transactions: data.transactions });
+    } catch (err) {
+      res.status(400).json({ error: formatAppwriteErrorFr(err, 'Erreur chargement Portefeuille Admin.') });
+    }
+  });
+
+  app.post('/api/admin/wallet/deposit', requireAdminPin, async (req: Request, res: Response) => {
+    try {
+      try {
+        await refreshMarketPrices();
+      } catch {
+        // use cached prices
+      }
+
+      const montant = Number(req.body?.montant);
+      const methode = String(req.body?.methode || 'Crypto').trim();
+      const txHash = String(req.body?.numero_compte || req.body?.txHash || '').trim();
+      const devise = String(req.body?.devise || 'USDT').toUpperCase().trim();
+      const chainLabel = String(req.body?.chain || '').trim();
+      const networkName = String(req.body?.networkLabel || req.body?.networkCode || '').trim();
+      const preuve = String(req.body?.preuve || '').trim();
+
+      if (methode !== 'Crypto') {
+        res.status(400).json({ error: 'Seuls les dépôts Crypto sont acceptés.' });
+        return;
+      }
+
+      const livePriceUsd =
+        devise === 'USDT' ? 1 : getSalomaPriceUsd(devise) || Number(req.body?.priceUsd || 0);
+      const coinNet = findCoinNetwork(
+        devise,
+        req.body?.networkCode || networkName || chainLabel,
+        livePriceUsd
+      );
+      const fallbackCfg = CRYPTO_NETWORK_FEES[devise];
+      if (!coinNet && !fallbackCfg) {
+        res.status(400).json({ error: `Crypto non supportée (${devise}). Veuillez choisir parmi les 50 coins SALOMA.` });
+        return;
+      }
+
+      const minDeposit =
+        livePriceUsd > 0
+          ? computeMinCoinForUsd(livePriceUsd, devise, MIN_DEPOSIT_USD)
+          : coinNet
+          ? coinNet.minDeposit
+          : fallbackCfg.minDeposit;
+      const minDepositAccepted = Number((minDeposit * 0.98).toFixed(8));
+      const resolvedChain = chainLabel || coinNet?.chain || fallbackCfg?.chain || devise;
+
+      if (Number.isNaN(montant) || montant < minDepositAccepted) {
+        res.status(400).json({
+          error: `Min Dépôt : 1$ équivalent (${formatMinCoinQty(minDeposit)} ${devise}).`
+        });
+        return;
+      }
+      if (!txHash || txHash.length < 6) {
+        res.status(400).json({ error: 'Veuillez entrer un TX Hash de transaction valide (min. 6 caractères).' });
+        return;
+      }
+
+      const montantAr = livePriceUsd > 0 ? Math.round(montant * livePriceUsd * USD_TO_MGA) : 0;
+      const displayNetwork = networkName ? `${resolvedChain} • ${networkName}` : resolvedChain;
+      const nowIso = new Date().toISOString();
+      const txPayload = {
+        user_id: ADMIN_WALLET_USER_ID,
+        type: 'depot',
+        montant,
+        methode: 'Crypto',
+        numero_compte: txHash,
+        statut: 'valide',
+        preuve: preuve || `Admin Crypto ${devise} (${displayNetwork}) • TX: ${txHash}`,
+        date: nowIso,
+        devise,
+        frais: 0
+      };
+
+      const state = await loadAdminOwnWalletAndTxs();
+      const coins = parseCoinsJson(state.wallet.coins_json);
+      let soldeDisp = Number(state.wallet.solde_disponible) || 0;
+      const soldeBloque = Number(state.wallet.solde_bloque) || 0;
+      const compteTrade = Number(state.wallet.compte_trade) || 0;
+
+      coins[devise] = Number(((coins[devise] || 0) + montant).toFixed(8));
+      if (montantAr > 0) {
+        soldeDisp = Number((soldeDisp + montantAr).toFixed(2));
+      }
+      const nextTotal = Number((soldeDisp + compteTrade + soldeBloque).toFixed(2));
+      const nextCoinsJson = encodeCoinsWithTradeAr(coins, compteTrade);
+
+      if (!state.usingFallback) {
+        try {
+          const updatedWallet = await adminDb.updateRow({
+            databaseId: APPWRITE_DATABASE_ID,
+            tableId: TABLES.WALLETS,
+            rowId: state.walletId,
+            data: {
+              solde_disponible: soldeDisp,
+              solde_total: nextTotal,
+              date_maj: nowIso,
+              coins_json: nextCoinsJson
+            }
+          });
+          const txRow = await adminDb.createRow({
+            databaseId: APPWRITE_DATABASE_ID,
+            tableId: TABLES.DEPOTS_RETRAITS,
+            rowId: ID.unique(),
+            data: txPayload
+          });
+          const nextTxs = [txRow as unknown as Record<string, unknown>, ...state.transactions];
+          res.status(201).json({
+            wallet: serializeWallet(updatedWallet as unknown as Record<string, unknown>),
+            transaction: txRow,
+            transactions: nextTxs
+          });
+          return;
+        } catch {
+          // fallback below if Appwrite table write fails
+        }
+      }
+
+      const fb = readAdminWalletFallback();
+      fb.wallet = {
+        ...fb.wallet,
+        solde_disponible: soldeDisp,
+        solde_bloque: soldeBloque,
+        solde_total: nextTotal,
+        date_maj: nowIso,
+        coins_json: nextCoinsJson
+      };
+      const localTx = { $id: `admin-tx-${Date.now()}`, ...txPayload };
+      fb.transactions = [localTx, ...fb.transactions];
+      writeAdminWalletFallback(fb);
+
+      res.status(201).json({
+        wallet: serializeWallet(fb.wallet),
+        transaction: localTx,
+        transactions: fb.transactions
+      });
+    } catch (err) {
+      res.status(400).json({ error: formatAppwriteErrorFr(err, 'Erreur lors du dépôt Admin.') });
+    }
+  });
+
+  app.post('/api/admin/wallet/withdraw', requireAdminPin, async (req: Request, res: Response) => {
+    try {
+      try {
+        await refreshMarketPrices();
+      } catch {
+        // use cached prices
+      }
+
+      const montant = Number(req.body?.montant);
+      const methode = String(req.body?.methode || 'Crypto').trim();
+      const numero_compte = String(req.body?.numero_compte || '').trim();
+      const devise = String(req.body?.devise || 'USDT').toUpperCase().trim();
+      const chainLabel = String(req.body?.chain || '').trim();
+      const networkName = String(req.body?.networkLabel || req.body?.networkCode || '').trim();
+
+      if (methode !== 'Crypto') {
+        res.status(400).json({ error: 'Seuls les retraits Crypto sont autorisés.' });
+        return;
+      }
+
+      const coinNet = findCoinNetwork(devise, req.body?.networkCode || networkName || chainLabel);
+      const fallbackCfg = CRYPTO_NETWORK_FEES[devise];
+      if (!coinNet && !fallbackCfg) {
+        res.status(400).json({ error: `Crypto non supportée (${devise}). Veuillez choisir parmi les 50 coins SALOMA.` });
+        return;
+      }
+
+      const publicFees = getPublicSalomaFees();
+      const withdrawFeeRate = getSalomaWithdrawFeeRate();
+      const salomaWithdrawFee = Number((montant * withdrawFeeRate).toFixed(8));
+      const effectivePriceUsd =
+        devise === 'USDT' ? 1 : getSalomaPriceUsd(devise) || Number(req.body?.priceUsd || 0);
+      const configuredNetFeeUsdt = publicFees.networkFeeUsdt;
+      const fallbackCoinNetFee = coinNet ? coinNet.withdrawFee : fallbackCfg.fee;
+      const networkFee =
+        devise === 'USDT'
+          ? Number(configuredNetFeeUsdt.toFixed(6))
+          : effectivePriceUsd > 0
+          ? Number((configuredNetFeeUsdt / effectivePriceUsd).toFixed(8))
+          : fallbackCoinNetFee;
+
+      const minWithdraw =
+        effectivePriceUsd > 0
+          ? computeMinCoinForUsd(effectivePriceUsd, devise, MIN_WITHDRAW_USD)
+          : coinNet
+          ? coinNet.minWithdraw
+          : fallbackCfg.minWithdraw;
+      const minWithdrawAccepted = Number((minWithdraw * 0.98).toFixed(8));
+      const resolvedChain = chainLabel || coinNet?.chain || fallbackCfg?.chain || devise;
+      const totalFrais = Number((salomaWithdrawFee + networkFee).toFixed(8));
+
+      if (Number.isNaN(montant) || montant <= totalFrais) {
+        res.status(400).json({
+          error: `Le montant doit dépasser les frais (Frais SALOMA ${publicFees.withdrawFeePct}% + Frais Réseau ${networkFee} ${devise}).`
+        });
+        return;
+      }
+      if (montant < minWithdrawAccepted) {
+        res.status(400).json({
+          error: `Min Retrait : 1$ équivalent (${formatMinCoinQty(minWithdraw)} ${devise}).`
+        });
+        return;
+      }
+      if (!numero_compte || numero_compte.length < 6) {
+        res.status(400).json({ error: `Veuillez entrer une adresse de réception ${devise} (${resolvedChain}) valide.` });
+        return;
+      }
+
+      const state = await loadAdminOwnWalletAndTxs();
+      let soldeDisp = Number(state.wallet.solde_disponible) || 0;
+      const soldeBloque = Number(state.wallet.solde_bloque) || 0;
+      const compteTrade = Number(state.wallet.compte_trade) || 0;
+      const coins = parseCoinsJson(state.wallet.coins_json);
+      const montantAr = effectivePriceUsd > 0 ? Math.round(montant * effectivePriceUsd * USD_TO_MGA) : 0;
+
+      if ((coins[devise] || 0) >= montant) {
+        coins[devise] = Number(((coins[devise] || 0) - montant).toFixed(8));
+        if (montantAr > 0) {
+          soldeDisp = Math.max(0, Number((soldeDisp - Math.min(soldeDisp, montantAr)).toFixed(2)));
+        }
+      } else {
+        if (effectivePriceUsd <= 0) {
+          res.status(400).json({ error: `Solde ${devise} insuffisant dans votre Portefeuille Admin.` });
+          return;
+        }
+        if (montantAr > soldeDisp) {
+          res.status(400).json({
+            error: `Solde WALLET Admin insuffisant (${Math.round(soldeDisp).toLocaleString('fr-FR')} Ar).`
+          });
+          return;
+        }
+        soldeDisp = Number((soldeDisp - montantAr).toFixed(2));
+      }
+
+      const nextTotal = Number((soldeDisp + compteTrade + soldeBloque).toFixed(2));
+      const nextCoinsJson = encodeCoinsWithTradeAr(coins, compteTrade);
+      const nowIso = new Date().toISOString();
+      const netReceived = Number((montant - totalFrais).toFixed(8));
+      const displayNetwork = networkName ? `${resolvedChain} • ${networkName}` : resolvedChain;
+      const txPayload = {
+        user_id: ADMIN_WALLET_USER_ID,
+        type: 'retrait',
+        montant,
+        methode: 'Crypto',
+        numero_compte,
+        statut: 'valide',
+        preuve: `Admin Crypto (${displayNetwork}) → ${numero_compte} • Frais SALOMA ${publicFees.withdrawFeePct}%: ${salomaWithdrawFee} ${devise} + Frais Réseau: ${networkFee} ${devise} • Net: ${netReceived} ${devise}`,
+        date: nowIso,
+        devise,
+        frais: totalFrais
+      };
+
+      if (!state.usingFallback) {
+        try {
+          const updatedWallet = await adminDb.updateRow({
+            databaseId: APPWRITE_DATABASE_ID,
+            tableId: TABLES.WALLETS,
+            rowId: state.walletId,
+            data: {
+              solde_disponible: soldeDisp,
+              solde_total: nextTotal,
+              date_maj: nowIso,
+              coins_json: nextCoinsJson
+            }
+          });
+          const txRow = await adminDb.createRow({
+            databaseId: APPWRITE_DATABASE_ID,
+            tableId: TABLES.DEPOTS_RETRAITS,
+            rowId: ID.unique(),
+            data: txPayload
+          });
+          const nextTxs = [txRow as unknown as Record<string, unknown>, ...state.transactions];
+          res.status(201).json({
+            wallet: serializeWallet(updatedWallet as unknown as Record<string, unknown>),
+            transaction: txRow,
+            transactions: nextTxs
+          });
+          return;
+        } catch {
+          // fallback below
+        }
+      }
+
+      const fb = readAdminWalletFallback();
+      fb.wallet = {
+        ...fb.wallet,
+        solde_disponible: soldeDisp,
+        solde_bloque: soldeBloque,
+        solde_total: nextTotal,
+        date_maj: nowIso,
+        coins_json: nextCoinsJson
+      };
+      const localTx = { $id: `admin-tx-${Date.now()}`, ...txPayload };
+      fb.transactions = [localTx, ...fb.transactions];
+      writeAdminWalletFallback(fb);
+
+      res.status(201).json({
+        wallet: serializeWallet(fb.wallet),
+        transaction: localTx,
+        transactions: fb.transactions
+      });
+    } catch (err) {
+      res.status(400).json({ error: formatAppwriteErrorFr(err, 'Erreur lors du retrait Admin.') });
+    }
+  });
+
+  app.post('/api/admin/wallet/convert', requireAdminPin, async (req: Request, res: Response) => {
+    try {
+      const direction = String(req.body?.direction || '').toUpperCase().trim();
+      const amount = Math.round(Number(req.body?.amount));
+
+      if (direction !== 'WALLET_TO_TRADE' && direction !== 'TRADE_TO_WALLET') {
+        res.status(400).json({ error: 'Direction de transfert invalide.' });
+        return;
+      }
+      if (Number.isNaN(amount) || amount < 100) {
+        res.status(400).json({ error: 'Montant minimum de transfert : 100 Ar.' });
+        return;
+      }
+
+      const state = await loadAdminOwnWalletAndTxs();
+      let soldeDisp = Number(state.wallet.solde_disponible) || 0;
+      const soldeBloque = Number(state.wallet.solde_bloque) || 0;
+      let compteTrade = Number(state.wallet.compte_trade) || 0;
+      const coins = parseCoinsJson(state.wallet.coins_json);
+
+      if (direction === 'WALLET_TO_TRADE') {
+        if (amount > soldeDisp) {
+          res.status(400).json({
+            error: `Solde WALLET Admin insuffisant (${Math.round(soldeDisp).toLocaleString('fr-FR')} Ar).`
+          });
+          return;
+        }
+        soldeDisp = Number((soldeDisp - amount).toFixed(2));
+        compteTrade = Number((compteTrade + amount).toFixed(2));
+      } else {
+        if (amount > compteTrade) {
+          res.status(400).json({
+            error: `Solde Compte Trade Admin insuffisant (${Math.round(compteTrade).toLocaleString('fr-FR')} Ar).`
+          });
+          return;
+        }
+        compteTrade = Number((compteTrade - amount).toFixed(2));
+        soldeDisp = Number((soldeDisp + amount).toFixed(2));
+      }
+
+      const nextTotal = Number((soldeDisp + compteTrade + soldeBloque).toFixed(2));
+      const nextCoinsJson = encodeCoinsWithTradeAr(coins, compteTrade);
+      const nowIso = new Date().toISOString();
+
+      if (!state.usingFallback) {
+        try {
+          const updatedWallet = await adminDb.updateRow({
+            databaseId: APPWRITE_DATABASE_ID,
+            tableId: TABLES.WALLETS,
+            rowId: state.walletId,
+            data: {
+              solde_disponible: soldeDisp,
+              solde_total: nextTotal,
+              date_maj: nowIso,
+              coins_json: nextCoinsJson
+            }
+          });
+          res.json({ wallet: serializeWallet(updatedWallet as unknown as Record<string, unknown>) });
+          return;
+        } catch {
+          // fallback below
+        }
+      }
+
+      const fb = readAdminWalletFallback();
+      fb.wallet = {
+        ...fb.wallet,
+        solde_disponible: soldeDisp,
+        solde_bloque: soldeBloque,
+        solde_total: nextTotal,
+        date_maj: nowIso,
+        coins_json: nextCoinsJson
+      };
+      writeAdminWalletFallback(fb);
+
+      res.json({ wallet: serializeWallet(fb.wallet) });
+    } catch (err) {
+      res.status(400).json({ error: formatAppwriteErrorFr(err, 'Erreur lors de la conversion Admin.') });
+    }
+  });
+
+  app.delete('/api/admin/wallet/history', requireAdminPin, async (_req: Request, res: Response) => {
+    try {
+      const state = await loadAdminOwnWalletAndTxs();
+      let deletedCount = 0;
+
+      if (!state.usingFallback) {
+        try {
+          let cursor: string | null = null;
+          while (true) {
+            const queries = [Query.equal('user_id', ADMIN_WALLET_USER_ID), Query.limit(100)];
+            if (cursor) queries.push(Query.cursorAfter(cursor));
+            const batch = await adminDb.listRows({
+              databaseId: APPWRITE_DATABASE_ID,
+              tableId: TABLES.DEPOTS_RETRAITS,
+              queries
+            });
+            if (batch.rows.length === 0) break;
+            await Promise.all(
+              batch.rows.map(r =>
+                adminDb.deleteRow({
+                  databaseId: APPWRITE_DATABASE_ID,
+                  tableId: TABLES.DEPOTS_RETRAITS,
+                  rowId: r.$id
+                })
+              )
+            );
+            deletedCount += batch.rows.length;
+            if (batch.rows.length < 100) break;
+            cursor = batch.rows[batch.rows.length - 1].$id;
+          }
+          res.json({ ok: true, deletedCount });
+          return;
+        } catch {
+          // fallback below
+        }
+      }
+
+      const fb = readAdminWalletFallback();
+      deletedCount = fb.transactions.length;
+      fb.transactions = [];
+      writeAdminWalletFallback(fb);
+      res.json({ ok: true, deletedCount });
+    } catch (err) {
+      res.status(400).json({ error: formatAppwriteErrorFr(err, "Erreur suppression historique Portefeuille Admin.") });
     }
   });
 

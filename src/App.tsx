@@ -64,6 +64,11 @@ import {
 } from './components/PWAInstall';
 import { TurnstileWidget } from './components/TurnstileWidget';
 import {
+  AdminWalletView,
+  type AdminWalletRow,
+  type AdminWalletTxRow
+} from './components/AdminWalletView';
+import {
   Coin,
   BackendPublicCoin,
   ApiProviderStatus,
@@ -1328,7 +1333,7 @@ export default function App() {
   };
 
   // --- TRADING STATE & ACTIONS (APPWRITE) ---
-  const LEVERAGE_PRESETS = [1, 2, 3, 4, 5] as const;
+  const LEVERAGE_PRESETS = [1, 5, 10, 25, 50, 100] as const;
   const [tradeStrategyChoice, setTradeStrategyChoice] = useState<'MANUEL' | 'BOT'>('MANUEL');
   const [tradingModeType, setTradingModeType] = useState<'SPOT' | 'LEVIER'>('LEVIER');
   const [selectedTimeframe, setSelectedTimeframe] = useState<'1m' | '5m' | '15m' | '1h' | '4h' | '1D'>('1m');
@@ -1502,7 +1507,7 @@ export default function App() {
   const numericLeverage = useMemo(() => {
     const val = parseFloat(leverageInput);
     if (isNaN(val) || val <= 0) return 5;
-    return Math.min(5, Math.max(1, Math.round(val)));
+    return Math.min(100, Math.max(1, Math.round(val)));
   }, [leverageInput]);
 
   const numericAmountAr = useMemo(() => {
@@ -2707,7 +2712,7 @@ export default function App() {
   };
 
   // --- ADMIN PANEL (100% REAL APPWRITE DATA) ---
-  const [adminTab, setAdminTab] = useState<'overview' | 'kyc' | 'profit' | 'trading' | 'wallet' | 'apis' | 'security'>('overview');
+  const [adminTab, setAdminTab] = useState<'overview' | 'kyc' | 'profit' | 'trading' | 'wallet' | 'adminWallet' | 'apis' | 'security'>('overview');
   const [adminKycActionId, setAdminKycActionId] = useState<string | null>(null);
   const [adminProfitPeriod, setAdminProfitPeriod] = useState<'jour' | 'semaine' | 'mois' | 'total'>('jour');
   const [adminPin, setAdminPin] = useState<string>('');
@@ -2726,6 +2731,8 @@ export default function App() {
 
   const [adminUsers, setAdminUsers] = useState<AppwriteUserRow[]>([]);
   const [adminTransactions, setAdminTransactions] = useState<AppwriteDepotRetraitRow[]>([]);
+  const [adminOwnWallet, setAdminOwnWallet] = useState<AdminWalletRow | null>(null);
+  const [adminOwnWalletTxs, setAdminOwnWalletTxs] = useState<AdminWalletTxRow[]>([]);
   const [adminTrades, setAdminTrades] = useState<AppwriteTradeRow[]>([]);
   const [adminEchanges, setAdminEchanges] = useState<AppwriteEchangeRow[]>([]);
   const [adminProblems, setAdminProblems] = useState<AppwriteProblemRow[]>([]);
@@ -2872,6 +2879,8 @@ export default function App() {
           apis?: AdminApisConfig;
           salomaFees?: AdminSalomaFeesConfig;
           liquidityAlerts?: AdminLiquidityAlert[];
+          adminWallet?: AdminWalletRow;
+          adminWalletTransactions?: AdminWalletTxRow[];
           bybitStatus?: {
             online: boolean;
             latencyMs: number;
@@ -2886,6 +2895,12 @@ export default function App() {
 
         setAdminUsers(data.users || []);
         setAdminTransactions(data.transactions || []);
+        if (data.adminWallet) {
+          setAdminOwnWallet(data.adminWallet);
+        }
+        if (Array.isArray(data.adminWalletTransactions)) {
+          setAdminOwnWalletTxs(data.adminWalletTransactions);
+        }
         setAdminTrades(data.trades || []);
         setAdminEchanges(data.echanges || []);
         setAdminProblems(data.problemes || []);
@@ -5710,7 +5725,7 @@ export default function App() {
                             : 'text-purple-300 hover:text-white'
                         }`}
                       >
-                        LEVIER (x1 à x5)
+                        LEVIER (x1 à x100)
                       </button>
                     </div>
 
@@ -5855,7 +5870,7 @@ export default function App() {
                           <div className="p-2.5 rounded-xl bg-[#150D2E] border border-[#8B5CF6]/50 space-y-2">
                             <div className="flex justify-between items-center">
                               <span className="text-[10px] font-black text-purple-200">
-                                Levier : {numericLeverage}x (Max 5x)
+                                Levier : {numericLeverage}x (Max 100x)
                               </span>
                               <button
                                 type="button"
@@ -5865,7 +5880,7 @@ export default function App() {
                                 <ArrowLeft className="w-2.5 h-2.5" /> SPOT
                               </button>
                             </div>
-                            <div className="grid grid-cols-5 gap-1">
+                            <div className="grid grid-cols-6 gap-1">
                               {LEVERAGE_PRESETS.map(levPreset => {
                                 const isSelected = numericLeverage === levPreset;
                                 return (
@@ -5895,7 +5910,7 @@ export default function App() {
                                     setLeverageInput('');
                                     return;
                                   }
-                                  const clamped = Math.min(5, Math.max(1, parseInt(digits, 10)));
+                                  const clamped = Math.min(100, Math.max(1, parseInt(digits, 10)));
                                   setLeverageInput(String(clamped));
                                 }}
                                 className="w-full px-2.5 py-1.5 rounded-lg bg-[#1F1042] border border-[#8B5CF6]/60 text-white font-mono font-black text-xs text-center"
@@ -7858,6 +7873,7 @@ export default function App() {
                 ['profit', 'Profit'],
                 ['trading', 'Trades'],
                 ['wallet', 'Dépôts'],
+                ['adminWallet', 'Portefeuille'],
                 ['apis', 'APIs'],
                 ['security', 'Sécu']
               ] as const
@@ -8582,6 +8598,24 @@ export default function App() {
                 </div>
               )}
             </div>
+          )}
+
+          {adminTab === 'adminWallet' && (
+            <AdminWalletView
+              adminPin={adminPin}
+              adminEmail={adminEmail}
+              adminSessionToken={adminSessionToken}
+              coins={coins}
+              salomaFees={salomaFees}
+              usdToMga={USD_TO_MGA}
+              showToast={showToast}
+              initialWallet={adminOwnWallet}
+              initialTransactions={adminOwnWalletTxs}
+              onWalletUpdated={(nextWallet, nextTxs) => {
+                setAdminOwnWallet(nextWallet);
+                setAdminOwnWalletTxs(nextTxs);
+              }}
+            />
           )}
 
           {/* ========================================================
