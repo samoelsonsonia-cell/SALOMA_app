@@ -7,6 +7,10 @@ const readEnv = (getter: () => unknown, fallback = ''): string => {
   }
 };
 
+export const APPWRITE_CONFIG_MISSING_MSG =
+  'Project ID introuvable - vérifie les Environment Variables';
+export const APPWRITE_CONNECTION_FAILED_MSG = 'Connexion Appwrite échouée';
+
 export const ENV_CONFIG = {
   supabaseUrl: readEnv(() => import.meta.env?.VITE_SUPABASE_URL, ''),
   supabaseAnonKey: readEnv(() => import.meta.env?.VITE_SUPABASE_ANON_KEY, ''),
@@ -14,23 +18,23 @@ export const ENV_CONFIG = {
   cloudflareSiteKey:
     readEnv(() => import.meta.env?.NEXT_PUBLIC_CLOUDFLARE_SITE_KEY, '') ||
     readEnv(() => import.meta.env?.VITE_CLOUDFLARE_SITE_KEY, ''),
-  appwriteEndpoint: readEnv(
-    () => import.meta.env?.VITE_APPWRITE_ENDPOINT,
-    'https://fra.cloud.appwrite.io/v1'
-  ),
-  appwriteProjectId: readEnv(
-    () => import.meta.env?.VITE_APPWRITE_PROJECT_ID,
-    '6af771140031749ce67c'
-  ),
-  appwriteDatabaseId: readEnv(
-    () => import.meta.env?.VITE_APPWRITE_DATABASE_ID,
-    '6af7739d00073c4937e6'
-  )
+  appwriteEndpoint: readEnv(() => import.meta.env?.VITE_APPWRITE_ENDPOINT, ''),
+  appwriteProjectId: readEnv(() => import.meta.env?.VITE_APPWRITE_PROJECT_ID, ''),
+  appwriteDatabaseId: readEnv(() => import.meta.env?.VITE_APPWRITE_DATABASE_ID, ''),
+  appwriteTableBotSetting: readEnv(() => import.meta.env?.VITE_APPWRITE_TABLE_BOT_SETTING, ''),
+  appwriteTableLiveBalance: readEnv(() => import.meta.env?.VITE_APPWRITE_TABLE_LIVE_BALANCE, ''),
+  appwriteTableSignales: readEnv(() => import.meta.env?.VITE_APPWRITE_TABLE_SIGNALES, ''),
+  appwriteTableTrades: readEnv(() => import.meta.env?.VITE_APPWRITE_TABLE_TRADES, '')
 };
 
 export const APPWRITE_ENDPOINT = ENV_CONFIG.appwriteEndpoint;
 export const APPWRITE_PROJECT_ID = ENV_CONFIG.appwriteProjectId;
 export const APPWRITE_DATABASE_ID = ENV_CONFIG.appwriteDatabaseId;
+export const APPWRITE_TABLE_BOT_SETTING = ENV_CONFIG.appwriteTableBotSetting;
+export const APPWRITE_TABLE_LIVE_BALANCE = ENV_CONFIG.appwriteTableLiveBalance;
+export const APPWRITE_TABLE_SIGNALES = ENV_CONFIG.appwriteTableSignales;
+export const APPWRITE_TABLE_TRADES = ENV_CONFIG.appwriteTableTrades;
+export const hasAppwriteClientConfig = Boolean(APPWRITE_ENDPOINT && APPWRITE_PROJECT_ID);
 export const hasSupabaseConfig = Boolean(ENV_CONFIG.supabaseUrl && ENV_CONFIG.supabaseAnonKey);
 
 export const COOKIE_SESSION_MARKER = '__saloma_cookie_session__';
@@ -42,12 +46,14 @@ export interface ApiError extends Error {
   liquidityUnavailable?: boolean;
   requiresKycLevel2?: boolean;
   isNetworkError?: boolean;
+  appwriteConfigMissing?: boolean;
+  appwriteError?: boolean;
 }
 
 export function isApiNotFoundError(err: unknown): boolean {
   if (!err || typeof err !== 'object') return false;
   const e = err as ApiError;
-  if (e.liquidityUnavailable) return false;
+  if (e.liquidityUnavailable || e.appwriteConfigMissing || e.appwriteError) return false;
   if (e.status === 404 || (typeof e.status === 'number' && e.status >= 500)) return true;
   const msg = String(e.message || '');
   return (
@@ -229,6 +235,12 @@ export async function apiRequest<T>(
     if (data?.requiresKycLevel2) {
       err.requiresKycLevel2 = true;
     }
+    if (data?.appwriteConfigMissing) {
+      err.appwriteConfigMissing = true;
+    }
+    if (data?.appwriteError) {
+      err.appwriteError = true;
+    }
     throw err;
   }
   return data as T;
@@ -266,6 +278,9 @@ function clearFallbackCookieHeader() {
 function formatDirectAppwriteError(data: { type?: string; message?: string; code?: number }, fallback: string): string {
   const type = String(data?.type || '');
   const msg = String(data?.message || '').toLowerCase();
+  if (type === 'project_not_found' || msg.includes('project with the requested id')) {
+    return data?.message || APPWRITE_CONFIG_MISSING_MSG;
+  }
   if (type === 'user_already_exists' || msg.includes('already exists')) {
     return 'Un compte existe déjà avec cette adresse e-mail.';
   }
@@ -291,6 +306,13 @@ async function directAppwriteFetch<T>(
   appwritePath: string,
   options: { method?: string; body?: unknown } = {}
 ): Promise<T> {
+  if (!APPWRITE_PROJECT_ID || !APPWRITE_ENDPOINT) {
+    const cfgErr: ApiError = new Error(APPWRITE_CONFIG_MISSING_MSG);
+    cfgErr.status = 503;
+    cfgErr.appwriteConfigMissing = true;
+    throw cfgErr;
+  }
+
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
     'X-Appwrite-Project': APPWRITE_PROJECT_ID
@@ -300,12 +322,20 @@ async function directAppwriteFetch<T>(
     headers['X-Fallback-Cookies'] = fallbackCookie;
   }
 
-  const res = await fetch(`${APPWRITE_ENDPOINT}${appwritePath}`, {
-    method: options.method || 'GET',
-    headers,
-    credentials: 'include',
-    body: options.body !== undefined ? JSON.stringify(options.body) : undefined
-  });
+  let res: Response;
+  try {
+    res = await fetch(`${APPWRITE_ENDPOINT}${appwritePath}`, {
+      method: options.method || 'GET',
+      headers,
+      credentials: 'include',
+      body: options.body !== undefined ? JSON.stringify(options.body) : undefined
+    });
+  } catch {
+    const connErr: ApiError = new Error(APPWRITE_CONNECTION_FAILED_MSG);
+    connErr.status = 503;
+    connErr.appwriteError = true;
+    throw connErr;
+  }
 
   const nextCookie = res.headers.get('X-Fallback-Cookies') || res.headers.get('x-fallback-cookies');
   if (nextCookie) {
@@ -318,6 +348,7 @@ async function directAppwriteFetch<T>(
       formatDirectAppwriteError(data, `Erreur Appwrite (${res.status})`)
     );
     err.status = res.status;
+    err.appwriteError = true;
     throw err;
   }
   return data as T;

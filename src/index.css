@@ -47,3 +47,87 @@
   font-family: 'JetBrains Mono', monospace;
   font-variant-numeric: tabular-nums;
 }
+
+@keyframes avatarBreathe {
+  0%, 100% { transform: translateY(0px) scaleY(1); }
+  50% { transform: translateY(-2px) scaleY(1.012); }
+}
+
+@keyframes avatarHeadNod {
+  0%, 100% { transform: rotate(0deg) translateY(0px); }
+  50% { transform: rotate(1.6deg) translateY(1.5px); }
+}
+
+@keyframes avatarKeyTap {
+  0%, 100% { transform: translateY(0px); }
+  50% { transform: translateY(-3px); }
+}
+
+@keyframes avatarSmileBounce {
+  0%, 100% { transform: translateY(0px) scale(1); }
+  45% { transform: translateY(-4px) scale(1.02); }
+}
+
+@keyframes avatarFloatZ {
+  0% { opacity: 0; transform: translate(0px, 6px) scale(0.7); }
+  25% { opacity: 1; }
+  85% { opacity: 0.9; }
+  100% { opacity: 0; transform: translate(12px, -24px) scale(1.15); }
+}
+
+@keyframes avatarSteam {
+  0% { opacity: 0; transform: translateY(4px) scaleX(0.9); }
+  35% { opacity: 0.75; }
+  100% { opacity: 0; transform: translateY(-16px) scaleX(1.25); }
+}
+
+@keyframes avatarBlink {
+  0%, 92%, 100% { transform: scaleY(1); }
+  96% { transform: scaleY(0.08); }
+}
+
+.bot3-breathe {
+  animation: avatarBreathe 3.2s ease-in-out infinite;
+  transform-origin: center bottom;
+}
+
+.bot3-head-nod {
+  animation: avatarHeadNod 2.6s ease-in-out infinite;
+  transform-origin: 50% 80%;
+}
+
+.bot3-key-tap {
+  animation: avatarKeyTap 0.45s ease-in-out infinite;
+}
+
+.bot3-smile-bounce {
+  animation: avatarSmileBounce 1.1s ease-in-out infinite;
+  transform-origin: center bottom;
+}
+
+.bot3-zzz-1 {
+  animation: avatarFloatZ 2.6s ease-out infinite;
+}
+
+.bot3-zzz-2 {
+  animation: avatarFloatZ 2.6s ease-out 0.85s infinite;
+}
+
+.bot3-zzz-3 {
+  animation: avatarFloatZ 2.6s ease-out 1.7s infinite;
+}
+
+.bot3-steam-1 {
+  animation: avatarSteam 2.2s ease-out infinite;
+}
+
+.bot3-steam-2 {
+  animation: avatarSteam 2.2s ease-out 1.1s infinite;
+}
+
+.bot3-blink {
+  animation: avatarBlink 4.2s ease-in-out infinite;
+  transform-box: fill-box;
+  transform-origin: center;
+}
+

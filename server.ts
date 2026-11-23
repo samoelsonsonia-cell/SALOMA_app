@@ -2021,40 +2021,76 @@ function getSalomaPriceUsd(symbol: string): number {
   return marketCache.coins[clean]?.salomaPrice || (clean === 'USDT' ? 1 : 0);
 }
 
-const rawAppwriteEndpoint = String(
-  process.env.APPWRITE_ENDPOINT ||
-    process.env.VITE_APPWRITE_ENDPOINT ||
-    'https://fra.cloud.appwrite.io/v1'
+const APPWRITE_CONFIG_MISSING_MSG =
+  'Project ID introuvable - vérifie les Environment Variables';
+const APPWRITE_CONNECTION_FAILED_MSG = 'Connexion Appwrite échouée';
+
+const rawAppwriteEndpoint = stripWrappingQuotes(
+  process.env.APPWRITE_ENDPOINT || process.env.VITE_APPWRITE_ENDPOINT || ''
 ).trim();
-const APPWRITE_ENDPOINT = /^https?:\/\//i.test(rawAppwriteEndpoint)
-  ? rawAppwriteEndpoint
-  : 'https://fra.cloud.appwrite.io/v1';
-const APPWRITE_PROJECT_ID =
-  String(
-    process.env.APPWRITE_PROJECT_ID ||
-      process.env.VITE_APPWRITE_PROJECT_ID ||
-      ''
-  ).trim() || '6af771140031749ce67c';
-const APPWRITE_DATABASE_ID =
-  String(
-    process.env.APPWRITE_DATABASE_ID ||
-      process.env.VITE_APPWRITE_DATABASE_ID ||
-      ''
-  ).trim() || '6af7739d00073c4937e6';
-const APPWRITE_API_KEY =
-  String(process.env.APPWRITE_API_KEY || '').trim() ||
-  'standard_4b7d5e4b36246ad4f84a637332f944489386e9a18ad06f6ddf98929fae5febb0cf5d006c3273f6bd1f0f95a2b59ce809ada6a0934e4d12581db5447765fce2235335fa14013c334170fd9224ac8892f743c04e2a99807118a8813d04b6864c86600f4f9078ee6406fcfb47d69b6bfe7869956258676fd27025915df25c93b24a';
+const APPWRITE_ENDPOINT = /^https?:\/\//i.test(rawAppwriteEndpoint) ? rawAppwriteEndpoint : '';
+const APPWRITE_PROJECT_ID = stripWrappingQuotes(
+  process.env.APPWRITE_PROJECT_ID || process.env.VITE_APPWRITE_PROJECT_ID || ''
+).trim();
+const APPWRITE_DATABASE_ID = stripWrappingQuotes(
+  process.env.APPWRITE_DATABASE_ID || process.env.VITE_APPWRITE_DATABASE_ID || ''
+).trim();
+const APPWRITE_API_KEY = stripWrappingQuotes(process.env.APPWRITE_API_KEY || '').trim();
 
 const TABLES = {
-  USERS: '6af775ca00094b2bdf7f',
-  WALLETS: '6af8b5410037ae1f4383',
-  TRADES: '6af8b579001cf762cd47',
-  ECHANGES: '6af8b6a90010c3630fc8',
-  DEPOTS_RETRAITS: '6af8b6fe0035f3f76254',
-  EARN: '6af8b756002ac6e26186',
-  NOTIFICATIONS: 'notifications',
-  PROBLEMES: 'problemes'
+  USERS:
+    String(process.env.APPWRITE_TABLE_USERS || process.env.VITE_APPWRITE_TABLE_USERS || '').trim() ||
+    '6af775ca00094b2bdf7f',
+  WALLETS:
+    String(process.env.APPWRITE_TABLE_WALLETS || process.env.VITE_APPWRITE_TABLE_WALLETS || '').trim() ||
+    '6af8b5410037ae1f4383',
+  TRADES:
+    String(process.env.APPWRITE_TABLE_TRADES || process.env.VITE_APPWRITE_TABLE_TRADES || '').trim() ||
+    '6af8b579001cf762cd47',
+  ECHANGES:
+    String(process.env.APPWRITE_TABLE_ECHANGES || process.env.VITE_APPWRITE_TABLE_ECHANGES || '').trim() ||
+    '6af8b6a90010c3630fc8',
+  DEPOTS_RETRAITS:
+    String(
+      process.env.APPWRITE_TABLE_DEPOTS_RETRAITS ||
+        process.env.VITE_APPWRITE_TABLE_DEPOTS_RETRAITS ||
+        ''
+    ).trim() || '6af8b6fe0035f3f76254',
+  EARN:
+    String(process.env.APPWRITE_TABLE_EARN || process.env.VITE_APPWRITE_TABLE_EARN || '').trim() ||
+    '6af8b756002ac6e26186',
+  NOTIFICATIONS:
+    String(
+      process.env.APPWRITE_TABLE_NOTIFICATIONS ||
+        process.env.VITE_APPWRITE_TABLE_NOTIFICATIONS ||
+        ''
+    ).trim() || 'notifications',
+  PROBLEMES:
+    String(
+      process.env.APPWRITE_TABLE_PROBLEMES || process.env.VITE_APPWRITE_TABLE_PROBLEMES || ''
+    ).trim() || 'problemes',
+  BOT_SETTING: stripWrappingQuotes(
+    process.env.APPWRITE_TABLE_BOT_SETTING || process.env.VITE_APPWRITE_TABLE_BOT_SETTING || ''
+  ).trim(),
+  LIVE_BALANCE: stripWrappingQuotes(
+    process.env.APPWRITE_TABLE_LIVE_BALANCE || process.env.VITE_APPWRITE_TABLE_LIVE_BALANCE || ''
+  ).trim(),
+  SIGNALES: stripWrappingQuotes(
+    process.env.APPWRITE_TABLE_SIGNALES || process.env.VITE_APPWRITE_TABLE_SIGNALES || ''
+  ).trim()
 };
+
+function isServerAppwriteConfigured(): boolean {
+  return Boolean(APPWRITE_ENDPOINT && APPWRITE_PROJECT_ID);
+}
+
+function isAppwriteProjectNotFoundError(err: unknown): boolean {
+  if (!err || typeof err !== 'object') return false;
+  const e = err as { code?: number; type?: string; message?: string };
+  const type = String(e.type || '').toLowerCase();
+  const msg = String(e.message || '').toLowerCase();
+  return type === 'project_not_found' || msg.includes('project with the requested id');
+}
 
 function stripWrappingQuotes(raw: unknown): string {
   const s = String(raw || '').trim();
@@ -2077,9 +2113,13 @@ function getConfiguredAdminPin(): string {
 }
 
 function getAdminClient() {
-  const client = new Client()
-    .setEndpoint(APPWRITE_ENDPOINT)
-    .setProject(APPWRITE_PROJECT_ID);
+  const client = new Client();
+  if (APPWRITE_ENDPOINT) {
+    client.setEndpoint(APPWRITE_ENDPOINT);
+  }
+  if (APPWRITE_PROJECT_ID) {
+    client.setProject(APPWRITE_PROJECT_ID);
+  }
   if (APPWRITE_API_KEY) {
     client.setKey(APPWRITE_API_KEY);
   }
@@ -2087,24 +2127,50 @@ function getAdminClient() {
 }
 
 function getAnonClient() {
-  return new Client().setEndpoint(APPWRITE_ENDPOINT).setProject(APPWRITE_PROJECT_ID);
+  const client = new Client();
+  if (APPWRITE_ENDPOINT) {
+    client.setEndpoint(APPWRITE_ENDPOINT);
+  }
+  if (APPWRITE_PROJECT_ID) {
+    client.setProject(APPWRITE_PROJECT_ID);
+  }
+  return client;
 }
 
 function getUserSessionClient(sessionSecret: string) {
-  return new Client()
-    .setEndpoint(APPWRITE_ENDPOINT)
-    .setProject(APPWRITE_PROJECT_ID)
-    .setSession(sessionSecret);
+  const client = new Client();
+  if (APPWRITE_ENDPOINT) {
+    client.setEndpoint(APPWRITE_ENDPOINT);
+  }
+  if (APPWRITE_PROJECT_ID) {
+    client.setProject(APPWRITE_PROJECT_ID);
+  }
+  return client.setSession(sessionSecret);
 }
 
 const adminClient = getAdminClient();
 const adminUsers = new Users(adminClient);
 const adminDb = new TablesDB(adminClient);
 
-function formatAppwriteErrorFr(err: unknown, fallback = 'Erreur serveur Appwrite.'): string {
+function formatAppwriteErrorFr(err: unknown, fallback = APPWRITE_CONNECTION_FAILED_MSG): string {
+  if (!isServerAppwriteConfigured()) {
+    return APPWRITE_CONFIG_MISSING_MSG;
+  }
   const e = err as { code?: number; type?: string; message?: string };
   const msg = (e?.message || '').toLowerCase();
   const type = e?.type || '';
+  if (isAppwriteProjectNotFoundError(err)) {
+    return e?.message || APPWRITE_CONFIG_MISSING_MSG;
+  }
+  if (
+    msg.includes('fetch failed') ||
+    msg.includes('econnrefused') ||
+    msg.includes('enotfound') ||
+    msg.includes('etimedout') ||
+    msg.includes('network')
+  ) {
+    return APPWRITE_CONNECTION_FAILED_MSG;
+  }
   if (type === 'user_already_exists' || msg.includes('already exists')) {
     return 'Un compte existe déjà avec cette adresse e-mail.';
   }
@@ -2326,6 +2392,14 @@ function invalidateAuthSessionCache(secret?: string) {
 }
 
 async function requireAuth(req: AuthedRequest, res: Response, next: NextFunction) {
+  if (!isServerAppwriteConfigured()) {
+    res.status(503).json({
+      error: APPWRITE_CONFIG_MISSING_MSG,
+      appwriteConfigMissing: true
+    });
+    return;
+  }
+
   const authHeader = req.headers.authorization || '';
   const secret = authHeader.startsWith('Bearer ') ? authHeader.slice(7).trim() : '';
   if (!secret) {
@@ -2371,8 +2445,16 @@ async function requireAuth(req: AuthedRequest, res: Response, next: NextFunction
       expiresAt: Date.now() + AUTH_SESSION_TTL_MS
     });
     next();
-  } catch {
+  } catch (err) {
     AUTH_SESSION_CACHE.delete(cacheKey);
+    if (isAppwriteProjectNotFoundError(err)) {
+      const e = err as { message?: string };
+      res.status(503).json({
+        error: e?.message || APPWRITE_CONFIG_MISSING_MSG,
+        appwriteError: true
+      });
+      return;
+    }
     res.status(401).json({ error: 'Session invalide ou expirée. Reconnectez-vous.' });
   }
 }
@@ -2603,11 +2685,106 @@ export function createSalomaApiApp() {
   app.post('/api/turnstile/verify', handleTurnstileVerify);
 
   // ========================================================
+  // 0B. VÉRIFICATION NON-BLOQUANTE CONFIGURATION APPWRITE
+  // ========================================================
+
+  app.get('/api/appwrite/health', async (_req: Request, res: Response) => {
+    try {
+      if (!isServerAppwriteConfigured()) {
+        res.json({
+          ok: false,
+          configured: false,
+          appwriteConfigMissing: true,
+          error: APPWRITE_CONFIG_MISSING_MSG
+        });
+        return;
+      }
+
+      if (APPWRITE_API_KEY && APPWRITE_DATABASE_ID) {
+        try {
+          await adminDb.listRows({
+            databaseId: APPWRITE_DATABASE_ID,
+            tableId: TABLES.USERS,
+            queries: [Query.limit(1)]
+          });
+          res.json({ ok: true, configured: true });
+          return;
+        } catch (adminErr) {
+          try {
+            const anonAcc = new Account(getAnonClient());
+            await anonAcc.get();
+          } catch (anonErr) {
+            if (isAppwriteProjectNotFoundError(anonErr)) {
+              const ae = anonErr as { message?: string };
+              res.json({
+                ok: false,
+                configured: true,
+                appwriteError: true,
+                error: ae?.message || APPWRITE_CONFIG_MISSING_MSG
+              });
+              return;
+            }
+          }
+          res.json({
+            ok: false,
+            configured: true,
+            appwriteError: true,
+            error: formatAppwriteErrorFr(adminErr, APPWRITE_CONNECTION_FAILED_MSG)
+          });
+          return;
+        }
+      }
+
+      try {
+        const anonAcc = new Account(getAnonClient());
+        await anonAcc.get();
+        res.json({ ok: true, configured: true });
+      } catch (pingErr) {
+        const pe = pingErr as { code?: number; type?: string; message?: string };
+        if (isAppwriteProjectNotFoundError(pingErr)) {
+          res.json({
+            ok: false,
+            configured: true,
+            appwriteError: true,
+            error: pe?.message || APPWRITE_CONFIG_MISSING_MSG
+          });
+          return;
+        }
+        // 401 unauthorized means the Appwrite project exists and responded normally
+        if (pe?.code === 401 || pe?.type === 'user_unauthorized' || pe?.type === 'general_unauthorized_scope') {
+          res.json({ ok: true, configured: true });
+          return;
+        }
+        res.json({
+          ok: false,
+          configured: true,
+          appwriteError: true,
+          error: formatAppwriteErrorFr(pingErr, APPWRITE_CONNECTION_FAILED_MSG)
+        });
+      }
+    } catch (err) {
+      res.json({
+        ok: false,
+        configured: isServerAppwriteConfigured(),
+        appwriteError: true,
+        error: formatAppwriteErrorFr(err, APPWRITE_CONNECTION_FAILED_MSG)
+      });
+    }
+  });
+
+  // ========================================================
   // 1. AUTHENTIFICATION RÉELLE & CODE EMAIL APPWRITE
   // ========================================================
 
   app.post('/api/auth/register', async (req: Request, res: Response) => {
     try {
+      if (!isServerAppwriteConfigured()) {
+        res.status(503).json({
+          error: APPWRITE_CONFIG_MISSING_MSG,
+          appwriteConfigMissing: true
+        });
+        return;
+      }
       const {
         nom = '',
         prenom = '',
@@ -2746,6 +2923,9 @@ export function createSalomaApiApp() {
           'auth'
         );
       } catch (adminErr) {
+        if (isAppwriteProjectNotFoundError(adminErr)) {
+          throw adminErr;
+        }
         const e = adminErr as { code?: number; type?: string };
         if (e?.code === 409 || e?.type === 'user_already_exists') {
           res.status(409).json({ error: 'Cette adresse e-mail est déjà utilisée.' });
@@ -2802,12 +2982,22 @@ export function createSalomaApiApp() {
         wallet: serializeWallet(walletRow)
       });
     } catch (err) {
-      res.status(400).json({ error: formatAppwriteErrorFr(err, 'Erreur lors de l’inscription.') });
+      res.status(400).json({
+        error: formatAppwriteErrorFr(err, 'Erreur lors de l’inscription.'),
+        appwriteError: true
+      });
     }
   });
 
   app.post('/api/auth/login', async (req: Request, res: Response) => {
     try {
+      if (!isServerAppwriteConfigured()) {
+        res.status(503).json({
+          error: APPWRITE_CONFIG_MISSING_MSG,
+          appwriteConfigMissing: true
+        });
+        return;
+      }
       const { email = '', password = '' } = req.body || {};
 
       let turnstileValid = true;
@@ -2946,7 +3136,10 @@ export function createSalomaApiApp() {
         wallet: serializeWallet(walletRow)
       });
     } catch (err) {
-      res.status(401).json({ error: formatAppwriteErrorFr(err, 'Email ou mot de passe incorrect.') });
+      res.status(401).json({
+        error: formatAppwriteErrorFr(err, 'Email ou mot de passe incorrect.'),
+        appwriteError: true
+      });
     }
   });
 
@@ -3013,6 +3206,13 @@ export function createSalomaApiApp() {
 
   app.post('/api/auth/forgot-password', async (req: Request, res: Response) => {
     try {
+      if (!isServerAppwriteConfigured()) {
+        res.status(503).json({
+          error: APPWRITE_CONFIG_MISSING_MSG,
+          appwriteConfigMissing: true
+        });
+        return;
+      }
       const cleanEmail = String(req.body?.email || '').trim().toLowerCase();
       if (!cleanEmail || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(cleanEmail)) {
         res.status(400).json({ error: 'Veuillez entrer une adresse e-mail valide.' });
@@ -3032,6 +3232,13 @@ export function createSalomaApiApp() {
 
   app.post('/api/auth/reset-password', async (req: Request, res: Response) => {
     try {
+      if (!isServerAppwriteConfigured()) {
+        res.status(503).json({
+          error: APPWRITE_CONFIG_MISSING_MSG,
+          appwriteConfigMissing: true
+        });
+        return;
+      }
       const userId = String(req.body?.userId || '').trim();
       const code = String(req.body?.code || '').trim();
       const newPassword = String(req.body?.newPassword || '');
@@ -3063,8 +3270,8 @@ export function createSalomaApiApp() {
       }
 
       res.json({ ok: true, message: 'Mot de passe mis à jour avec succès.' });
-    } catch {
-      res.status(400).json({ error: 'Code incorrect ou expiré.' });
+    } catch (err) {
+      res.status(400).json({ error: formatAppwriteErrorFr(err, 'Code incorrect ou expiré.') });
     }
   });
 
@@ -3158,16 +3365,23 @@ export function createSalomaApiApp() {
   }
 
   app.get('/api/me/session', requireAuth, async (req: AuthedRequest, res: Response) => {
-    const userId = req.authUser!.$id;
-    const isVerified =
-      Boolean(req.userRow?.email_verifie) || Boolean(req.authUser?.emailVerification);
-    const wallet = await getOrCreateWalletRow(userId);
-    res.json({
-      userId,
-      requiresEmailVerification: !isVerified,
-      user: req.userRow ? sanitizeUserRow(req.userRow) : { user_id: userId, email: req.authUser!.email, nom: req.authUser!.name },
-      wallet: serializeWallet(wallet as unknown as Record<string, unknown>)
-    });
+    try {
+      const userId = req.authUser!.$id;
+      const isVerified =
+        Boolean(req.userRow?.email_verifie) || Boolean(req.authUser?.emailVerification);
+      const wallet = await getOrCreateWalletRow(userId);
+      res.json({
+        userId,
+        requiresEmailVerification: !isVerified,
+        user: req.userRow ? sanitizeUserRow(req.userRow) : { user_id: userId, email: req.authUser!.email, nom: req.authUser!.name },
+        wallet: serializeWallet(wallet as unknown as Record<string, unknown>)
+      });
+    } catch (err) {
+      res.status(503).json({
+        error: formatAppwriteErrorFr(err, APPWRITE_CONNECTION_FAILED_MSG),
+        appwriteError: true
+      });
+    }
   });
 
   app.get('/api/me/dashboard', requireAuth, requireVerified, async (req: AuthedRequest, res: Response) => {
@@ -4289,6 +4503,591 @@ export function createSalomaApiApp() {
       res.json({ ok: true, deletedCount });
     } catch (err) {
       res.status(400).json({ error: formatAppwriteErrorFr(err, 'Erreur lors de la suppression de l’historique Trade.') });
+    }
+  });
+
+  // ========================================================
+  // 4B. BOT 3 : LIMITE 3 TRADES / COIN / JOUR (COLLECTION TRADE APPWRITE)
+  // ========================================================
+
+  const BOT3_MAX_TRADES_PER_COIN_DAY = 3;
+
+  function formatDayKeyWithTzOffset(dateInput: unknown, tzOffsetMinutes = -180): string {
+    const dt = new Date(String(dateInput || ''));
+    if (Number.isNaN(dt.getTime())) return '';
+    const offset = Number.isFinite(tzOffsetMinutes) ? tzOffsetMinutes : -180;
+    const shifted = new Date(dt.getTime() - offset * 60_000);
+    const y = shifted.getUTCFullYear();
+    const m = String(shifted.getUTCMonth() + 1).padStart(2, '0');
+    const d = String(shifted.getUTCDate()).padStart(2, '0');
+    return `${y}-${m}-${d}`;
+  }
+
+  async function getAppwriteCoinTradeCountsToday(
+    userId: string,
+    targetDayKey: string,
+    tzOffsetMinutes = -180
+  ): Promise<Record<string, number>> {
+    const countsByCoin: Record<string, number> = {};
+    let cursor: string | null = null;
+    let pages = 0;
+
+    while (pages < 5) {
+      pages++;
+      const queries = [
+        Query.equal('user_id', userId),
+        Query.orderDesc('$createdAt'),
+        Query.limit(100)
+      ];
+      if (cursor) queries.push(Query.cursorAfter(cursor));
+
+      const batch = await adminDb.listRows({
+        databaseId: APPWRITE_DATABASE_ID,
+        tableId: TABLES.TRADES,
+        queries
+      });
+      if (batch.rows.length === 0) break;
+
+      let reachedOlderThanTwoDays = false;
+      const nowCutoffMs = Date.now() - 48 * 3600 * 1000;
+
+      for (const row of batch.rows) {
+        if (String(row.statut || '').toLowerCase() === 'annule') continue;
+        const rawDate = row.date_creation || row.$createdAt;
+        const parsedMs = new Date(String(rawDate || '')).getTime();
+        if (!Number.isNaN(parsedMs) && parsedMs < nowCutoffMs) {
+          reachedOlderThanTwoDays = true;
+        }
+        const rowDayKey = formatDayKeyWithTzOffset(rawDate, tzOffsetMinutes);
+        if (rowDayKey === targetDayKey) {
+          const baseCoin = String(row.paire || '')
+            .split('/')[0]
+            ?.toUpperCase()
+            .trim();
+          if (baseCoin) {
+            countsByCoin[baseCoin] = (countsByCoin[baseCoin] || 0) + 1;
+          }
+        }
+      }
+
+      if (reachedOlderThanTwoDays || batch.rows.length < 100) break;
+      cursor = batch.rows[batch.rows.length - 1].$id;
+    }
+
+    return countsByCoin;
+  }
+
+  app.get('/api/bot3/coin-limits', requireAuth, requireVerified, async (req: AuthedRequest, res: Response) => {
+    try {
+      const userId = req.authUser!.$id;
+      const tzOffset = Number(req.query.tzOffset ?? -180);
+      const requestedDayKey = String(req.query.dayKey || '').trim();
+      const targetDayKey = /^\d{4}-\d{2}-\d{2}$/.test(requestedDayKey)
+        ? requestedDayKey
+        : formatDayKeyWithTzOffset(new Date().toISOString(), tzOffset);
+
+      const countsByCoin = await getAppwriteCoinTradeCountsToday(userId, targetDayKey, tzOffset);
+      res.json({
+        ok: true,
+        dayKey: targetDayKey,
+        maxPerCoin: BOT3_MAX_TRADES_PER_COIN_DAY,
+        countsByCoin
+      });
+    } catch (err) {
+      res.status(503).json({
+        error: formatAppwriteErrorFr(err, APPWRITE_CONNECTION_FAILED_MSG),
+        appwriteError: true
+      });
+    }
+  });
+
+  app.post('/api/bot3/record-trade', requireAuth, requireVerified, async (req: AuthedRequest, res: Response) => {
+    try {
+      const userId = req.authUser!.$id;
+      const symbol = String(req.body?.symbol || '').toUpperCase().trim();
+      const amountAr = Math.max(1, Math.round(Number(req.body?.amountAr || 0)));
+      const entryPrice = Number(req.body?.entryPrice || 0);
+      const exitPrice = Number(req.body?.exitPrice || entryPrice || 0);
+      const leverage = Math.min(100, Math.max(1, Math.round(Number(req.body?.leverage || 1))));
+      const pnlAr = Math.round(Number(req.body?.pnlAr || 0));
+      const tzOffset = Number(req.body?.tzOffset ?? -180);
+      const requestedDayKey = String(req.body?.dayKey || '').trim();
+      const targetDayKey = /^\d{4}-\d{2}-\d{2}$/.test(requestedDayKey)
+        ? requestedDayKey
+        : formatDayKeyWithTzOffset(new Date().toISOString(), tzOffset);
+
+      if (!symbol) {
+        res.status(400).json({ error: 'Coin invalide.' });
+        return;
+      }
+
+      const countsByCoin = await getAppwriteCoinTradeCountsToday(userId, targetDayKey, tzOffset);
+      const currentCount = countsByCoin[symbol] || 0;
+      if (currentCount >= BOT3_MAX_TRADES_PER_COIN_DAY) {
+        res.status(429).json({
+          error: 'LIMITE 3/3 ATTEINTE - Pause pour ce Coin',
+          coinLimitReached: true,
+          symbol,
+          dayKey: targetDayKey,
+          countsByCoin
+        });
+        return;
+      }
+
+      const nowIso = new Date().toISOString();
+      const createdTrade = await adminDb.createRow({
+        databaseId: APPWRITE_DATABASE_ID,
+        tableId: TABLES.TRADES,
+        rowId: ID.unique(),
+        data: {
+          user_id: userId,
+          paire: `${symbol}/USDT`,
+          type: 'achat',
+          montant: amountAr,
+          prix: entryPrice > 0 ? entryPrice : 1,
+          profit: pnlAr,
+          statut: 'termine',
+          date_creation: nowIso,
+          date_cloture: nowIso,
+          leverage,
+          close_price: exitPrice > 0 ? exitPrice : entryPrice > 0 ? entryPrice : 1,
+          mode: 'BOT 3'
+        }
+      });
+
+      const updatedCounts = {
+        ...countsByCoin,
+        [symbol]: currentCount + 1
+      };
+
+      res.status(201).json({
+        ok: true,
+        trade: createdTrade,
+        dayKey: targetDayKey,
+        countsByCoin: updatedCounts
+      });
+    } catch (err) {
+      res.status(503).json({
+        error: formatAppwriteErrorFr(err, APPWRITE_CONNECTION_FAILED_MSG),
+        appwriteError: true
+      });
+    }
+  });
+
+  function parseBotJsonSafe<T>(raw: unknown, fallback: T): T {
+    if (!raw) return fallback;
+    if (typeof raw === 'object') return raw as T;
+    try {
+      return JSON.parse(String(raw)) as T;
+    } catch {
+      return fallback;
+    }
+  }
+
+  function readBotNum(obj: Record<string, unknown>, keys: string[], fallback = 0): number {
+    for (const k of keys) {
+      if (obj[k] !== undefined && obj[k] !== null && obj[k] !== '') {
+        const n = Number(obj[k]);
+        if (!Number.isNaN(n)) return n;
+      }
+    }
+    return fallback;
+  }
+
+  function readBotBool(obj: Record<string, unknown>, keys: string[], fallback = false): boolean {
+    for (const k of keys) {
+      if (obj[k] !== undefined && obj[k] !== null) {
+        if (typeof obj[k] === 'boolean') return obj[k] as boolean;
+        const s = String(obj[k]).toLowerCase().trim();
+        if (s === 'true' || s === '1' || s === 'on' || s === 'yes') return true;
+        if (s === 'false' || s === '0' || s === 'off' || s === 'no') return false;
+      }
+    }
+    return fallback;
+  }
+
+  function readBotStr(obj: Record<string, unknown>, keys: string[], fallback = ''): string {
+    for (const k of keys) {
+      if (typeof obj[k] === 'string' && String(obj[k]).trim()) {
+        return String(obj[k]).trim();
+      }
+    }
+    return fallback;
+  }
+
+  async function upsertBotSettingAdaptive(
+    tableId: string,
+    existingRowId: string | null,
+    data: Record<string, unknown>
+  ) {
+    const payload: Record<string, unknown> = { ...data };
+    for (let attempt = 0; attempt < 12; attempt++) {
+      try {
+        if (existingRowId) {
+          return await adminDb.updateRow({
+            databaseId: APPWRITE_DATABASE_ID,
+            tableId,
+            rowId: existingRowId,
+            data: payload
+          });
+        }
+        return await adminDb.createRow({
+          databaseId: APPWRITE_DATABASE_ID,
+          tableId,
+          rowId: ID.unique(),
+          data: payload
+        });
+      } catch (err) {
+        const msg = String((err as { message?: string })?.message || '');
+        const match = msg.match(/Unknown attribute:\s*"([^"]+)"/i);
+        if (match && match[1] && match[1] in payload) {
+          delete payload[match[1]];
+          continue;
+        }
+        throw err;
+      }
+    }
+    return null;
+  }
+
+  async function resolveUserLiveBalanceAr(userId: string): Promise<number> {
+    if (TABLES.LIVE_BALANCE) {
+      const lbRes = await adminDb.listRows({
+        databaseId: APPWRITE_DATABASE_ID,
+        tableId: TABLES.LIVE_BALANCE,
+        queries: [Query.equal('user_id', userId), Query.limit(1)]
+      });
+      const lbRow = lbRes.rows[0] as Record<string, unknown> | undefined;
+      if (lbRow) {
+        const val = readBotNum(
+          lbRow,
+          ['live_balance', 'balance', 'solde', 'montant', 'capital_ar', 'compte_trade', 'solde_disponible'],
+          0
+        );
+        return Math.max(0, Math.round(val));
+      }
+    }
+    const wallet = await getOrCreateWalletRow(userId);
+    const ser = serializeWallet(wallet as unknown as Record<string, unknown>);
+    const tradeAr = Number(ser.compte_trade) || 0;
+    const dispAr = Number(ser.solde_disponible) || 0;
+    return Math.max(0, Math.round(tradeAr > 0 ? tradeAr : dispAr));
+  }
+
+  app.get('/api/bot3/state', requireAuth, requireVerified, async (req: AuthedRequest, res: Response) => {
+    try {
+      const userId = req.authUser!.$id;
+      const tzOffset = Number(req.query.tzOffset ?? -180);
+      const requestedDayKey = String(req.query.dayKey || '').trim();
+      const targetDayKey = /^\d{4}-\d{2}-\d{2}$/.test(requestedDayKey)
+        ? requestedDayKey
+        : formatDayKeyWithTzOffset(new Date().toISOString(), tzOffset);
+
+      const [liveBalanceAr, countsByCoin, tradesRes, botSettingRes, signalesRes] = await Promise.all([
+        resolveUserLiveBalanceAr(userId),
+        getAppwriteCoinTradeCountsToday(userId, targetDayKey, tzOffset),
+        adminDb.listRows({
+          databaseId: APPWRITE_DATABASE_ID,
+          tableId: TABLES.TRADES,
+          queries: [Query.equal('user_id', userId), Query.orderDesc('$createdAt'), Query.limit(100)]
+        }),
+        TABLES.BOT_SETTING
+          ? adminDb.listRows({
+              databaseId: APPWRITE_DATABASE_ID,
+              tableId: TABLES.BOT_SETTING,
+              queries: [Query.equal('user_id', userId), Query.limit(1)]
+            })
+          : Promise.resolve({ rows: [] as Record<string, unknown>[] }),
+        TABLES.SIGNALES
+          ? adminDb.listRows({
+              databaseId: APPWRITE_DATABASE_ID,
+              tableId: TABLES.SIGNALES,
+              queries: [Query.limit(100)]
+            })
+          : Promise.resolve({ rows: [] as Record<string, unknown>[] })
+      ]);
+
+      const rawSetting = (botSettingRes.rows[0] || {}) as Record<string, unknown>;
+      const embedded = parseBotJsonSafe<Record<string, unknown>>(rawSetting.settings_json, {});
+      const merged = { ...embedded, ...rawSetting };
+      const historyClearedBeforeMs = Number(
+        readBotNum(merged, ['history_cleared_before', 'historyClearedBefore'], 0)
+      );
+
+      const activePositionRaw = parseBotJsonSafe<Record<string, unknown> | null>(
+        merged.active_position_json ?? merged.activePositionJson ?? embedded.activePosition,
+        null
+      );
+
+      const bot3AllTrades = tradesRes.rows.filter(
+        r => String(r.mode || '').toUpperCase().trim() === 'BOT 3'
+      );
+      const openRow = bot3AllTrades.find(r => String(r.statut || '').toLowerCase() === 'en_cours');
+
+      const activePosition =
+        activePositionRaw && activePositionRaw.symbol
+          ? activePositionRaw
+          : openRow
+          ? {
+              symbol: String(openRow.paire || 'BTC/USDT').split('/')[0].toUpperCase().trim(),
+              entryPrice: Number(openRow.prix) || 0,
+              currentPrice: Number(openRow.close_price || openRow.prix) || 0,
+              entryTimeMs: new Date(String(openRow.date_creation || openRow.$createdAt)).getTime() || Date.now(),
+              amountAr: Number(openRow.montant) || 0,
+              leverage: Number(openRow.leverage) || 1,
+              pnlPct:
+                Number(openRow.montant) > 0
+                  ? Number((((Number(openRow.profit) || 0) / Number(openRow.montant)) * 100).toFixed(2))
+                  : 0,
+              pnlAr: Number(openRow.profit) || 0,
+              ticksHeld: 1
+            }
+          : null;
+
+      const history = bot3AllTrades
+        .filter(r => String(r.statut || '').toLowerCase() !== 'en_cours')
+        .filter(r => {
+          const ts = new Date(String(r.date_cloture || r.date_creation || r.$createdAt)).getTime();
+          return !historyClearedBeforeMs || ts > historyClearedBeforeMs;
+        })
+        .map(r => {
+          const sym = String(r.paire || 'BTC/USDT').split('/')[0].toUpperCase().trim();
+          const amt = Math.max(1, Number(r.montant) || 0);
+          const pnlAr = Math.round(Number(r.profit) || 0);
+          const pnlPct = Number(((pnlAr / amt) * 100).toFixed(2));
+          const ts = new Date(String(r.date_cloture || r.date_creation || r.$createdAt)).getTime() || Date.now();
+          return {
+            id: String(r.$id),
+            symbol: sym,
+            side: 'LIMIT BUY → SELL' as const,
+            leverage: Math.max(1, Number(r.leverage) || 1),
+            amountAr: amt,
+            pnlPct,
+            pnlAr,
+            entryPrice: Number(r.prix) || 0,
+            exitPrice: Number(r.close_price || r.prix) || 0,
+            reason: pnlAr >= 0 ? ('TP' as const) : ('SL' as const),
+            timestamp: ts
+          };
+        });
+
+      const signals = signalesRes.rows
+        .map((s: Record<string, unknown>) => {
+          const sym = readBotStr(s, ['symbol', 'coin', 'paire', 'asset']).split('/')[0].toUpperCase().trim();
+          const dirRaw = readBotStr(s, ['signal_dir', 'direction', 'dir', 'tendance']).toLowerCase();
+          const signalDir =
+            dirRaw === 'up' || dirRaw === 'hausse' || dirRaw === 'buy' || dirRaw === 'vert'
+              ? 'up'
+              : dirRaw === 'down' || dirRaw === 'baisse' || dirRaw === 'sell' || dirRaw === 'rouge'
+              ? 'down'
+              : 'none';
+          const stepRaw = readBotNum(s, ['signal_step', 'step', 'signal', 'bougie', 'candle_step'], 0);
+          const price = readBotNum(s, ['price', 'prix', 'close', 'saloma_price', 'last_price'], 0);
+          return {
+            symbol: sym,
+            signalDir,
+            signalStep: stepRaw >= 1 && stepRaw <= 9 ? Math.round(stepRaw) : null,
+            price
+          };
+        })
+        .filter(s => Boolean(s.symbol));
+
+      const sameDay = readBotStr(merged, ['last_day_key', 'lastDayKey'], targetDayKey) === targetDayKey;
+      const dayStartCapitalAr = sameDay
+        ? Math.max(0, Math.round(readBotNum(merged, ['day_start_capital_ar', 'dayStartCapitalAr'], liveBalanceAr)))
+        : liveBalanceAr;
+
+      res.json({
+        ok: true,
+        dayKey: targetDayKey,
+        maxPerCoin: BOT3_MAX_TRADES_PER_COIN_DAY,
+        liveBalanceAr,
+        countsByCoin,
+        activePosition,
+        history,
+        signals,
+        botSettingConfigured: Boolean(TABLES.BOT_SETTING),
+        setting: {
+          enabled: liveBalanceAr > 0 ? readBotBool(merged, ['enabled', 'actif', 'bot_enabled', 'is_active'], false) : false,
+          capitalAr: liveBalanceAr,
+          dayStartCapitalAr,
+          capitalUsedPct: Math.min(100, Math.max(1, Math.round(readBotNum(merged, ['capital_used_pct', 'capitalUsedPct'], 100)))),
+          investmentAr: Math.min(
+            liveBalanceAr,
+            Math.max(0, Math.round(readBotNum(merged, ['investment_ar', 'investmentAr', 'investissement'], 0)))
+          ),
+          usePercentStakeMode: readBotBool(merged, ['use_percent_stake_mode', 'usePercentStakeMode'], false),
+          leverage: Math.min(100, Math.max(1, Math.round(readBotNum(merged, ['leverage', 'levier'], 10)))),
+          leverageEnabled: readBotBool(merged, ['leverage_enabled', 'leverageEnabled'], true),
+          profitTargetPct: Math.min(
+            30,
+            Math.max(1, readBotNum(merged, ['profit_target_pct', 'profitTargetPct', 'profit'], 30))
+          ),
+          stopLossPct: -Math.min(
+            50,
+            Math.max(0.05, Math.abs(readBotNum(merged, ['stop_loss_pct', 'stopLossPct', 'stop_loss'], -0.2)))
+          ),
+          dailyTradesCount: sameDay
+            ? Math.max(0, Math.round(readBotNum(merged, ['daily_trades_count', 'dailyTradesCount'], 0)))
+            : 0,
+          consecutiveLosses: sameDay
+            ? Math.max(0, Math.round(readBotNum(merged, ['consecutive_losses', 'consecutiveLosses'], 0)))
+            : 0,
+          sleepMode: sameDay ? readBotStr(merged, ['sleep_mode', 'sleepMode'], 'NONE') : 'NONE',
+          sleepUntilMs: sameDay ? readBotNum(merged, ['sleep_until_ms', 'sleepUntilMs'], 0) || null : null,
+          lastDayKey: targetDayKey,
+          lastTradePnlAr:
+            merged.last_trade_pnl_ar !== undefined && merged.last_trade_pnl_ar !== null
+              ? Number(merged.last_trade_pnl_ar)
+              : merged.lastTradePnlAr !== undefined && merged.lastTradePnlAr !== null
+              ? Number(merged.lastTradePnlAr)
+              : null,
+          statusLabel: readBotStr(merged, ['status_label', 'statusLabel'], ''),
+          avatarMood: readBotStr(merged, ['avatar_mood', 'avatarMood'], ''),
+          scannedSymbol: readBotStr(merged, ['scanned_symbol', 'scannedSymbol'], 'PEPE'),
+          lastRunAt: readBotStr(merged, ['last_run_at', 'lastRunAt'], '')
+        }
+      });
+    } catch (err) {
+      res.status(503).json({
+        error: formatAppwriteErrorFr(err, APPWRITE_CONNECTION_FAILED_MSG),
+        appwriteError: true
+      });
+    }
+  });
+
+  app.post('/api/bot3/settings', requireAuth, requireVerified, async (req: AuthedRequest, res: Response) => {
+    try {
+      const userId = req.authUser!.$id;
+      if (!TABLES.BOT_SETTING) {
+        res.status(503).json({
+          error: 'ID Bot Setting introuvable - vérifie les Environment Variables',
+          appwriteConfigMissing: true
+        });
+        return;
+      }
+
+      const liveBalanceAr = await resolveUserLiveBalanceAr(userId);
+      const requestedEnabled = Boolean(req.body?.enabled);
+      if (requestedEnabled && liveBalanceAr <= 0) {
+        res.status(400).json({
+          error: 'Solde Live Balance Appwrite à 0 Ar — Effectuez un dépôt réel avant d’allumer BOT 3.'
+        });
+        return;
+      }
+
+      const existingRes = await adminDb.listRows({
+        databaseId: APPWRITE_DATABASE_ID,
+        tableId: TABLES.BOT_SETTING,
+        queries: [Query.equal('user_id', userId), Query.limit(1)]
+      });
+      const existingRow = existingRes.rows[0] as Record<string, unknown> | undefined;
+      const existingEmbedded = parseBotJsonSafe<Record<string, unknown>>(existingRow?.settings_json, {});
+
+      const tzOffset = Number(req.body?.tzOffset ?? -180);
+      const targetDayKey = formatDayKeyWithTzOffset(new Date().toISOString(), tzOffset);
+      const capitalUsedPct = Math.min(100, Math.max(1, Math.round(Number(req.body?.capitalUsedPct ?? 100))));
+      const usePercentStakeMode = Boolean(req.body?.usePercentStakeMode);
+      const investmentAr = Math.min(
+        liveBalanceAr,
+        Math.max(
+          0,
+          Math.round(
+            usePercentStakeMode
+              ? (liveBalanceAr * capitalUsedPct) / 100
+              : Number(req.body?.investmentAr ?? 0)
+          )
+        )
+      );
+      const leverage = Math.min(100, Math.max(1, Math.round(Number(req.body?.leverage ?? 10))));
+      const leverageEnabled = req.body?.leverageEnabled !== false;
+      const profitTargetPct = Math.min(30, Math.max(1, Number(req.body?.profitTargetPct ?? 30)));
+      const stopLossPct = -Math.min(50, Math.max(0.05, Math.abs(Number(req.body?.stopLossPct ?? -0.2))));
+      const dayStartCapitalAr = Math.max(
+        0,
+        Math.round(
+          readBotNum(
+            { ...existingEmbedded, ...(existingRow || {}) },
+            ['day_start_capital_ar', 'dayStartCapitalAr'],
+            liveBalanceAr
+          ) || liveBalanceAr
+        )
+      );
+
+      const nextEmbedded = {
+        ...existingEmbedded,
+        enabled: requestedEnabled,
+        capitalAr: liveBalanceAr,
+        dayStartCapitalAr,
+        capitalUsedPct,
+        investmentAr,
+        usePercentStakeMode,
+        leverage,
+        leverageEnabled,
+        profitTargetPct,
+        stopLossPct,
+        lastDayKey: targetDayKey
+      };
+
+      await upsertBotSettingAdaptive(TABLES.BOT_SETTING, existingRow ? String(existingRow.$id) : null, {
+        user_id: userId,
+        enabled: requestedEnabled,
+        actif: requestedEnabled,
+        capital_ar: liveBalanceAr,
+        day_start_capital_ar: dayStartCapitalAr,
+        capital_used_pct: capitalUsedPct,
+        investment_ar: investmentAr,
+        use_percent_stake_mode: usePercentStakeMode,
+        leverage,
+        leverage_enabled: leverageEnabled,
+        profit_target_pct: profitTargetPct,
+        stop_loss_pct: stopLossPct,
+        last_day_key: targetDayKey,
+        status_label: requestedEnabled
+          ? 'ON — Bot 24/7 actif sur Appwrite (bot-saloma Cron 1 min)'
+          : 'BOT 3 arrêté (OFF)',
+        avatar_mood: requestedEnabled ? 'WATCHING' : 'OFF',
+        settings_json: JSON.stringify(nextEmbedded)
+      });
+
+      res.json({ ok: true, setting: nextEmbedded, liveBalanceAr });
+    } catch (err) {
+      res.status(503).json({
+        error: formatAppwriteErrorFr(err, APPWRITE_CONNECTION_FAILED_MSG),
+        appwriteError: true
+      });
+    }
+  });
+
+  app.post('/api/bot3/clear-history', requireAuth, requireVerified, async (req: AuthedRequest, res: Response) => {
+    try {
+      const userId = req.authUser!.$id;
+      if (!TABLES.BOT_SETTING) {
+        res.json({ ok: true });
+        return;
+      }
+      const existingRes = await adminDb.listRows({
+        databaseId: APPWRITE_DATABASE_ID,
+        tableId: TABLES.BOT_SETTING,
+        queries: [Query.equal('user_id', userId), Query.limit(1)]
+      });
+      const existingRow = existingRes.rows[0] as Record<string, unknown> | undefined;
+      const existingEmbedded = parseBotJsonSafe<Record<string, unknown>>(existingRow?.settings_json, {});
+      const nowMs = Date.now();
+      await upsertBotSettingAdaptive(TABLES.BOT_SETTING, existingRow ? String(existingRow.$id) : null, {
+        user_id: userId,
+        history_cleared_before: nowMs,
+        settings_json: JSON.stringify({
+          ...existingEmbedded,
+          historyClearedBefore: nowMs
+        })
+      });
+      res.json({ ok: true, clearedBefore: nowMs });
+    } catch (err) {
+      res.status(503).json({
+        error: formatAppwriteErrorFr(err, APPWRITE_CONNECTION_FAILED_MSG),
+        appwriteError: true
+      });
     }
   });
 

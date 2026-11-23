@@ -1,0 +1,10 @@
+{
+  "name": "bot-saloma",
+  "version": "1.0.0",
+  "description": "SALOMA Robot N°03 24/7 Appwrite Function (Cron 1 minute)",
+  "main": "src/main.js",
+  "type": "module",
+  "dependencies": {
+    "node-appwrite": "^31.2.0"
+  }
+}

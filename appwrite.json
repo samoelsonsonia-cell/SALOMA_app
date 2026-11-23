@@ -1,0 +1,21 @@
+{
+  "projectId": "",
+  "functions": [
+    {
+      "$id": "bot-saloma",
+      "name": "bot-saloma",
+      "runtime": "node-20.0",
+      "execute": [
+        "any"
+      ],
+      "events": [],
+      "schedule": "* * * * *",
+      "timeout": 60,
+      "enabled": true,
+      "logging": true,
+      "entrypoint": "src/main.js",
+      "commands": "npm install",
+      "path": "functions/bot-saloma"
+    }
+  ]
+}

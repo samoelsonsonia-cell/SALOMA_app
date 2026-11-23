@@ -43,10 +43,8 @@ function getServerAdminPin(): string {
 }
 
 function getAppwriteProjectId(): string {
-  return (
-    stripWrappingQuotes(
-      process.env.APPWRITE_PROJECT_ID || process.env.VITE_APPWRITE_PROJECT_ID
-    ) || '6af771140031749ce67c'
+  return stripWrappingQuotes(
+    process.env.APPWRITE_PROJECT_ID || process.env.VITE_APPWRITE_PROJECT_ID
   );
 }
 

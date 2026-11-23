@@ -32,18 +32,14 @@ function getServerAdminPin(): string {
 }
 
 function getAppwriteEndpoint(): string {
-  return (
-    stripWrappingQuotes(
-      process.env.APPWRITE_ENDPOINT || process.env.VITE_APPWRITE_ENDPOINT
-    ) || 'https://fra.cloud.appwrite.io/v1'
+  return stripWrappingQuotes(
+    process.env.APPWRITE_ENDPOINT || process.env.VITE_APPWRITE_ENDPOINT
   );
 }
 
 function getAppwriteProjectId(): string {
-  return (
-    stripWrappingQuotes(
-      process.env.APPWRITE_PROJECT_ID || process.env.VITE_APPWRITE_PROJECT_ID
-    ) || '6af771140031749ce67c'
+  return stripWrappingQuotes(
+    process.env.APPWRITE_PROJECT_ID || process.env.VITE_APPWRITE_PROJECT_ID
   );
 }
 

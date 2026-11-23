@@ -17,9 +17,9 @@ function stripWrappingQuotes(raw: unknown): string {
 function verifyAdminHeaders(req: IncomingMessage): { ok: true } | { ok: false; error: string } {
   const configuredEmail = stripWrappingQuotes(process.env.ADMIN_EMAIL).trim().toLowerCase();
   const configuredPin = stripWrappingQuotes(process.env.ADMIN_PIN).trim();
-  const projectId =
-    stripWrappingQuotes(process.env.APPWRITE_PROJECT_ID || process.env.VITE_APPWRITE_PROJECT_ID) ||
-    '6af771140031749ce67c';
+  const projectId = stripWrappingQuotes(
+    process.env.APPWRITE_PROJECT_ID || process.env.VITE_APPWRITE_PROJECT_ID
+  );
   const pin = String(req.headers['x-admin-pin'] || '').trim();
   const email = String(req.headers['x-admin-email'] || '').trim().toLowerCase();
   const adminToken = String(req.headers['x-admin-token'] || '').trim();

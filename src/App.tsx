@@ -68,6 +68,12 @@ import {
   type AdminWalletRow,
   type AdminWalletTxRow
 } from './components/AdminWalletView';
+import { Bot3Panel } from './components/Bot3Panel';
+import {
+  useBot3Engine,
+  getLocalDayKey,
+  type Bot3TradeRecord
+} from './hooks/useBot3Engine';
 import {
   Coin,
   BackendPublicCoin,
@@ -97,6 +103,9 @@ import {
 import {
   ENV_CONFIG,
   COOKIE_SESSION_MARKER,
+  APPWRITE_CONFIG_MISSING_MSG,
+  APPWRITE_CONNECTION_FAILED_MSG,
+  hasAppwriteClientConfig,
   apiRequest,
   isApiNotFoundError,
   isTurnstileRetryError,
@@ -476,6 +485,7 @@ export default function App() {
   }, [ensureOnlineOrBlock]);
 
   // --- REAL APPWRITE USER & DATABASE STATE ---
+  const [appwriteStatusError, setAppwriteStatusError] = useState<string | null>(null);
   const [userRow, setUserRow] = useState<AppwriteUserRow | null>(null);
   const [walletRow, setWalletRow] = useState<AppwriteWalletRow | null>(null);
   const [tradesList, setTradesList] = useState<AppwriteTradeRow[]>([]);
@@ -753,13 +763,52 @@ export default function App() {
     loginTurnstileTokenRef.current = '';
   }, [screen]);
 
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await apiRequest<{
+          ok: boolean;
+          configured?: boolean;
+          error?: string;
+        }>('/api/appwrite/health', { timeoutMs: 4500 });
+        if (!cancelled) {
+          if (!res.ok) {
+            setAppwriteStatusError(res.error || APPWRITE_CONFIG_MISSING_MSG);
+          } else {
+            setAppwriteStatusError(null);
+          }
+        }
+      } catch (err) {
+        if (!cancelled && isApiNotFoundError(err)) {
+          if (!hasAppwriteClientConfig) {
+            setAppwriteStatusError(APPWRITE_CONFIG_MISSING_MSG);
+          } else {
+            setAppwriteStatusError(null);
+          }
+        }
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
   // --- DASHBOARD LOADER & SESSION RESTORE ---
   const loadDashboard = useCallback(async (token: string) => {
     if (token === COOKIE_SESSION_MARKER) {
-      const sess = await directAppwriteGetSession();
-      setUserRow(sess.user);
-      setWalletRow(sess.wallet);
-      return;
+      try {
+        const sess = await directAppwriteGetSession();
+        setAppwriteStatusError(null);
+        setUserRow(sess.user);
+        setWalletRow(sess.wallet);
+        return;
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : APPWRITE_CONNECTION_FAILED_MSG;
+        setAppwriteStatusError(msg);
+        setWalletRow(null);
+        throw err;
+      }
     }
     try {
       const data = await apiRequest<{
@@ -774,6 +823,7 @@ export default function App() {
         priceAlerts?: PriceAlertRow[];
       }>('/api/me/dashboard', { token });
 
+      setAppwriteStatusError(null);
       setUserRow(data.user);
       setWalletRow(data.wallet);
       setTradesList(data.trades || []);
@@ -789,11 +839,22 @@ export default function App() {
       }
     } catch (err) {
       if (isApiNotFoundError(err)) {
-        const sess = await directAppwriteGetSession();
-        setUserRow(sess.user);
-        setWalletRow(sess.wallet);
-        return;
+        try {
+          const sess = await directAppwriteGetSession();
+          setAppwriteStatusError(null);
+          setUserRow(sess.user);
+          setWalletRow(sess.wallet);
+          return;
+        } catch (directErr) {
+          const msg = directErr instanceof Error ? directErr.message : APPWRITE_CONNECTION_FAILED_MSG;
+          setAppwriteStatusError(msg);
+          setWalletRow(null);
+          throw directErr;
+        }
       }
+      const msg = err instanceof Error ? err.message : APPWRITE_CONNECTION_FAILED_MSG;
+      setAppwriteStatusError(msg);
+      setWalletRow(null);
       throw err;
     }
   }, []);
@@ -962,8 +1023,12 @@ export default function App() {
           await loadDashboard(sessionToken);
           if (!cancelled) setScreen('main');
         }
-      } catch {
+      } catch (err) {
         if (!cancelled) {
+          const apiErr = err as ApiError | undefined;
+          if (apiErr && (apiErr.appwriteConfigMissing || apiErr.appwriteError || apiErr.isNetworkError)) {
+            setAppwriteStatusError(apiErr.message || APPWRITE_CONNECTION_FAILED_MSG);
+          }
           clearAuthSession();
           setScreen('splash');
         }
@@ -1808,14 +1873,43 @@ export default function App() {
   const clientUsdtBalance = Number(coinsJson['USDT'] || 0);
   const clientSelectedCryptoBalance = Number(coinsJson[selectedCoin.symbol.toUpperCase()] || 0);
 
-  // --- AUTO STRATEGIE (BOTS BINANCE: Spot Grid Bot & DCA Bot) ---
-  const [selectedBotType, setSelectedBotType] = useState<'SPOT_GRID' | 'DCA'>('SPOT_GRID');
+  // --- AUTO STRATEGIE (BOTS BINANCE: Spot Grid Bot & DCA Bot & BOT 3) ---
+  const [selectedBotType, setSelectedBotType] = useState<'SPOT_GRID' | 'DCA' | 'BOT_3'>('SPOT_GRID');
   const [botAmountCurrency, setBotAmountCurrency] = useState<string>('ARIARY');
   const [botAmountInput, setBotAmountInput] = useState<string>('25000');
   const [botGridProfile, setBotGridProfile] = useState<'Prudent (5 grilles)' | 'Équilibré (10 grilles)' | 'Dynamique (20 grilles)'>('Équilibré (10 grilles)');
   const [botDcaFreq, setBotDcaFreq] = useState<'Toutes les 1h' | 'Toutes les 4h' | 'Quotidien'>('Toutes les 4h');
   const [botDcaTp, setBotDcaTp] = useState<'+2%' | '+5%' | '+10%'>('+5%');
   const [botSubmitting, setBotSubmitting] = useState<boolean>(false);
+
+  const appwriteCoinTradesToday = useMemo(() => {
+    const todayKey = getLocalDayKey();
+    const countsFromTradesList: Record<string, number> = {};
+    for (const tr of tradesList) {
+      if (String(tr.statut || '').toLowerCase() === 'annule') continue;
+      const dt = new Date(String(tr.date_creation || ''));
+      if (Number.isNaN(dt.getTime())) continue;
+      if (getLocalDayKey(dt) !== todayKey) continue;
+      const sym = String(tr.paire || '')
+        .split('/')[0]
+        ?.toUpperCase()
+        .trim();
+      if (sym) {
+        countsFromTradesList[sym] = (countsFromTradesList[sym] || 0) + 1;
+      }
+    }
+    return countsFromTradesList;
+  }, [tradesList]);
+
+  const bot3Engine = useBot3Engine({
+    sessionToken,
+    userId: userRow?.user_id || userRow?.$id || null,
+    liveBalanceAr: appwriteStatusError ? 0 : Math.round(soldeCompteTradeAr || soldeDisponibleAr || 0),
+    appwriteError: appwriteStatusError,
+    appwriteCoinTradesToday,
+    coins,
+    onNotify: showToast
+  });
 
   const sanitizeDecimalInput = useCallback((raw: string): string => {
     const filtered = raw.replace(/[^0-9.,]/g, '');
@@ -4429,6 +4523,11 @@ export default function App() {
           </div>
 
           <div className="flex flex-col gap-3 pb-4">
+            {appwriteStatusError && (
+              <div className="p-3 rounded-2xl bg-amber-500/15 border border-amber-400/50 text-amber-200 text-xs font-bold text-center">
+                {appwriteStatusError}
+              </div>
+            )}
             <button
               onClick={() => setScreen('login')}
               className="w-full py-4 rounded-2xl bg-gradient-to-r from-[#7C3AED] via-[#8B5CF6] to-[#7C3AED] text-white font-extrabold text-sm shadow-[0_0_30px_rgba(124,58,237,0.7)] border-2 border-purple-300/50 flex items-center justify-center gap-2 active:scale-[0.98] transition"
@@ -4479,6 +4578,12 @@ export default function App() {
               </div>
               <div className="w-9" />
             </div>
+
+            {appwriteStatusError && !signUpError && (
+              <div className="p-3 mb-4 rounded-xl bg-amber-500/15 border border-amber-400/50 text-amber-200 text-xs font-bold">
+                {appwriteStatusError}
+              </div>
+            )}
 
             {signUpError && (
               <div className="p-3 mb-4 rounded-xl bg-rose-500/20 border border-rose-500/40 text-rose-300 text-xs font-bold">
@@ -4964,6 +5069,12 @@ export default function App() {
               </div>
               <div className="w-9" />
             </div>
+
+            {appwriteStatusError && !loginError && (
+              <div className="p-3 mb-4 rounded-xl bg-amber-500/15 border border-amber-400/50 text-amber-200 text-xs font-bold">
+                {appwriteStatusError}
+              </div>
+            )}
 
             {loginError && (
               <div className="p-3 mb-4 rounded-xl bg-rose-500/20 border border-rose-500/40 text-rose-300 text-xs font-bold">
@@ -6642,7 +6753,7 @@ export default function App() {
                       <span className="text-[10px] font-mono font-bold text-emerald-300">Exécution Auto</span>
                     </div>
 
-                    {/* CHOIX DES 2 BOTS : SPOT GRID BOT & DCA BOT */}
+                    {/* CHOIX DES BOTS : SPOT GRID BOT (BOT 1), DCA BOT (BOT 2) & BOT 3 TRÈS INTELLIGENT */}
                     <div className="grid grid-cols-2 gap-2">
                       <button
                         type="button"
@@ -6679,8 +6790,42 @@ export default function App() {
                           Investit par paliers réguliers pour lisser le prix d'achat.
                         </p>
                       </button>
+
+                      <button
+                        type="button"
+                        onClick={() => setSelectedBotType('BOT_3')}
+                        className={`col-span-2 p-3 rounded-xl border text-left transition space-y-1 ${
+                          selectedBotType === 'BOT_3'
+                            ? 'bg-[#251552] border-emerald-400 shadow-[0_0_15px_rgba(16,185,129,0.3)]'
+                            : 'bg-[#150D2E] border-[#8B5CF6]/50 opacity-90 hover:opacity-100'
+                        }`}
+                      >
+                        <div className="flex items-center justify-between gap-2">
+                          <span className="font-black text-xs text-white">
+                            3. BOT 3 — TRÈS INTELLIGENT SALOMA
+                          </span>
+                          <span
+                            className={`text-[10px] font-mono-num font-black ${
+                              bot3Engine.state.enabled ? 'text-emerald-400' : 'text-rose-400'
+                            }`}
+                          >
+                            {bot3Engine.state.enabled ? 'ON' : 'OFF'}
+                          </span>
+                        </div>
+                        <p className="text-[10px] text-purple-200 leading-snug">
+                          100% autonome · Scan bougie 1m (1..9 / 9..5) · Limit Order · Compound · Avatar 3D Live
+                        </p>
+                      </button>
                     </div>
 
+                    {selectedBotType === 'BOT_3' ? (
+                      <Bot3Panel
+                        engine={bot3Engine}
+                        coins={coins}
+                        formatCoinPrice={formatCoinPrice}
+                      />
+                    ) : (
+                      <>
                     {/* CONFIGURATION SIMPLE DU BOT */}
                     <div className="p-3 rounded-xl bg-[#150D2E] border border-purple-500/30 space-y-2.5 text-xs">
                       <div className="flex justify-between items-center text-[11px]">
@@ -6864,6 +7009,8 @@ export default function App() {
                         })
                       )}
                     </div>
+                      </>
+                    )}
                   </div>
                 )}
 
@@ -7034,6 +7181,11 @@ export default function App() {
                ======================================================== */}
             {activeTab === 'wallet' && (
               <div className="space-y-4">
+                {appwriteStatusError && (
+                  <div className="p-3 rounded-2xl bg-amber-500/15 border border-amber-400/50 text-amber-200 text-xs font-bold">
+                    {appwriteStatusError} — Live Balance : 0 Ar
+                  </div>
+                )}
                 <div className="p-4 rounded-3xl bg-gradient-to-br from-[#2D165A] via-[#1F1042] to-[#150D2E] border-2 border-[#8B5CF6] shadow-[0_0_25px_rgba(124,58,237,0.5)]">
                   <div className="flex justify-between items-start mb-2">
                     <span className="text-xs font-bold text-purple-300">Solde Total Portefeuille</span>
