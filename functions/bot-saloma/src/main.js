@@ -1,4 +1,10 @@
-import { Client, TablesDB, ID, Query } from 'node-appwrite';
+let appwriteSdkPromise = null;
+async function getAppwriteSdk() {
+  if (!appwriteSdkPromise) {
+    appwriteSdkPromise = import('node-appwrite');
+  }
+  return appwriteSdkPromise;
+}
 
 const BOT3_MAX_PROFIT_DAILY_PCT = 30;
 const BOT3_MAX_TRADES_DAILY = 100;
@@ -81,6 +87,7 @@ function readStr(obj, keys, fallback = '') {
 
 async function listAllRowsSafe(tablesDb, databaseId, tableId, queries = [], maxPages = 5) {
   if (!databaseId || !tableId) return [];
+  const { Query } = await getAppwriteSdk();
   const all = [];
   let cursor = null;
   for (let p = 0; p < maxPages; p++) {
@@ -119,6 +126,7 @@ async function updateRowAdaptive(tablesDb, databaseId, tableId, rowId, data) {
 }
 
 async function createRowAdaptive(tablesDb, databaseId, tableId, data) {
+  const { ID } = await getAppwriteSdk();
   const payload = { ...data };
   for (let attempt = 0; attempt < 12; attempt++) {
     try {
@@ -227,53 +235,75 @@ function resolveRealLiveBalanceAr(liveBalanceRows, walletRows, userId) {
   return { source: 'NONE', row: null, balanceAr: 0 };
 }
 
-export default async ({ req, res, log, error }) => {
-  const endpoint = stripQuotes(
-    process.env.APPWRITE_FUNCTION_API_ENDPOINT ||
-      process.env.APPWRITE_ENDPOINT ||
-      process.env.VITE_APPWRITE_ENDPOINT
-  );
-  const projectId = stripQuotes(
-    process.env.APPWRITE_FUNCTION_PROJECT_ID ||
-      process.env.APPWRITE_PROJECT_ID ||
-      process.env.VITE_APPWRITE_PROJECT_ID
-  );
-  const apiKey = stripQuotes(
-    req?.headers?.['x-appwrite-key'] || process.env.APPWRITE_API_KEY
-  );
-  const databaseId = stripQuotes(
-    process.env.APPWRITE_DATABASE_ID || process.env.VITE_APPWRITE_DATABASE_ID
-  );
-  const tableBotSetting = stripQuotes(
-    process.env.APPWRITE_TABLE_BOT_SETTING || process.env.VITE_APPWRITE_TABLE_BOT_SETTING
-  );
-  const tableLiveBalance = stripQuotes(
-    process.env.APPWRITE_TABLE_LIVE_BALANCE || process.env.VITE_APPWRITE_TABLE_LIVE_BALANCE
-  );
-  const tableSignales = stripQuotes(
-    process.env.APPWRITE_TABLE_SIGNALES || process.env.VITE_APPWRITE_TABLE_SIGNALES
-  );
-  const tableTrades = stripQuotes(
-    process.env.APPWRITE_TABLE_TRADES || process.env.VITE_APPWRITE_TABLE_TRADES
-  );
-  const tableWallets = stripQuotes(
-    process.env.APPWRITE_TABLE_WALLETS || process.env.VITE_APPWRITE_TABLE_WALLETS
-  );
-
-  if (!endpoint || !projectId || !databaseId || !apiKey) {
-    const msg = 'Project ID ou variables Appwrite introuvables - vérifie les Environment Variables';
-    error(msg);
-    return res.json({ ok: false, error: msg }, 500);
-  }
-
-  if (!tableBotSetting || !tableLiveBalance || !tableSignales || !tableTrades) {
-    const msg =
-      'IDs des collections manquants (Bot Setting / Live Balance / Signales / Trade) dans les Environment Variables';
-    error(msg);
-    return res.json({ ok: false, error: msg }, 500);
-  }
+export default async ({ req, res, log, error } = {}) => {
+  const safeLog = typeof log === 'function' ? log : console.log;
+  const safeError = typeof error === 'function' ? error : console.error;
 
   try {
+    const method = String(req?.method || 'GET').toUpperCase().trim();
+    const headers = req?.headers && typeof req.headers === 'object' ? req.headers : {};
+    const trigger = String(
+      headers['x-appwrite-trigger'] || headers['X-Appwrite-Trigger'] || ''
+    )
+      .toLowerCase()
+      .trim();
+
+    // 1. Requête GET / (UptimeRobot / Better Stack / ping sans body) :
+    // NE trade PAS, N'appelle PAS Bybit, NE touche PAS les Env.
+    if (method !== 'POST' && trigger !== 'schedule') {
+      return res.json(
+        { status: 'alive', robot: 'SALOMA', trading: true },
+        200
+      );
+    }
+
+    // 2. Seulement en POST (ou déclencheur Cron schedule) : logique de trading SALOMA normale
+    const endpoint = stripQuotes(
+      process.env.APPWRITE_FUNCTION_API_ENDPOINT ||
+        process.env.APPWRITE_ENDPOINT ||
+        process.env.VITE_APPWRITE_ENDPOINT
+    );
+    const projectId = stripQuotes(
+      process.env.APPWRITE_FUNCTION_PROJECT_ID ||
+        process.env.APPWRITE_PROJECT_ID ||
+        process.env.VITE_APPWRITE_PROJECT_ID
+    );
+    const apiKey = stripQuotes(
+      headers['x-appwrite-key'] || headers['X-Appwrite-Key'] || process.env.APPWRITE_API_KEY
+    );
+    const databaseId = stripQuotes(
+      process.env.APPWRITE_DATABASE_ID || process.env.VITE_APPWRITE_DATABASE_ID
+    );
+    const tableBotSetting = stripQuotes(
+      process.env.APPWRITE_TABLE_BOT_SETTING || process.env.VITE_APPWRITE_TABLE_BOT_SETTING
+    );
+    const tableLiveBalance = stripQuotes(
+      process.env.APPWRITE_TABLE_LIVE_BALANCE || process.env.VITE_APPWRITE_TABLE_LIVE_BALANCE
+    );
+    const tableSignales = stripQuotes(
+      process.env.APPWRITE_TABLE_SIGNALES || process.env.VITE_APPWRITE_TABLE_SIGNALES
+    );
+    const tableTrades = stripQuotes(
+      process.env.APPWRITE_TABLE_TRADES || process.env.VITE_APPWRITE_TABLE_TRADES
+    );
+    const tableWallets = stripQuotes(
+      process.env.APPWRITE_TABLE_WALLETS || process.env.VITE_APPWRITE_TABLE_WALLETS
+    );
+
+    if (!endpoint || !projectId || !databaseId || !apiKey) {
+      const msg = 'Project ID ou variables Appwrite introuvables - vérifie les Environment Variables';
+      safeError(msg);
+      return res.json({ ok: false, error: msg }, 500);
+    }
+
+    if (!tableBotSetting || !tableLiveBalance || !tableSignales || !tableTrades) {
+      const msg =
+        'IDs des collections manquants (Bot Setting / Live Balance / Signales / Trade) dans les Environment Variables';
+      safeError(msg);
+      return res.json({ ok: false, error: msg }, 500);
+    }
+
+    const { Client, TablesDB, Query } = await getAppwriteSdk();
     const client = new Client()
       .setEndpoint(endpoint)
       .setProject(projectId)
@@ -691,11 +721,11 @@ export default async ({ req, res, log, error }) => {
 
         actions.push({ userId: setting.userId, action: 'OPEN_TRADE', symbol: bestCoin.symbol });
       } catch (userErr) {
-        error(`Erreur BOT 3 user ${setting.userId}: ${userErr?.message || userErr}`);
+        safeError(`Erreur BOT 3 user ${setting.userId}: ${userErr?.message || userErr}`);
       }
     }
 
-    log(`bot-saloma cron exécuté: ${actions.length} action(s)`);
+    safeLog(`bot-saloma cron exécuté: ${actions.length} action(s)`);
     return res.json({
       ok: true,
       timestamp: nowIso,
@@ -704,7 +734,7 @@ export default async ({ req, res, log, error }) => {
       actions
     });
   } catch (err) {
-    error(`Erreur bot-saloma: ${err?.message || err}`);
+    safeError(`Erreur bot-saloma: ${err?.message || err}`);
     return res.json(
       { ok: false, error: err?.message || 'Connexion Appwrite échouée' },
       500
