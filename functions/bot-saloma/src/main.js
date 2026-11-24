@@ -238,9 +238,20 @@ function resolveRealLiveBalanceAr(liveBalanceRows, walletRows, userId) {
 export default async ({ req, res, log, error } = {}) => {
   const safeLog = typeof log === 'function' ? log : console.log;
   const safeError = typeof error === 'function' ? error : console.error;
+  const sendJson = (payload, statusCode = 200) => {
+    if (res && typeof res.json === 'function') {
+      return res.json(payload, statusCode);
+    }
+    if (res && typeof res.send === 'function') {
+      return res.send(JSON.stringify(payload), statusCode, { 'content-type': 'application/json' });
+    }
+    return { statusCode, body: payload };
+  };
 
   try {
     const method = String(req?.method || 'GET').toUpperCase().trim();
+    const rawPath = String(req?.path || req?.url || '/').split('?')[0].trim();
+    const normalizedPath = rawPath === '' ? '/' : rawPath.replace(/\/+$/, '') || '/';
     const headers = req?.headers && typeof req.headers === 'object' ? req.headers : {};
     const trigger = String(
       headers['x-appwrite-trigger'] || headers['X-Appwrite-Trigger'] || ''
@@ -248,10 +259,13 @@ export default async ({ req, res, log, error } = {}) => {
       .toLowerCase()
       .trim();
 
-    // 1. Requête GET / (UptimeRobot / Better Stack / ping sans body) :
+    // 1. Requête GET / ou GET /health (UptimeRobot / Better Stack / ping sans body) :
     // NE trade PAS, N'appelle PAS Bybit, NE touche PAS les Env.
-    if (method !== 'POST' && trigger !== 'schedule') {
-      return res.json(
+    if (
+      (method === 'GET' && (normalizedPath === '/' || normalizedPath === '/health')) ||
+      (method !== 'POST' && trigger !== 'schedule')
+    ) {
+      return sendJson(
         { status: 'alive', robot: 'SALOMA', trading: true },
         200
       );
