@@ -1,12 +1,12 @@
 import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
-import type { Coin } from '../services/priceAggregator';
-import type { Bot3AvatarMood } from '../components/Bot3AvatarScene';
+import type { Coin } from '../services/priceAggregator.ts';
+import type { Bot3AvatarMood } from '../components/Bot3AvatarScene.tsx';
 import {
   apiRequest,
   APPWRITE_CONNECTION_FAILED_MSG,
   COOKIE_SESSION_MARKER,
   type ApiError
-} from '../lib/appwrite';
+} from '../lib/appwrite.ts';
 
 export interface Bot3Candle {
   ts: number;

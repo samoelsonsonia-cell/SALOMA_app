@@ -28,7 +28,7 @@ import {
   computeMinCoinForUsd,
   findCoinNetwork,
   formatMinCoinQty
-} from './src/services/priceAggregator';
+} from './src/services/priceAggregator.ts';
 import {
   executeBuy,
   executeSell,
@@ -36,12 +36,12 @@ import {
   isHedgeTradeRecorded,
   getSeparatedTradesSnapshot,
   type SalomaWalletAdapter
-} from './salomaExchange';
+} from './salomaExchange.ts';
 import {
   getUserWalletAddresses,
   getUserAddressForChain,
   validateWalletAddressForChain
-} from './walletAddresses';
+} from './walletAddresses.ts';
 import {
   listUserPriceAlerts,
   createUserPriceAlert,
@@ -49,7 +49,7 @@ import {
   deleteUserPriceAlert,
   evaluatePriceAlertsForSymbol,
   type PriceAlert
-} from './priceAlerts';
+} from './priceAlerts.ts';
 
 const PORT = 3000;
 const USD_TO_MGA = 4750;

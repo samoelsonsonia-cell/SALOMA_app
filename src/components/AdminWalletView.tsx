@@ -25,8 +25,8 @@ import {
   isKnownTokenContractAddress,
   resolveWalletAddressForChain,
   deriveProvisionalWalletAddress
-} from '../services/priceAggregator';
-import { apiRequest } from '../lib/appwrite';
+} from '../services/priceAggregator.ts';
+import { apiRequest } from '../lib/appwrite.ts';
 
 export interface AdminWalletRow {
   $id: string;

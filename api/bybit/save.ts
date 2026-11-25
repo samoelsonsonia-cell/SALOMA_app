@@ -1,5 +1,5 @@
 import type { IncomingMessage, ServerResponse } from 'http';
-import providerSaveHandler from '../admin/apis/[provider]';
+import providerSaveHandler from '../admin/apis/[provider].ts';
 
 export default async function handler(
   req: IncomingMessage & { body?: unknown; query?: Record<string, string | string[] | undefined>; url?: string },

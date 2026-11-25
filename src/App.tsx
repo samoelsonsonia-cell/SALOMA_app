@@ -61,19 +61,19 @@ import {
   OfflineIndicator,
   useOnlineStatus,
   checkInternetConnectivity
-} from './components/PWAInstall';
-import { TurnstileWidget } from './components/TurnstileWidget';
+} from './components/PWAInstall.tsx';
+import { TurnstileWidget } from './components/TurnstileWidget.tsx';
 import {
   AdminWalletView,
   type AdminWalletRow,
   type AdminWalletTxRow
-} from './components/AdminWalletView';
-import { Bot3Panel } from './components/Bot3Panel';
+} from './components/AdminWalletView.tsx';
+import { Bot3Panel } from './components/Bot3Panel.tsx';
 import {
   useBot3Engine,
   getLocalDayKey,
   type Bot3TradeRecord
-} from './hooks/useBot3Engine';
+} from './hooks/useBot3Engine.ts';
 import {
   Coin,
   BackendPublicCoin,
@@ -99,7 +99,7 @@ import {
   isKnownTokenContractAddress,
   resolveWalletAddressForChain,
   deriveProvisionalWalletAddress
-} from './services/priceAggregator';
+} from './services/priceAggregator.ts';
 import {
   ENV_CONFIG,
   COOKIE_SESSION_MARKER,
@@ -117,7 +117,7 @@ import {
   directAppwriteLogout,
   subscribeToNotificationsStream,
   type ApiError
-} from './lib/appwrite';
+} from './lib/appwrite.ts';
 
 const SESSION_STORAGE_KEY = 'saloma_session_secret';
 const USD_TO_MGA = 4750;

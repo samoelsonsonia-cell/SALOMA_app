@@ -1,8 +1,8 @@
 import React, { useState, useEffect } from 'react';
 import { Power, Trash2, TrendingUp, TrendingDown, ShieldAlert, Sparkles } from 'lucide-react';
-import type { Coin } from '../services/priceAggregator';
-import { Bot3AvatarScene } from './Bot3AvatarScene';
-import type { useBot3Engine } from '../hooks/useBot3Engine';
+import type { Coin } from '../services/priceAggregator.ts';
+import { Bot3AvatarScene } from './Bot3AvatarScene.tsx';
+import type { useBot3Engine } from '../hooks/useBot3Engine.ts';
 
 type Bot3EngineReturn = ReturnType<typeof useBot3Engine>;
 

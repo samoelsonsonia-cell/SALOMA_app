@@ -1,6 +1,6 @@
 import type { IncomingMessage, ServerResponse } from 'http';
 import type { Express } from 'express';
-import { createSalomaApiApp } from '../server';
+import { createSalomaApiApp } from '../server.ts';
 
 let cachedApp: Express | null = null;
 
