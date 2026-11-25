@@ -18,6 +18,10 @@ export const Bot3Panel: React.FC<Bot3PanelProps> = ({ engine, coins, formatCoinP
     activePosition,
     scannedSymbol,
     scannedCandles,
+    bybitUsdtBalance,
+    bybitConnected,
+    bybitError,
+    scannedCoinsCount,
     avatarMood,
     statusLabel,
     countdownText,
@@ -132,14 +136,11 @@ export const Bot3Panel: React.FC<Bot3PanelProps> = ({ engine, coins, formatCoinP
   const latestCandle = scannedCandles[scannedCandles.length - 1];
 
   const topScannedPreviewCoins = coins.slice(0, 12);
+  const totalScannedCoinsDisplay = scannedCoinsCount > 0 ? scannedCoinsCount : coins.length;
 
   const trackedLimitSymbols = Array.from(
     new Set<string>([
-      'PEPE',
-      'BTC',
-      'DOGE',
-      'SOL',
-      scannedSymbol.toUpperCase(),
+      ...(scannedSymbol ? [scannedSymbol.toUpperCase()] : []),
       ...Object.keys(coinTradesToday || {})
     ])
   ).filter(Boolean);
@@ -192,7 +193,7 @@ export const Bot3Panel: React.FC<Bot3PanelProps> = ({ engine, coins, formatCoinP
               htmlFor="bot3-capital-input"
               className="text-[11px] font-black text-purple-300 block mb-1"
             >
-              CAPITAL LIVE APPWRITE (Live Balance — Ariary)
+              CAPITAL LIVE BYBIT (Solde Réel — Ariary)
             </label>
             <div className="flex items-baseline gap-2">
               <input
@@ -219,6 +220,21 @@ export const Bot3Panel: React.FC<Bot3PanelProps> = ({ engine, coins, formatCoinP
                 Ar
               </span>
             </div>
+            <span className="text-[10px] font-mono-num text-purple-300 block mt-1">
+              Solde Bybit réel :{' '}
+              <strong className={bybitUsdtBalance > 0 ? 'text-emerald-300' : 'text-rose-300'}>
+                {bybitUsdtBalance.toLocaleString('fr-FR', {
+                  minimumFractionDigits: 2,
+                  maximumFractionDigits: 4
+                })}{' '}
+                USDT
+              </strong>
+              {!bybitConnected && bybitError
+                ? ` · ${bybitError}`
+                : bybitUsdtBalance <= 0
+                ? ' · 0 USDT — Pas de trade'
+                : ''}
+            </span>
           </div>
 
           <div className="text-right shrink-0 pt-1">
@@ -559,10 +575,14 @@ export const Bot3Panel: React.FC<Bot3PanelProps> = ({ engine, coins, formatCoinP
         <div className="flex items-center justify-between gap-2">
           <div>
             <span className="text-xs font-black text-white block">
-              Bougie 1m Signal — {scannedSymbol}/USDT
+              {scannedSymbol
+                ? `Bougie 1m Signal — ${scannedSymbol}/USDT`
+                : 'Scan Bybit Spot USDT — Aucun coin valide - En attente'}
             </span>
             <span className="text-[10px] font-mono-num text-purple-300">
-              Prix : ${formatCoinPrice(liveScannedPrice)} • Limit Order Seulement
+              {scannedSymbol
+                ? `Prix : $${formatCoinPrice(liveScannedPrice)} • Limit Order Seulement`
+                : `${totalScannedCoinsDisplay} paires Bybit Spot USDT scannées • 0 trade forcé`}
             </span>
           </div>
           {latestCandle?.signalStep && (
@@ -579,55 +599,63 @@ export const Bot3Panel: React.FC<Bot3PanelProps> = ({ engine, coins, formatCoinP
         </div>
 
         {/* Live 1m Candlestick SVG with numbers 1..9 / 9..5 INSIDE candles */}
-        <div className="h-36 w-full rounded-xl bg-[#0E0722] border border-purple-500/25 p-2 relative overflow-hidden">
-          <svg viewBox="0 0 324 128" className="w-full h-full" preserveAspectRatio="none">
-            {scannedCandles.map((c, idx) => {
-              const slotW = 18;
-              const x = idx * slotW + 2;
-              const scaleY = (v: number) => 114 - ((v - candleLow) / candleRange) * 96;
-              const yOpen = scaleY(c.open);
-              const yClose = scaleY(c.close);
-              const rectY = Math.min(yOpen, yClose);
-              const rectH = Math.max(14, Math.abs(yClose - yOpen));
-              const color = c.isUp ? '#10B981' : '#EF4444';
+        {scannedCandles.length > 0 ? (
+          <div className="h-36 w-full rounded-xl bg-[#0E0722] border border-purple-500/25 p-2 relative overflow-hidden">
+            <svg viewBox="0 0 324 128" className="w-full h-full" preserveAspectRatio="none">
+              {scannedCandles.map((c, idx) => {
+                const slotW = 18;
+                const x = idx * slotW + 2;
+                const scaleY = (v: number) => 114 - ((v - candleLow) / candleRange) * 96;
+                const yOpen = scaleY(c.open);
+                const yClose = scaleY(c.close);
+                const rectY = Math.min(yOpen, yClose);
+                const rectH = Math.max(14, Math.abs(yClose - yOpen));
+                const color = c.isUp ? '#10B981' : '#EF4444';
 
-              return (
-                <g key={`${scannedSymbol}-${idx}`}>
-                  <line
-                    x1={x + 6.5}
-                    y1={scaleY(c.high)}
-                    x2={x + 6.5}
-                    y2={scaleY(c.low)}
-                    stroke={color}
-                    strokeWidth="1.4"
-                  />
-                  <rect
-                    x={x}
-                    y={Math.min(98, rectY)}
-                    width="13"
-                    height={rectH}
-                    rx="2"
-                    fill={color}
-                    opacity="0.92"
-                  />
-                  {c.signalStep !== null && (
-                    <text
-                      x={x + 6.5}
-                      y={Math.min(98, rectY) + rectH / 2 + 3.2}
-                      textAnchor="middle"
-                      fill="#FFFFFF"
-                      fontSize="9"
-                      fontWeight="900"
-                      fontFamily="monospace"
-                    >
-                      {c.signalStep}
-                    </text>
-                  )}
-                </g>
-              );
-            })}
-          </svg>
-        </div>
+                return (
+                  <g key={`${scannedSymbol}-${idx}`}>
+                    <line
+                      x1={x + 6.5}
+                      y1={scaleY(c.high)}
+                      x2={x + 6.5}
+                      y2={scaleY(c.low)}
+                      stroke={color}
+                      strokeWidth="1.4"
+                    />
+                    <rect
+                      x={x}
+                      y={Math.min(98, rectY)}
+                      width="13"
+                      height={rectH}
+                      rx="2"
+                      fill={color}
+                      opacity="0.92"
+                    />
+                    {c.signalStep !== null && (
+                      <text
+                        x={x + 6.5}
+                        y={Math.min(98, rectY) + rectH / 2 + 3.2}
+                        textAnchor="middle"
+                        fill="#FFFFFF"
+                        fontSize="9"
+                        fontWeight="900"
+                        fontFamily="monospace"
+                      >
+                        {c.signalStep}
+                      </text>
+                    )}
+                  </g>
+                );
+              })}
+            </svg>
+          </div>
+        ) : (
+          <div className="h-24 w-full rounded-xl bg-[#0E0722] border border-purple-500/25 p-3 flex items-center justify-center text-center">
+            <span className="text-[11px] font-bold text-purple-300">
+              Aucun coin valide - En attente
+            </span>
+          </div>
+        )}
 
         {activePosition && (
           <div className="p-2 rounded-xl bg-[#1D1240] border border-emerald-500/50 flex items-center justify-between text-[11px] font-mono-num">
@@ -658,21 +686,25 @@ export const Bot3Panel: React.FC<Bot3PanelProps> = ({ engine, coins, formatCoinP
 
           <div className="p-2 rounded-xl bg-[#100926] border border-purple-500/30 space-y-1">
             <span className="text-[10px] font-bold text-purple-200 block">
-              Limite aujourd’hui (Collection TRADE Appwrite) :
+              Limite aujourd’hui (Max {maxTradesPerCoinDay} / Coin) :
             </span>
             <p className="text-[11px] font-mono-num font-black text-white leading-relaxed">
-              {trackedLimitSymbols.slice(0, 6).map((sym, idx) => {
-                const cnt = Math.min(maxTradesPerCoinDay, coinTradesToday[sym] || 0);
-                const reached = cnt >= maxTradesPerCoinDay;
-                return (
-                  <React.Fragment key={sym}>
-                    {idx > 0 && <span className="text-purple-400"> - </span>}
-                    <span className={reached ? 'text-rose-400' : cnt > 0 ? 'text-emerald-400' : 'text-purple-100'}>
-                      {sym} : {cnt}/{maxTradesPerCoinDay}
-                    </span>
-                  </React.Fragment>
-                );
-              })}
+              {trackedLimitSymbols.length > 0 ? (
+                trackedLimitSymbols.slice(0, 6).map((sym, idx) => {
+                  const cnt = Math.min(maxTradesPerCoinDay, coinTradesToday[sym] || 0);
+                  const reached = cnt >= maxTradesPerCoinDay;
+                  return (
+                    <React.Fragment key={sym}>
+                      {idx > 0 && <span className="text-purple-400"> - </span>}
+                      <span className={reached ? 'text-rose-400' : cnt > 0 ? 'text-emerald-400' : 'text-purple-100'}>
+                        {sym} : {cnt}/{maxTradesPerCoinDay}
+                      </span>
+                    </React.Fragment>
+                  );
+                })
+              ) : (
+                <span className="text-purple-300 font-normal">0/{maxTradesPerCoinDay} sur toutes les paires</span>
+              )}
             </p>
             {pausedLimitCoins.length > 0 && (
               <div className="text-[10px] font-black text-amber-300">
@@ -684,7 +716,7 @@ export const Bot3Panel: React.FC<Bot3PanelProps> = ({ engine, coins, formatCoinP
           <div className="flex flex-wrap gap-1.5 text-[10px] font-mono-num">
             {topScannedPreviewCoins.map(c => {
               const sym = c.symbol.toUpperCase();
-              const isSelectedByBot = sym === scannedSymbol;
+              const isSelectedByBot = Boolean(scannedSymbol) && sym === scannedSymbol;
               const usedCount = Math.min(maxTradesPerCoinDay, coinTradesToday[sym] || 0);
               const isPaused = usedCount >= maxTradesPerCoinDay;
               return (
@@ -704,7 +736,7 @@ export const Bot3Panel: React.FC<Bot3PanelProps> = ({ engine, coins, formatCoinP
                 </span>
               );
             })}
-            <span className="text-purple-400">... ({coins.length} coins)</span>
+            <span className="text-purple-400">... ({totalScannedCoinsDisplay} paires Bybit Spot USDT)</span>
           </div>
         </div>
       </div>
@@ -766,6 +798,9 @@ export const Bot3Panel: React.FC<Bot3PanelProps> = ({ engine, coins, formatCoinP
                     </div>
                     <span className="text-[10px] text-purple-400 font-mono-num block">
                       {dateStr} {timeStr} · {reasonText} (Limit)
+                      {(item.salomaFeeAr || 0) > 0
+                        ? ` · Frais SALOMA : ${Number(item.salomaFeeAr).toLocaleString('fr-FR')} Ar`
+                        : ''}
                     </span>
                   </div>
 

@@ -319,6 +319,7 @@ export interface AdminSalomaFeesConfig {
   exchangeFeePct: number;
   withdrawFeePct: number;
   networkFeeUsdt: number;
+  bot3FeeEnabled?: boolean;
 }
 
 export interface AdminClientTradeEntry {
@@ -1904,7 +1905,7 @@ export default function App() {
   const bot3Engine = useBot3Engine({
     sessionToken,
     userId: userRow?.user_id || userRow?.$id || null,
-    liveBalanceAr: appwriteStatusError ? 0 : Math.round(soldeCompteTradeAr || soldeDisponibleAr || 0),
+    liveBalanceAr: 0,
     appwriteError: appwriteStatusError,
     appwriteCoinTradesToday,
     coins,
@@ -3330,6 +3331,8 @@ export default function App() {
     networkFeeUsdt: '0.50'
   });
   const [adminFeeSaving, setAdminFeeSaving] = useState<boolean>(false);
+  const [adminBot3FeeEnabled, setAdminBot3FeeEnabled] = useState<boolean>(false);
+  const [adminBot3FeeSaving, setAdminBot3FeeSaving] = useState<boolean>(false);
   const [sponsorConnectionStatus, setSponsorConnectionStatus] = useState<
     Record<
       'bybit' | 'okx' | 'binance',
@@ -3477,6 +3480,7 @@ export default function App() {
             withdrawFeePct: String(data.salomaFees.withdrawFeePct ?? 0.15),
             networkFeeUsdt: String(data.salomaFees.networkFeeUsdt ?? 0.5)
           });
+          setAdminBot3FeeEnabled(Boolean(data.salomaFees.bot3FeeEnabled ?? false));
           setSalomaFees({
             tradeFeePct: Number(data.salomaFees.tradeFeePct ?? 0.1),
             exchangeFeePct: Number(data.salomaFees.exchangeFeePct ?? 0.1),
@@ -3754,6 +3758,7 @@ export default function App() {
           withdrawFeePct: String(res.salomaFees.withdrawFeePct),
           networkFeeUsdt: String(res.salomaFees.networkFeeUsdt)
         });
+        setAdminBot3FeeEnabled(Boolean(res.salomaFees.bot3FeeEnabled ?? false));
         setSalomaFees({
           tradeFeePct: res.salomaFees.tradeFeePct,
           exchangeFeePct: res.salomaFees.exchangeFeePct,
@@ -3772,6 +3777,43 @@ export default function App() {
       showToast(err instanceof Error ? err.message : 'Erreur sauvegarde frais Admin.');
     } finally {
       setAdminFeeSaving(false);
+    }
+  };
+
+  const handleToggleAdminBot3Fee = async () => {
+    if (!(await ensureOnlineOrBlock())) return;
+    if (adminBot3FeeSaving) return;
+    const nextEnabled = !adminBot3FeeEnabled;
+    setAdminBot3FeeSaving(true);
+    try {
+      const res = await apiRequest<{
+        success?: boolean;
+        ok?: boolean;
+        bot3FeeEnabled?: boolean;
+        error?: string;
+        message?: string;
+      }>('/api/admin/bot3-fee', {
+        method: 'POST',
+        adminPin,
+        adminEmail,
+        adminToken: adminSessionToken,
+        body: { enabled: nextEnabled }
+      });
+      if (res.success === false || res.ok === false) {
+        showToast(res.error || res.message || 'Erreur mise à jour Frais SALOMA BOT 3.');
+        return;
+      }
+      setAdminBot3FeeEnabled(Boolean(res.bot3FeeEnabled ?? nextEnabled));
+      showToast(
+        res.message ||
+          (nextEnabled
+            ? '✓ Frais SALOMA 0.1% - BOT 3 activé (ON)'
+            : '✓ Frais SALOMA 0.1% - BOT 3 désactivé (OFF — 0 frais)')
+      );
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : 'Erreur mise à jour Frais SALOMA BOT 3.');
+    } finally {
+      setAdminBot3FeeSaving(false);
     }
   };
 
@@ -9401,6 +9443,31 @@ export default function App() {
                 >
                   {adminFeeSaving ? 'Enregistrement...' : 'Enregistrer Marge Bybit & Frais SALOMA'}
                 </button>
+
+                <div className="p-2.5 rounded-xl bg-[#150D2E] border border-purple-500/40 flex items-center justify-between gap-2">
+                  <div className="min-w-0">
+                    <span className="font-black text-white text-xs block">
+                      Frais SALOMA 0.1% - BOT 3
+                    </span>
+                    <span className="text-[10px] text-purple-300 block">
+                      {adminBot3FeeEnabled
+                        ? 'ON : 0.1% du profit net déduit par trade clôturé (ex: 10 000 Ar → 10 Ar)'
+                        : 'OFF par défaut : 0 frais déduit sur BOT 3'}
+                    </span>
+                  </div>
+                  <button
+                    type="button"
+                    disabled={adminBot3FeeSaving}
+                    onClick={() => void handleToggleAdminBot3Fee()}
+                    className={`px-3.5 py-2 rounded-xl font-black text-xs shrink-0 border transition disabled:opacity-50 ${
+                      adminBot3FeeEnabled
+                        ? 'bg-emerald-600 border-emerald-300 text-white'
+                        : 'bg-[#100926] border-rose-400/70 text-rose-300'
+                    }`}
+                  >
+                    {adminBot3FeeSaving ? '...' : adminBot3FeeEnabled ? 'ON' : 'OFF'}
+                  </button>
+                </div>
               </div>
 
               {/* TABLE SÉPARÉE 1 : ClientTrade (Base interne SALOMA) */}
@@ -9701,6 +9768,31 @@ export default function App() {
                 >
                   {adminFeeSaving ? 'Enregistrement...' : 'Enregistrer Marge Bybit & Frais SALOMA'}
                 </button>
+
+                <div className="p-2.5 rounded-xl bg-[#150D2E] border border-purple-500/40 flex items-center justify-between gap-2">
+                  <div className="min-w-0">
+                    <span className="font-black text-white text-xs block">
+                      Frais SALOMA 0.1% - BOT 3
+                    </span>
+                    <span className="text-[10px] text-purple-300 block">
+                      {adminBot3FeeEnabled
+                        ? 'ON : 0.1% du profit net déduit par trade clôturé (ex: 10 000 Ar → 10 Ar)'
+                        : 'OFF par défaut : 0 frais déduit sur BOT 3'}
+                    </span>
+                  </div>
+                  <button
+                    type="button"
+                    disabled={adminBot3FeeSaving}
+                    onClick={() => void handleToggleAdminBot3Fee()}
+                    className={`px-3.5 py-2 rounded-xl font-black text-xs shrink-0 border transition disabled:opacity-50 ${
+                      adminBot3FeeEnabled
+                        ? 'bg-emerald-600 border-emerald-300 text-white'
+                        : 'bg-[#100926] border-rose-400/70 text-rose-300'
+                    }`}
+                  >
+                    {adminBot3FeeSaving ? '...' : adminBot3FeeEnabled ? 'ON' : 'OFF'}
+                  </button>
+                </div>
               </div>
 
               {/* CHOIX DE L'API PRINCIPALE POUR ENVOI DES ORDRES */}

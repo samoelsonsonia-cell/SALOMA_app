@@ -27,6 +27,7 @@ export interface Bot3TradeRecord {
   amountAr: number;
   pnlPct: number;
   pnlAr: number;
+  salomaFeeAr?: number;
   entryPrice: number;
   exitPrice: number;
   reason: 'TP' | 'SIGNAL_DOWN' | 'SL';
@@ -87,6 +88,11 @@ interface RemoteBot3StateResponse {
   dayKey: string;
   maxPerCoin: number;
   liveBalanceAr: number;
+  bybitUsdtBalance?: number;
+  bybitConnected?: boolean;
+  bybitError?: string | null;
+  scannedCoinsCount?: number;
+  bot3SalomaFeeEnabled?: boolean;
   countsByCoin: Record<string, number>;
   activePosition: Bot3ActivePosition | null;
   history: Bot3TradeRecord[];
@@ -304,10 +310,15 @@ export function useBot3Engine({
     createEmptyState(safeFallbackBalanceAr)
   );
   const [activePosition, setActivePosition] = useState<Bot3ActivePosition | null>(null);
-  const [scannedSymbol, setScannedSymbol] = useState<string>('PEPE');
+  const [scannedSymbol, setScannedSymbol] = useState<string>('');
+  const [bybitUsdtBalance, setBybitUsdtBalance] = useState<number>(0);
+  const [bybitConnected, setBybitConnected] = useState<boolean>(false);
+  const [bybitError, setBybitError] = useState<string | null>(null);
+  const [scannedCoinsCount, setScannedCoinsCount] = useState<number>(0);
+  const [bot3SalomaFeeEnabled, setBot3SalomaFeeEnabled] = useState<boolean>(false);
   const [avatarMood, setAvatarMood] = useState<Bot3AvatarMood>('OFF');
   const [statusLabel, setStatusLabel] = useState<string>(
-    'Mode 24/7 (Appwrite Function bot-saloma) — Appuyez sur ON'
+    'Scan Bybit Spot USDT (500+ paires) — Appuyez sur ON'
   );
   const [countdownText, setCountdownText] = useState<string | null>(null);
   const [remoteError, setRemoteError] = useState<string | null>(null);
@@ -337,8 +348,8 @@ export function useBot3Engine({
     return merged;
   }, [appwriteCoinTradesToday, remoteCountsByCoin]);
 
-  // Pure display reader: polls Appwrite Bot Setting + Live Balance + Signales + TRADE every 10s
-  // The frontend NEVER executes trades locally — Appwrite Function "bot-saloma" runs 24/7.
+  // Pure display reader: polls Backend Bybit real balance + 500+ Bybit Spot USDT scan + Appwrite TRADE/BOT_SETTING every 10s
+  // The frontend NEVER executes trades locally — Backend / Appwrite Function "bot-saloma" runs 24/7.
   const fetchRemoteBot3State = useCallback(async () => {
     if (!sessionToken || sessionToken === COOKIE_SESSION_MARKER) return;
     if (appwriteError) {
@@ -349,7 +360,10 @@ export function useBot3Engine({
         dayStartCapitalAr: 0,
         equityCurve: []
       }));
+      setBybitUsdtBalance(0);
+      setBybitConnected(false);
       setActivePosition(null);
+      setScannedSymbol('');
       setAvatarMood('OFF');
       setStatusLabel(appwriteError);
       return;
@@ -360,10 +374,17 @@ export function useBot3Engine({
     try {
       const res = await apiRequest<RemoteBot3StateResponse>(
         `/api/bot3/state?dayKey=${encodeURIComponent(dayKey)}&tzOffset=${tzOffset}`,
-        { token: sessionToken, timeoutMs: 8000 }
+        { token: sessionToken, timeoutMs: 12000 }
       );
       setRemoteError(null);
       const realBal = Math.max(0, Math.round(res.liveBalanceAr || 0));
+      const realUsdt = Math.max(0, Number(res.bybitUsdtBalance || 0));
+      setBybitUsdtBalance(realUsdt);
+      setBybitConnected(Boolean(res.bybitConnected));
+      setBybitError(res.bybitError || null);
+      setScannedCoinsCount(Math.max(0, Number(res.scannedCoinsCount || 0)));
+      setBot3SalomaFeeEnabled(Boolean(res.bot3SalomaFeeEnabled));
+
       const s = res.setting;
       const sleepMode: Bot3SleepMode =
         s.sleepMode === 'SLEEP_30M' || s.sleepMode === 'SLEEP_MIDNIGHT' ? s.sleepMode : 'NONE';
@@ -377,16 +398,18 @@ export function useBot3Engine({
       setRemoteSignals(sigMap);
       setRemoteCountsByCoin(res.countsByCoin || {});
       setActivePosition(res.activePosition || null);
-      if (s.scannedSymbol) setScannedSymbol(s.scannedSymbol.toUpperCase());
+      setScannedSymbol(s.scannedSymbol ? s.scannedSymbol.toUpperCase() : '');
       setLastRunAt(s.lastRunAt || null);
 
       const mood = normalizeAvatarMood(s.avatarMood, Boolean(s.enabled), sleepMode);
       setAvatarMood(mood);
       setStatusLabel(
         s.statusLabel ||
-          (s.enabled
-            ? 'ON — Bot 24/7 actif sur Appwrite (bot-saloma Cron 1 min)'
-            : 'Mode 24/7 (Appwrite Function bot-saloma) — OFF')
+          (realBal <= 0
+            ? 'Solde Bybit réel à 0 USDT — Pas de trade'
+            : s.enabled
+            ? 'ON — Scan Bybit 500+ paires actif (bot-saloma Cron 1 min)'
+            : 'Aucun coin valide - En attente')
       );
 
       setState({
@@ -413,6 +436,8 @@ export function useBot3Engine({
       const apiErr = err as ApiError | undefined;
       const msg = apiErr?.message || APPWRITE_CONNECTION_FAILED_MSG;
       setRemoteError(msg);
+      setBybitUsdtBalance(0);
+      setBybitConnected(false);
       setState(prev => ({
         ...prev,
         enabled: false,
@@ -421,6 +446,7 @@ export function useBot3Engine({
         equityCurve: []
       }));
       setActivePosition(null);
+      setScannedSymbol('');
       setAvatarMood('OFF');
       setStatusLabel(msg);
     }
@@ -429,6 +455,10 @@ export function useBot3Engine({
   useEffect(() => {
     if (!sessionToken || sessionToken === COOKIE_SESSION_MARKER) {
       setState(createEmptyState(0));
+      setBybitUsdtBalance(0);
+      setBybitConnected(false);
+      setBybitError(null);
+      setScannedSymbol('');
       setActivePosition(null);
       setAvatarMood('OFF');
       return;
@@ -645,9 +675,9 @@ export function useBot3Engine({
         onNotifyRef.current?.(effectiveAppwriteError);
         return;
       }
-      if (cur.capitalAr <= 0) {
+      if (cur.capitalAr <= 0 || bybitUsdtBalance <= 0) {
         onNotifyRef.current?.(
-          'Solde Live Balance Appwrite à 0 Ar — Effectuez un dépôt réel avant d’allumer BOT 3.'
+          'Solde Bybit réel à 0 USDT (0 Ar) — Aucun trade possible avant d’allumer BOT 3.'
         );
         return;
       }
@@ -657,11 +687,11 @@ export function useBot3Engine({
     setAvatarMood(nextEnabled ? 'WATCHING' : 'OFF');
     setStatusLabel(
       nextEnabled
-        ? 'ON — Bot 24/7 actif sur Appwrite (bot-saloma Cron 1 min)'
+        ? 'ON — Scan Bybit 500+ paires actif (bot-saloma Cron 1 min)'
         : 'BOT 3 arrêté (OFF)'
     );
     void persistBotSettingsToAppwrite(next, true);
-  }, [effectiveAppwriteError, persistBotSettingsToAppwrite]);
+  }, [effectiveAppwriteError, bybitUsdtBalance, persistBotSettingsToAppwrite]);
 
   const clearHistory = useCallback(async () => {
     setState(prev => ({
@@ -687,10 +717,30 @@ export function useBot3Engine({
   }, [sessionToken]);
 
   const scannedCandles = useMemo(() => {
+    const targetSym = scannedSymbol.toUpperCase().trim();
+    if (!targetSym) return [];
+    const remoteSig = remoteSignals[targetSym];
     const coinObj =
-      coins.find(c => c.symbol.toUpperCase() === scannedSymbol.toUpperCase()) || coins[0];
+      coins.find(c => c.symbol.toUpperCase() === targetSym) ||
+      (remoteSig && remoteSig.price > 0
+        ? ({
+            id: targetSym.toLowerCase(),
+            symbol: targetSym,
+            name: targetSym,
+            sponsorPrice: remoteSig.price,
+            price: remoteSig.price,
+            change24h: 0,
+            high24h: remoteSig.price,
+            low24h: remoteSig.price,
+            volume24hUsd: 0,
+            iconBg: '',
+            iconColor: '',
+            bestSource: 'bybit',
+            apiPrices: { binance: remoteSig.price, bybit: remoteSig.price, okx: remoteSig.price },
+            networks: []
+          } as Coin)
+        : null);
     if (!coinObj) return [];
-    const remoteSig = remoteSignals[coinObj.symbol.toUpperCase()];
     return buildDisplayCandlesForCoin(coinObj, remoteSig);
   }, [coins, scannedSymbol, remoteSignals]);
 
@@ -699,6 +749,11 @@ export function useBot3Engine({
     activePosition,
     scannedSymbol,
     scannedCandles,
+    bybitUsdtBalance,
+    bybitConnected,
+    bybitError,
+    scannedCoinsCount,
+    bot3SalomaFeeEnabled,
     avatarMood,
     statusLabel,
     countdownText,

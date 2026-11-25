@@ -94,6 +94,7 @@ export interface SalomaFeesConfig {
   exchangeFeePct: number;         // Frais Échange % (défaut 0.1%, affiché au client)
   withdrawFeePct: number;         // Frais Retrait % (défaut 0.15%, affiché au client)
   networkFeeUsdt: number;         // Frais Réseau USDT (défaut 0.50 USDT, affiché séparément au client)
+  bot3FeeEnabled?: boolean;       // Frais SALOMA 0.1% sur profit net BOT 3 (OFF par défaut)
 }
 
 interface BrokerApisStore {
@@ -119,7 +120,8 @@ const DEFAULT_SALOMA_FEES: SalomaFeesConfig = {
   tradeFeePct: 0.1,
   exchangeFeePct: 0.1,
   withdrawFeePct: 0.15,
-  networkFeeUsdt: 0.5
+  networkFeeUsdt: 0.5,
+  bot3FeeEnabled: false
 };
 
 const DEFAULT_APIS_STORE: BrokerApisStore = {
@@ -193,7 +195,8 @@ function loadApisStore(): BrokerApisStore {
             tradeFeePct: clampMarginPct(rawFees.tradeFeePct, DEFAULT_SALOMA_FEES.tradeFeePct),
             exchangeFeePct: clampMarginPct(rawFees.exchangeFeePct, DEFAULT_SALOMA_FEES.exchangeFeePct),
             withdrawFeePct: clampMarginPct(rawFees.withdrawFeePct, DEFAULT_SALOMA_FEES.withdrawFeePct),
-            networkFeeUsdt: clampNetworkFeeUsdt(rawFees.networkFeeUsdt, DEFAULT_SALOMA_FEES.networkFeeUsdt)
+            networkFeeUsdt: clampNetworkFeeUsdt(rawFees.networkFeeUsdt, DEFAULT_SALOMA_FEES.networkFeeUsdt),
+            bot3FeeEnabled: Boolean(rawFees.bot3FeeEnabled ?? false)
           }
         };
       }
@@ -4507,10 +4510,290 @@ export function createSalomaApiApp() {
   });
 
   // ========================================================
-  // 4B. BOT 3 : LIMITE 3 TRADES / COIN / JOUR (COLLECTION TRADE APPWRITE)
+  // 4B. BOT 3 : CAPITAL BYBIT RÉEL + SCAN 500+ PAIRES BYBIT + MAX 3/COIN + FRAIS 0.1% ADMIN (OFF PAR DÉFAUT)
   // ========================================================
 
   const BOT3_MAX_TRADES_PER_COIN_DAY = 3;
+  const BOT3_ADMIN_CONFIG_USER_ID = '__SALOMA_BOT3_ADMIN_CONFIG__';
+  const BOT3_IGNORED_STABLE_BASES = new Set([
+    'USDT',
+    'USDC',
+    'USDE',
+    'FDUSD',
+    'TUSD',
+    'DAI',
+    'BUSD',
+    'USDD',
+    'PYUSD',
+    'EURC'
+  ]);
+
+  let bot3BybitBalanceCache: {
+    ts: number;
+    connected: boolean;
+    usdtBalance: number;
+    capitalAr: number;
+    error?: string;
+  } | null = null;
+
+  let bot3BybitScanCache: {
+    ts: number;
+    totalPairsCount: number;
+    signals: Array<{
+      symbol: string;
+      signalDir: 'up' | 'down' | 'none';
+      signalStep: number | null;
+      price: number;
+    }>;
+  } | null = null;
+
+  function computeBot3SalomaFeeAr(netProfitAr: number, feeEnabled: boolean): number {
+    if (!feeEnabled || !Number.isFinite(netProfitAr) || netProfitAr <= 0) return 0;
+    const raw = netProfitAr * 0.001; // 0.1% du profit net par trade clôturé (ex: 10 000 Ar -> 10 Ar)
+    return netProfitAr >= 500 ? Math.round(raw) : Number(raw.toFixed(2));
+  }
+
+  async function resolveBot3BybitCapital(): Promise<{
+    connected: boolean;
+    usdtBalance: number;
+    capitalAr: number;
+    error?: string;
+  }> {
+    const now = Date.now();
+    if (bot3BybitBalanceCache && now - bot3BybitBalanceCache.ts < 4500) {
+      return {
+        connected: bot3BybitBalanceCache.connected,
+        usdtBalance: bot3BybitBalanceCache.usdtBalance,
+        capitalAr: bot3BybitBalanceCache.capitalAr,
+        error: bot3BybitBalanceCache.error
+      };
+    }
+    try {
+      const status = await checkSponsorConnectionStatus('bybit');
+      const usdtBalance = status.connected ? Math.max(0, Number(status.usdtBalance) || 0) : 0;
+      const capitalAr = usdtBalance > 0 ? Math.round(usdtBalance * USD_TO_MGA) : 0;
+      const resolved = {
+        connected: Boolean(status.connected),
+        usdtBalance: Number(usdtBalance.toFixed(4)),
+        capitalAr,
+        error: status.connected ? undefined : status.error || status.message || 'Bybit non connecté'
+      };
+      bot3BybitBalanceCache = { ts: now, ...resolved };
+      return resolved;
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Erreur lecture solde Bybit';
+      const fallback = { connected: false, usdtBalance: 0, capitalAr: 0, error: msg };
+      bot3BybitBalanceCache = { ts: now, ...fallback };
+      return fallback;
+    }
+  }
+
+  function evaluateBot3KlineStreak(klineList: unknown[]): {
+    signalDir: 'up' | 'down' | 'none';
+    signalStep: number | null;
+    price: number;
+  } {
+    if (!Array.isArray(klineList) || klineList.length === 0) {
+      return { signalDir: 'none', signalStep: null, price: 0 };
+    }
+    // Bybit /v5/market/kline returns newest first -> reverse to oldest..newest
+    const ordered = [...klineList].reverse();
+    let upStreak = 0;
+    let downStreak = 0;
+    let lastDir: 'up' | 'down' | 'none' = 'none';
+    let lastStep: number | null = null;
+    let lastPrice = 0;
+
+    for (const row of ordered) {
+      if (!Array.isArray(row) || row.length < 5) continue;
+      const open = Number(row[1]);
+      const close = Number(row[4]);
+      if (!Number.isFinite(open) || !Number.isFinite(close) || close <= 0) continue;
+      const isUp = close >= open;
+      if (isUp) {
+        upStreak = Math.min(9, upStreak + 1);
+        downStreak = 0;
+        lastDir = 'up';
+        lastStep = upStreak;
+      } else {
+        downStreak = downStreak === 0 ? 9 : Math.max(5, downStreak - 1);
+        upStreak = 0;
+        lastDir = 'down';
+        lastStep = downStreak;
+      }
+      lastPrice = close;
+    }
+
+    return {
+      signalDir: lastDir,
+      signalStep: lastStep,
+      price: lastPrice
+    };
+  }
+
+  async function scanAllBybitSpotUsdtForBot3(
+    countsByCoin: Record<string, number>
+  ): Promise<{
+    totalPairsCount: number;
+    signals: Array<{
+      symbol: string;
+      signalDir: 'up' | 'down' | 'none';
+      signalStep: number | null;
+      price: number;
+    }>;
+  }> {
+    const now = Date.now();
+    if (bot3BybitScanCache && now - bot3BybitScanCache.ts < 20000) {
+      return {
+        totalPairsCount: bot3BybitScanCache.totalPairsCount,
+        signals: bot3BybitScanCache.signals
+      };
+    }
+
+    const domains = ['https://api.bybit.com', 'https://api.bytick.com'];
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 7500);
+
+    try {
+      let tickerRows: Array<{
+        symbol?: string;
+        lastPrice?: string;
+        price24hPcnt?: string;
+        turnover24h?: string;
+      }> = [];
+      let activeDomain = domains[0];
+
+      for (const baseUrl of domains) {
+        try {
+          const r = await fetch(`${baseUrl}/v5/market/tickers?category=spot`, {
+            headers: { Accept: 'application/json', 'User-Agent': 'SalomaTradingPlatform/1.0' },
+            signal: controller.signal
+          });
+          if (!r.ok) continue;
+          const j = (await r.json()) as {
+            retCode?: number;
+            result?: { list?: typeof tickerRows };
+          };
+          if (j?.retCode === 0 && Array.isArray(j?.result?.list) && j.result.list.length > 0) {
+            tickerRows = j.result.list;
+            activeDomain = baseUrl;
+            break;
+          }
+        } catch {
+          // try fallback domain
+        }
+      }
+
+      const allUsdtPairs = tickerRows
+        .filter(row => typeof row.symbol === 'string' && row.symbol.endsWith('USDT'))
+        .map(row => {
+          const rawSym = String(row.symbol || '');
+          const base = rawSym.slice(0, -4).toUpperCase().trim();
+          const last = parseFloat(row.lastPrice || '');
+          const pct24h = (parseFloat(row.price24hPcnt || '') || 0) * 100;
+          const volUsd = parseFloat(row.turnover24h || '') || 0;
+          return { pair: rawSym, symbol: base, last, pct24h, volUsd };
+        })
+        .filter(item => item.symbol && !BOT3_IGNORED_STABLE_BASES.has(item.symbol) && item.last > 0);
+
+      const totalPairsCount = allUsdtPairs.length;
+
+      // Filtrer ceux sous la limite max 3 trades/coin (si 3 déjà, passe au coin suivant)
+      const eligible = allUsdtPairs
+        .filter(item => (countsByCoin[item.symbol] || 0) < BOT3_MAX_TRADES_PER_COIN_DAY && item.volUsd > 10000)
+        .sort((a, b) => {
+          // Prioriser momentum positif puis liquidité 24h pour vérifier les bougies 1m réelles
+          const aScore = (a.pct24h > 0 ? 1 : 0) * 1e12 + a.volUsd;
+          const bScore = (b.pct24h > 0 ? 1 : 0) * 1e12 + b.volUsd;
+          return bScore - aScore;
+        });
+
+      const candidates = eligible.slice(0, 24);
+      const scannedSignals: Array<{
+        symbol: string;
+        signalDir: 'up' | 'down' | 'none';
+        signalStep: number | null;
+        price: number;
+      }> = [];
+
+      for (let i = 0; i < candidates.length; i += 8) {
+        const chunk = candidates.slice(i, i + 8);
+        const batchRes = await Promise.all(
+          chunk.map(async item => {
+            try {
+              const kRes = await fetch(
+                `${activeDomain}/v5/market/kline?category=spot&symbol=${encodeURIComponent(item.pair)}&interval=1&limit=16`,
+                {
+                  headers: { Accept: 'application/json', 'User-Agent': 'SalomaTradingPlatform/1.0' },
+                  signal: controller.signal
+                }
+              );
+              if (!kRes.ok) return null;
+              const kJson = (await kRes.json()) as {
+                retCode?: number;
+                result?: { list?: unknown[] };
+              };
+              if (kJson?.retCode !== 0 || !Array.isArray(kJson?.result?.list)) return null;
+              const evaluated = evaluateBot3KlineStreak(kJson.result.list);
+              if (evaluated.price <= 0) return null;
+              return {
+                symbol: item.symbol,
+                signalDir: evaluated.signalDir,
+                signalStep: evaluated.signalStep,
+                price: evaluated.price || item.last
+              };
+            } catch {
+              return null;
+            }
+          })
+        );
+        for (const sig of batchRes) {
+          if (sig) scannedSignals.push(sig);
+        }
+      }
+
+      bot3BybitScanCache = {
+        ts: Date.now(),
+        totalPairsCount,
+        signals: scannedSignals
+      };
+      return { totalPairsCount, signals: scannedSignals };
+    } catch {
+      return {
+        totalPairsCount: bot3BybitScanCache?.totalPairsCount || 0,
+        signals: bot3BybitScanCache?.signals || []
+      };
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  async function syncBot3AdminFeeToAppwrite(feeEnabled: boolean) {
+    if (!TABLES.BOT_SETTING) return;
+    try {
+      const existingRes = await adminDb.listRows({
+        databaseId: APPWRITE_DATABASE_ID,
+        tableId: TABLES.BOT_SETTING,
+        queries: [Query.equal('user_id', BOT3_ADMIN_CONFIG_USER_ID), Query.limit(1)]
+      });
+      const existingRow = existingRes.rows[0] as Record<string, unknown> | undefined;
+      await upsertBotSettingAdaptive(
+        TABLES.BOT_SETTING,
+        existingRow ? String(existingRow.$id) : null,
+        {
+          user_id: BOT3_ADMIN_CONFIG_USER_ID,
+          enabled: false,
+          bot3_saloma_fee_enabled: feeEnabled,
+          settings_json: JSON.stringify({
+            bot3SalomaFeeEnabled: feeEnabled,
+            updatedAt: new Date().toISOString()
+          })
+        }
+      );
+    } catch (err) {
+      console.error('[SALOMA BOT 3 Admin Fee Sync] Erreur:', err);
+    }
+  }
 
   function formatDayKeyWithTzOffset(dateInput: unknown, tzOffsetMinutes = -180): string {
     const dt = new Date(String(dateInput || ''));
@@ -4552,14 +4835,15 @@ export function createSalomaApiApp() {
       const nowCutoffMs = Date.now() - 48 * 3600 * 1000;
 
       for (const row of batch.rows) {
-        if (String(row.statut || '').toLowerCase() === 'annule') continue;
+        const statut = String(row.statut || '').toLowerCase();
+        if (statut === 'annule') continue;
         const rawDate = row.date_creation || row.$createdAt;
         const parsedMs = new Date(String(rawDate || '')).getTime();
         if (!Number.isNaN(parsedMs) && parsedMs < nowCutoffMs) {
           reachedOlderThanTwoDays = true;
         }
         const rowDayKey = formatDayKeyWithTzOffset(rawDate, tzOffsetMinutes);
-        if (rowDayKey === targetDayKey) {
+        if (rowDayKey === targetDayKey || statut === 'en_cours') {
           const baseCoin = String(row.paire || '')
             .split('/')[0]
             ?.toUpperCase()
@@ -4609,7 +4893,7 @@ export function createSalomaApiApp() {
       const entryPrice = Number(req.body?.entryPrice || 0);
       const exitPrice = Number(req.body?.exitPrice || entryPrice || 0);
       const leverage = Math.min(100, Math.max(1, Math.round(Number(req.body?.leverage || 1))));
-      const pnlAr = Math.round(Number(req.body?.pnlAr || 0));
+      const rawPnlAr = Math.round(Number(req.body?.pnlAr || 0));
       const tzOffset = Number(req.body?.tzOffset ?? -180);
       const requestedDayKey = String(req.body?.dayKey || '').trim();
       const targetDayKey = /^\d{4}-\d{2}-\d{2}$/.test(requestedDayKey)
@@ -4618,6 +4902,12 @@ export function createSalomaApiApp() {
 
       if (!symbol) {
         res.status(400).json({ error: 'Coin invalide.' });
+        return;
+      }
+
+      const bybitBal = await resolveBot3BybitCapital();
+      if (!bybitBal.connected || bybitBal.usdtBalance <= 0 || bybitBal.capitalAr <= 0) {
+        res.status(400).json({ error: 'Solde Bybit réel à 0 USDT — Aucun trade possible.' });
         return;
       }
 
@@ -4634,6 +4924,11 @@ export function createSalomaApiApp() {
         return;
       }
 
+      const bot3FeeEnabled = Boolean(brokerApisStore.salomaFees?.bot3FeeEnabled);
+      const salomaFeeAr = computeBot3SalomaFeeAr(rawPnlAr, bot3FeeEnabled);
+      const netPnlAfterFeeAr =
+        salomaFeeAr > 0 ? Math.round(rawPnlAr - salomaFeeAr) : rawPnlAr;
+
       const nowIso = new Date().toISOString();
       const createdTrade = await adminDb.createRow({
         databaseId: APPWRITE_DATABASE_ID,
@@ -4645,7 +4940,8 @@ export function createSalomaApiApp() {
           type: 'achat',
           montant: amountAr,
           prix: entryPrice > 0 ? entryPrice : 1,
-          profit: pnlAr,
+          profit: netPnlAfterFeeAr,
+          saloma_fee_ar: salomaFeeAr,
           statut: 'termine',
           date_creation: nowIso,
           date_cloture: nowIso,
@@ -4663,6 +4959,7 @@ export function createSalomaApiApp() {
       res.status(201).json({
         ok: true,
         trade: createdTrade,
+        salomaFeeAr,
         dayKey: targetDayKey,
         countsByCoin: updatedCounts
       });
@@ -4750,30 +5047,6 @@ export function createSalomaApiApp() {
     return null;
   }
 
-  async function resolveUserLiveBalanceAr(userId: string): Promise<number> {
-    if (TABLES.LIVE_BALANCE) {
-      const lbRes = await adminDb.listRows({
-        databaseId: APPWRITE_DATABASE_ID,
-        tableId: TABLES.LIVE_BALANCE,
-        queries: [Query.equal('user_id', userId), Query.limit(1)]
-      });
-      const lbRow = lbRes.rows[0] as Record<string, unknown> | undefined;
-      if (lbRow) {
-        const val = readBotNum(
-          lbRow,
-          ['live_balance', 'balance', 'solde', 'montant', 'capital_ar', 'compte_trade', 'solde_disponible'],
-          0
-        );
-        return Math.max(0, Math.round(val));
-      }
-    }
-    const wallet = await getOrCreateWalletRow(userId);
-    const ser = serializeWallet(wallet as unknown as Record<string, unknown>);
-    const tradeAr = Number(ser.compte_trade) || 0;
-    const dispAr = Number(ser.solde_disponible) || 0;
-    return Math.max(0, Math.round(tradeAr > 0 ? tradeAr : dispAr));
-  }
-
   app.get('/api/bot3/state', requireAuth, requireVerified, async (req: AuthedRequest, res: Response) => {
     try {
       const userId = req.authUser!.$id;
@@ -4783,8 +5056,8 @@ export function createSalomaApiApp() {
         ? requestedDayKey
         : formatDayKeyWithTzOffset(new Date().toISOString(), tzOffset);
 
-      const [liveBalanceAr, countsByCoin, tradesRes, botSettingRes, signalesRes] = await Promise.all([
-        resolveUserLiveBalanceAr(userId),
+      const [bybitBal, countsByCoin, tradesRes, botSettingRes, signalesRes] = await Promise.all([
+        resolveBot3BybitCapital(),
         getAppwriteCoinTradeCountsToday(userId, targetDayKey, tzOffset),
         adminDb.listRows({
           databaseId: APPWRITE_DATABASE_ID,
@@ -4807,12 +5080,34 @@ export function createSalomaApiApp() {
           : Promise.resolve({ rows: [] as Record<string, unknown>[] })
       ]);
 
+      const bybitScan = await scanAllBybitSpotUsdtForBot3(countsByCoin);
+
+      const liveBalanceAr = bybitBal.connected && bybitBal.usdtBalance > 0 ? bybitBal.capitalAr : 0;
+      const bybitUsdtBalance = bybitBal.connected ? bybitBal.usdtBalance : 0;
+
       const rawSetting = (botSettingRes.rows[0] || {}) as Record<string, unknown>;
       const embedded = parseBotJsonSafe<Record<string, unknown>>(rawSetting.settings_json, {});
       const merged = { ...embedded, ...rawSetting };
       const historyClearedBeforeMs = Number(
         readBotNum(merged, ['history_cleared_before', 'historyClearedBefore'], 0)
       );
+
+      // Synchronise discrètement le solde Bybit réel vers Bot Setting pour le Cron 24/7 si besoin
+      if (TABLES.BOT_SETTING && rawSetting.$id) {
+        const lastSyncedAt = Number(embedded.bybitSyncedAtMs || 0);
+        if (Date.now() - lastSyncedAt > 25000) {
+          void upsertBotSettingAdaptive(TABLES.BOT_SETTING, String(rawSetting.$id), {
+            bybit_usdt_balance: bybitUsdtBalance,
+            bybit_capital_ar: liveBalanceAr,
+            settings_json: JSON.stringify({
+              ...embedded,
+              bybitUsdtBalance,
+              bybitCapitalAr: liveBalanceAr,
+              bybitSyncedAtMs: Date.now()
+            })
+          }).catch(() => {});
+        }
+      }
 
       const activePositionRaw = parseBotJsonSafe<Record<string, unknown> | null>(
         merged.active_position_json ?? merged.activePositionJson ?? embedded.activePosition,
@@ -4829,7 +5124,7 @@ export function createSalomaApiApp() {
           ? activePositionRaw
           : openRow
           ? {
-              symbol: String(openRow.paire || 'BTC/USDT').split('/')[0].toUpperCase().trim(),
+              symbol: String(openRow.paire || '').split('/')[0].toUpperCase().trim(),
               entryPrice: Number(openRow.prix) || 0,
               currentPrice: Number(openRow.close_price || openRow.prix) || 0,
               entryTimeMs: new Date(String(openRow.date_creation || openRow.$createdAt)).getTime() || Date.now(),
@@ -4851,9 +5146,10 @@ export function createSalomaApiApp() {
           return !historyClearedBeforeMs || ts > historyClearedBeforeMs;
         })
         .map(r => {
-          const sym = String(r.paire || 'BTC/USDT').split('/')[0].toUpperCase().trim();
+          const sym = String(r.paire || '').split('/')[0].toUpperCase().trim();
           const amt = Math.max(1, Number(r.montant) || 0);
           const pnlAr = Math.round(Number(r.profit) || 0);
+          const salomaFeeAr = Math.max(0, Number(r.saloma_fee_ar ?? r.frais_saloma_ar ?? r.frais ?? 0) || 0);
           const pnlPct = Number(((pnlAr / amt) * 100).toFixed(2));
           const ts = new Date(String(r.date_cloture || r.date_creation || r.$createdAt)).getTime() || Date.now();
           return {
@@ -4864,6 +5160,7 @@ export function createSalomaApiApp() {
             amountAr: amt,
             pnlPct,
             pnlAr,
+            salomaFeeAr,
             entryPrice: Number(r.prix) || 0,
             exitPrice: Number(r.close_price || r.prix) || 0,
             reason: pnlAr >= 0 ? ('TP' as const) : ('SL' as const),
@@ -4871,11 +5168,12 @@ export function createSalomaApiApp() {
           };
         });
 
-      const signals = signalesRes.rows
+      // Combiner les signaux scannés Bybit (500+ paires) + Signales Appwrite sans jamais inventer ni forcer BTC/PEPE
+      const appwriteSignals = signalesRes.rows
         .map((s: Record<string, unknown>) => {
           const sym = readBotStr(s, ['symbol', 'coin', 'paire', 'asset']).split('/')[0].toUpperCase().trim();
           const dirRaw = readBotStr(s, ['signal_dir', 'direction', 'dir', 'tendance']).toLowerCase();
-          const signalDir =
+          const signalDir: 'up' | 'down' | 'none' =
             dirRaw === 'up' || dirRaw === 'hausse' || dirRaw === 'buy' || dirRaw === 'vert'
               ? 'up'
               : dirRaw === 'down' || dirRaw === 'baisse' || dirRaw === 'sell' || dirRaw === 'rouge'
@@ -4892,16 +5190,70 @@ export function createSalomaApiApp() {
         })
         .filter(s => Boolean(s.symbol));
 
+      const mergedSignalMap = new Map<
+        string,
+        { symbol: string; signalDir: 'up' | 'down' | 'none'; signalStep: number | null; price: number }
+      >();
+      for (const sig of bybitScan.signals) {
+        mergedSignalMap.set(sig.symbol, sig);
+      }
+      for (const sig of appwriteSignals) {
+        if (!mergedSignalMap.has(sig.symbol)) {
+          mergedSignalMap.set(sig.symbol, sig);
+        }
+      }
+      const signals = Array.from(mergedSignalMap.values());
+
+      // Vérifier s'il existe au moins un coin valide respectant les critères d'entrée et < 3 trades
+      const validSignal = signals.find(
+        s =>
+          (countsByCoin[s.symbol] || 0) < BOT3_MAX_TRADES_PER_COIN_DAY &&
+          s.signalDir === 'up' &&
+          s.signalStep !== null &&
+          s.signalStep >= 4 &&
+          s.signalStep <= 9
+      );
+
+      if (!activePosition && !validSignal) {
+        console.log('[SALOMA BOT 3] Aucun coin valide - En attente');
+      }
+
+      const rawScannedSymbol = readBotStr(merged, ['scanned_symbol', 'scannedSymbol'], '');
+      const effectiveScannedSymbol = activePosition
+        ? String(activePosition.symbol || '').toUpperCase()
+        : validSignal
+        ? validSignal.symbol
+        : rawScannedSymbol &&
+          rawScannedSymbol !== 'PEPE' &&
+          rawScannedSymbol !== 'BTC'
+        ? rawScannedSymbol.toUpperCase()
+        : '';
+
       const sameDay = readBotStr(merged, ['last_day_key', 'lastDayKey'], targetDayKey) === targetDayKey;
       const dayStartCapitalAr = sameDay
         ? Math.max(0, Math.round(readBotNum(merged, ['day_start_capital_ar', 'dayStartCapitalAr'], liveBalanceAr)))
         : liveBalanceAr;
+
+      const rawStatusLabel = readBotStr(merged, ['status_label', 'statusLabel'], '');
+      const effectiveStatusLabel =
+        liveBalanceAr <= 0
+          ? 'Solde Bybit réel à 0 USDT — En attente de liquidité'
+          : !activePosition && !validSignal && (!rawStatusLabel || rawStatusLabel.includes('PEPE') || rawStatusLabel.includes('BTC'))
+          ? 'Aucun coin valide - En attente'
+          : rawStatusLabel;
+
+      const bot3SalomaFeeEnabled = Boolean(brokerApisStore.salomaFees?.bot3FeeEnabled);
 
       res.json({
         ok: true,
         dayKey: targetDayKey,
         maxPerCoin: BOT3_MAX_TRADES_PER_COIN_DAY,
         liveBalanceAr,
+        bybitUsdtBalance,
+        bybitConnected: bybitBal.connected,
+        bybitError: bybitBal.error || null,
+        scannedCoinsCount: bybitScan.totalPairsCount,
+        bot3SalomaFeeEnabled,
         countsByCoin,
         activePosition,
         history,
@@ -4942,9 +5294,9 @@ export function createSalomaApiApp() {
               : merged.lastTradePnlAr !== undefined && merged.lastTradePnlAr !== null
               ? Number(merged.lastTradePnlAr)
               : null,
-          statusLabel: readBotStr(merged, ['status_label', 'statusLabel'], ''),
+          statusLabel: effectiveStatusLabel,
           avatarMood: readBotStr(merged, ['avatar_mood', 'avatarMood'], ''),
-          scannedSymbol: readBotStr(merged, ['scanned_symbol', 'scannedSymbol'], 'PEPE'),
+          scannedSymbol: effectiveScannedSymbol,
           lastRunAt: readBotStr(merged, ['last_run_at', 'lastRunAt'], '')
         }
       });
@@ -4967,11 +5319,12 @@ export function createSalomaApiApp() {
         return;
       }
 
-      const liveBalanceAr = await resolveUserLiveBalanceAr(userId);
+      const bybitBal = await resolveBot3BybitCapital();
+      const liveBalanceAr = bybitBal.connected && bybitBal.usdtBalance > 0 ? bybitBal.capitalAr : 0;
       const requestedEnabled = Boolean(req.body?.enabled);
       if (requestedEnabled && liveBalanceAr <= 0) {
         res.status(400).json({
-          error: 'Solde Live Balance Appwrite à 0 Ar — Effectuez un dépôt réel avant d’allumer BOT 3.'
+          error: 'Solde Bybit réel à 0 USDT (0 Ar) — Impossible de démarrer BOT 3.'
         });
         return;
       }
@@ -5018,6 +5371,9 @@ export function createSalomaApiApp() {
         ...existingEmbedded,
         enabled: requestedEnabled,
         capitalAr: liveBalanceAr,
+        bybitUsdtBalance: bybitBal.usdtBalance,
+        bybitCapitalAr: liveBalanceAr,
+        bybitSyncedAtMs: Date.now(),
         dayStartCapitalAr,
         capitalUsedPct,
         investmentAr,
@@ -5034,6 +5390,8 @@ export function createSalomaApiApp() {
         enabled: requestedEnabled,
         actif: requestedEnabled,
         capital_ar: liveBalanceAr,
+        bybit_usdt_balance: bybitBal.usdtBalance,
+        bybit_capital_ar: liveBalanceAr,
         day_start_capital_ar: dayStartCapitalAr,
         capital_used_pct: capitalUsedPct,
         investment_ar: investmentAr,
@@ -5044,13 +5402,18 @@ export function createSalomaApiApp() {
         stop_loss_pct: stopLossPct,
         last_day_key: targetDayKey,
         status_label: requestedEnabled
-          ? 'ON — Bot 24/7 actif sur Appwrite (bot-saloma Cron 1 min)'
+          ? 'ON — Scan Bybit 500+ paires actif (bot-saloma Cron 1 min)'
           : 'BOT 3 arrêté (OFF)',
         avatar_mood: requestedEnabled ? 'WATCHING' : 'OFF',
         settings_json: JSON.stringify(nextEmbedded)
       });
 
-      res.json({ ok: true, setting: nextEmbedded, liveBalanceAr });
+      res.json({
+        ok: true,
+        setting: nextEmbedded,
+        liveBalanceAr,
+        bybitUsdtBalance: bybitBal.usdtBalance
+      });
     } catch (err) {
       res.status(503).json({
         error: formatAppwriteErrorFr(err, APPWRITE_CONNECTION_FAILED_MSG),
@@ -6590,16 +6953,23 @@ export function createSalomaApiApp() {
       }
 
       const clampedMargin = clampMarginPct(nextBybitMargin, 0.1);
+      const nextBot3FeeEnabled =
+        req.body?.bot3FeeEnabled !== undefined
+          ? Boolean(req.body.bot3FeeEnabled)
+          : Boolean(brokerApisStore.salomaFees?.bot3FeeEnabled);
+
       brokerApisStore.salomaFees = {
         bybitRecoveryMarginPct: clampedMargin,
         tradeFeePct: clampMarginPct(nextTradeFee, 0.1),
         exchangeFeePct: clampMarginPct(nextExchangeFee, 0.1),
         withdrawFeePct: clampMarginPct(nextWithdrawFee, 0.15),
-        networkFeeUsdt: clampNetworkFeeUsdt(nextNetworkFee, 0.5)
+        networkFeeUsdt: clampNetworkFeeUsdt(nextNetworkFee, 0.5),
+        bot3FeeEnabled: nextBot3FeeEnabled
       };
       brokerApisStore.providers.bybit.marginPct = clampedMargin;
       brokerApisStore.providers[brokerApisStore.primaryApi].marginPct = clampedMargin;
       saveApisStore();
+      void syncBot3AdminFeeToAppwrite(nextBot3FeeEnabled);
       recomputeMarketSalomaPrices();
       broadcastWs(buildSnapshotPayload());
 
@@ -6613,6 +6983,35 @@ export function createSalomaApiApp() {
     } catch (err) {
       const msg = formatAppwriteErrorFr(err, 'Erreur sauvegarde configuration frais.');
       console.error('[SALOMA /api/admin/fees] Erreur:', err);
+      res.status(200).json({ success: false, ok: false, error: msg, message: msg });
+    }
+  });
+
+  app.post('/api/admin/bot3-fee', requireAdminPin, async (req: Request, res: Response) => {
+    try {
+      const nextEnabled =
+        req.body?.enabled !== undefined
+          ? Boolean(req.body.enabled)
+          : !Boolean(brokerApisStore.salomaFees?.bot3FeeEnabled);
+
+      brokerApisStore.salomaFees = {
+        ...brokerApisStore.salomaFees,
+        bot3FeeEnabled: nextEnabled
+      };
+      saveApisStore();
+      await syncBot3AdminFeeToAppwrite(nextEnabled);
+
+      res.status(200).json({
+        success: true,
+        ok: true,
+        bot3FeeEnabled: nextEnabled,
+        salomaFees: brokerApisStore.salomaFees,
+        message: nextEnabled
+          ? 'Frais SALOMA 0.1% - BOT 3 activé (ON).'
+          : 'Frais SALOMA 0.1% - BOT 3 désactivé (OFF — 0 frais).'
+      });
+    } catch (err) {
+      const msg = formatAppwriteErrorFr(err, 'Erreur mise à jour Frais SALOMA BOT 3.');
       res.status(200).json({ success: false, ok: false, error: msg, message: msg });
     }
   });

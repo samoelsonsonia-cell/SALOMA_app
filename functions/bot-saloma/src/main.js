@@ -1,3 +1,5 @@
+import crypto from 'node:crypto';
+
 let appwriteSdkPromise = null;
 async function getAppwriteSdk() {
   if (!appwriteSdkPromise) {
@@ -11,6 +13,20 @@ const BOT3_MAX_TRADES_DAILY = 100;
 const BOT3_MAX_TRADES_PER_COIN_DAY = 3;
 const BOT3_LOSS_SLEEP_MS = 30 * 60 * 1000;
 const DEFAULT_TZ_OFFSET_MINUTES = -180; // Madagascar (UTC+3)
+const USD_TO_MGA = 4750;
+const BOT3_ADMIN_CONFIG_USER_ID = '__SALOMA_BOT3_ADMIN_CONFIG__';
+const BOT3_IGNORED_STABLE_BASES = new Set([
+  'USDT',
+  'USDC',
+  'USDE',
+  'FDUSD',
+  'TUSD',
+  'DAI',
+  'BUSD',
+  'USDD',
+  'PYUSD',
+  'EURC'
+]);
 
 function stripQuotes(raw) {
   const s = String(raw || '').trim();
@@ -206,33 +222,239 @@ function normalizeSignalRow(row) {
   };
 }
 
-function resolveRealLiveBalanceAr(liveBalanceRows, walletRows, userId) {
-  const lbRow = liveBalanceRows.find(r => readStr(r, ['user_id', 'userId']) === userId);
-  if (lbRow) {
-    const val = readNum(
-      lbRow,
-      ['live_balance', 'balance', 'solde', 'montant', 'capital_ar', 'compte_trade', 'solde_disponible'],
-      0
-    );
-    return {
-      source: 'LIVE_BALANCE',
-      row: lbRow,
-      balanceAr: Math.max(0, Math.round(val))
-    };
+function computeBot3SalomaFeeAr(netProfitAr, feeEnabled) {
+  if (!feeEnabled || !Number.isFinite(netProfitAr) || netProfitAr <= 0) return 0;
+  const raw = netProfitAr * 0.001; // 0.1% du profit net par trade clôturé (ex: 10 000 Ar -> 10 Ar)
+  return netProfitAr >= 500 ? Math.round(raw) : Number(raw.toFixed(2));
+}
+
+async function fetchRealBybitBalanceUsdt() {
+  const apiKey = stripQuotes(process.env.BYBIT_API_KEY);
+  const apiSecret = stripQuotes(process.env.BYBIT_API_SECRET);
+  if (!apiKey || !apiSecret) {
+    return { configured: false, connected: false, usdtBalance: 0, capitalAr: 0 };
   }
-  const wRow = walletRows.find(r => readStr(r, ['user_id', 'userId']) === userId);
-  if (wRow) {
-    let tradeAr = 0;
-    const coins = parseJsonSafe(wRow.coins_json, {}) || {};
-    if (coins._trade_ar !== undefined) tradeAr = Number(coins._trade_ar) || 0;
-    const disp = Number(wRow.solde_disponible) || 0;
-    return {
-      source: 'WALLETS',
-      row: wRow,
-      balanceAr: Math.max(0, Math.round(tradeAr > 0 ? tradeAr : disp))
-    };
+
+  const domains = ['https://api.bybit.com', 'https://api.bytick.com'];
+  const recvWindow = '10000';
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 8000);
+
+  try {
+    for (const baseUrl of domains) {
+      let serverTs = Date.now().toString();
+      try {
+        const tRes = await fetch(`${baseUrl}/v5/market/time`, { signal: controller.signal });
+        const tJson = await tRes.json().catch(() => null);
+        if (tJson?.retCode === 0) {
+          if (typeof tJson.time === 'number' && tJson.time > 0) serverTs = String(tJson.time);
+          else if (tJson.result?.timeSecond) serverTs = String(Number(tJson.result.timeSecond) * 1000);
+        }
+      } catch {
+        // fallback local clock
+      }
+
+      for (const accType of ['UNIFIED', 'SPOT']) {
+        try {
+          const qs = `accountType=${accType}`;
+          const prehash = `${serverTs}${apiKey}${recvWindow}${qs}`;
+          const sign = crypto.createHmac('sha256', apiSecret).update(prehash).digest('hex');
+          const r = await fetch(`${baseUrl}/v5/account/wallet-balance?${qs}`, {
+            method: 'GET',
+            headers: {
+              'X-BAPI-API-KEY': apiKey,
+              'X-BAPI-SIGN': sign,
+              'X-BAPI-TIMESTAMP': serverTs,
+              'X-BAPI-RECV-WINDOW': recvWindow,
+              Accept: 'application/json',
+              'User-Agent': 'SalomaTradingPlatform/1.0'
+            },
+            signal: controller.signal
+          });
+          const data = await r.json().catch(() => null);
+          if (r.ok && data?.retCode === 0) {
+            let usdt = 0;
+            for (const acc of data.result?.list || []) {
+              const usdtCoin = (acc.coin || []).find(
+                c => String(c.coin || '').toUpperCase() === 'USDT'
+              );
+              if (usdtCoin) {
+                usdt += Number(usdtCoin.walletBalance || usdtCoin.equity || 0) || 0;
+              } else if (acc.totalWalletBalance) {
+                usdt += Number(acc.totalWalletBalance) || 0;
+              }
+            }
+            const cleanUsdt = Number(Math.max(0, usdt).toFixed(4));
+            return {
+              configured: true,
+              connected: true,
+              usdtBalance: cleanUsdt,
+              capitalAr: cleanUsdt > 0 ? Math.round(cleanUsdt * USD_TO_MGA) : 0
+            };
+          }
+        } catch {
+          // try next accountType or domain
+        }
+      }
+    }
+    return { configured: true, connected: false, usdtBalance: 0, capitalAr: 0 };
+  } finally {
+    clearTimeout(timer);
   }
-  return { source: 'NONE', row: null, balanceAr: 0 };
+}
+
+function evaluateBot3KlineStreak(klineList) {
+  if (!Array.isArray(klineList) || klineList.length === 0) {
+    return { signalDir: 'none', signalStep: null, price: 0 };
+  }
+  const ordered = [...klineList].reverse();
+  let upStreak = 0;
+  let downStreak = 0;
+  let lastDir = 'none';
+  let lastStep = null;
+  let lastPrice = 0;
+
+  for (const row of ordered) {
+    if (!Array.isArray(row) || row.length < 5) continue;
+    const open = Number(row[1]);
+    const close = Number(row[4]);
+    if (!Number.isFinite(open) || !Number.isFinite(close) || close <= 0) continue;
+    const isUp = close >= open;
+    if (isUp) {
+      upStreak = Math.min(9, upStreak + 1);
+      downStreak = 0;
+      lastDir = 'up';
+      lastStep = upStreak;
+    } else {
+      downStreak = downStreak === 0 ? 9 : Math.max(5, downStreak - 1);
+      upStreak = 0;
+      lastDir = 'down';
+      lastStep = downStreak;
+    }
+    lastPrice = close;
+  }
+
+  return { signalDir: lastDir, signalStep: lastStep, price: lastPrice };
+}
+
+async function scanAllBybitSpotUsdtPairs(extraSymbols = []) {
+  const domains = ['https://api.bybit.com', 'https://api.bytick.com'];
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 12000);
+
+  try {
+    let tickerRows = [];
+    let activeDomain = domains[0];
+
+    for (const baseUrl of domains) {
+      try {
+        const r = await fetch(`${baseUrl}/v5/market/tickers?category=spot`, {
+          headers: { Accept: 'application/json', 'User-Agent': 'SalomaTradingPlatform/1.0' },
+          signal: controller.signal
+        });
+        if (!r.ok) continue;
+        const j = await r.json().catch(() => null);
+        if (j?.retCode === 0 && Array.isArray(j?.result?.list) && j.result.list.length > 0) {
+          tickerRows = j.result.list;
+          activeDomain = baseUrl;
+          break;
+        }
+      } catch {
+        // try fallback
+      }
+    }
+
+    const allUsdtPairs = tickerRows
+      .filter(row => typeof row.symbol === 'string' && row.symbol.endsWith('USDT'))
+      .map(row => {
+        const rawSym = String(row.symbol || '');
+        const base = rawSym.slice(0, -4).toUpperCase().trim();
+        const last = parseFloat(row.lastPrice || '');
+        const pct24h = (parseFloat(row.price24hPcnt || '') || 0) * 100;
+        const volUsd = parseFloat(row.turnover24h || '') || 0;
+        return { pair: rawSym, symbol: base, last, pct24h, volUsd };
+      })
+      .filter(item => item.symbol && !BOT3_IGNORED_STABLE_BASES.has(item.symbol) && item.last > 0);
+
+    const tickerPriceBySymbol = new Map(allUsdtPairs.map(p => [p.symbol, p.last]));
+
+    // Prioriser les paires actives + paires demandées (positions ouvertes) pour lire les bougies 1m réelles Bybit
+    const extraSet = new Set(extraSymbols.map(s => String(s || '').toUpperCase().trim()).filter(Boolean));
+    const prioritized = [
+      ...allUsdtPairs.filter(p => extraSet.has(p.symbol)),
+      ...allUsdtPairs
+        .filter(p => !extraSet.has(p.symbol) && p.volUsd > 10000)
+        .sort((a, b) => {
+          const aScore = (a.pct24h > 0 ? 1 : 0) * 1e12 + a.volUsd;
+          const bScore = (b.pct24h > 0 ? 1 : 0) * 1e12 + b.volUsd;
+          return bScore - aScore;
+        })
+        .slice(0, 40)
+    ];
+
+    const scannedSignals = [];
+    for (let i = 0; i < prioritized.length; i += 8) {
+      const chunk = prioritized.slice(i, i + 8);
+      const batch = await Promise.all(
+        chunk.map(async item => {
+          try {
+            const kRes = await fetch(
+              `${activeDomain}/v5/market/kline?category=spot&symbol=${encodeURIComponent(item.pair)}&interval=1&limit=16`,
+              {
+                headers: { Accept: 'application/json', 'User-Agent': 'SalomaTradingPlatform/1.0' },
+                signal: controller.signal
+              }
+            );
+            if (!kRes.ok) return null;
+            const kJson = await kRes.json().catch(() => null);
+            if (kJson?.retCode !== 0 || !Array.isArray(kJson?.result?.list)) return null;
+            const evaluated = evaluateBot3KlineStreak(kJson.result.list);
+            if (evaluated.price <= 0) return null;
+            return {
+              symbol: item.symbol,
+              signalDir: evaluated.signalDir,
+              signalStep: evaluated.signalStep,
+              price: evaluated.price || item.last
+            };
+          } catch {
+            return null;
+          }
+        })
+      );
+      for (const sig of batch) {
+        if (sig) scannedSignals.push(sig);
+      }
+    }
+
+    return {
+      totalPairsCount: allUsdtPairs.length,
+      tickerPriceBySymbol,
+      signals: scannedSignals
+    };
+  } catch {
+    return {
+      totalPairsCount: 0,
+      tickerPriceBySymbol: new Map(),
+      signals: []
+    };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+function resolveRealBybitCapitalForSetting(bybitLive, rawSetting, embedded) {
+  if (bybitLive.configured) {
+    return bybitLive.connected && bybitLive.usdtBalance > 0 ? bybitLive.capitalAr : 0;
+  }
+  const syncedAtMs = Number(embedded?.bybitSyncedAtMs || 0);
+  const syncedCapitalAr = Math.max(
+    0,
+    Math.round(readNum({ ...embedded, ...rawSetting }, ['bybit_capital_ar', 'bybitCapitalAr'], 0))
+  );
+  if (syncedAtMs > 0 && Date.now() - syncedAtMs <= 5 * 60 * 1000 && syncedCapitalAr > 0) {
+    return syncedCapitalAr;
+  }
+  return 0;
 }
 
 export default async ({ req, res, log, error } = {}) => {
@@ -329,31 +551,55 @@ export default async ({ req, res, log, error } = {}) => {
     const nowIso = nowDate.toISOString();
     const todayKey = getDayKey(nowDate, DEFAULT_TZ_OFFSET_MINUTES);
 
-    const [botSettingRows, liveBalanceRows, signalRows, walletRows] = await Promise.all([
+    const [botSettingRows, signalRows, bybitLive] = await Promise.all([
       listAllRowsSafe(tablesDb, databaseId, tableBotSetting, [], 5),
-      listAllRowsSafe(tablesDb, databaseId, tableLiveBalance, [], 5),
       listAllRowsSafe(tablesDb, databaseId, tableSignales, [], 3),
-      tableWallets ? listAllRowsSafe(tablesDb, databaseId, tableWallets, [], 5) : Promise.resolve([])
+      fetchRealBybitBalanceUsdt()
     ]);
 
-    const signals = signalRows.map(normalizeSignalRow).filter(s => s.symbol && s.price > 0);
-    const signalsBySymbol = new Map(signals.map(s => [s.symbol, s]));
+    const adminCfgRow = botSettingRows.find(
+      r => readStr(r, ['user_id', 'userId']) === BOT3_ADMIN_CONFIG_USER_ID
+    );
+    const adminCfgEmbedded = parseJsonSafe(adminCfgRow?.settings_json, {}) || {};
+    const bot3SalomaFeeEnabled = readBool(
+      { ...adminCfgEmbedded, ...(adminCfgRow || {}) },
+      ['bot3_saloma_fee_enabled', 'bot3SalomaFeeEnabled'],
+      false
+    );
+
+    const openPositionSymbols = botSettingRows
+      .map(r => normalizeBotSetting(r)?.activePosition?.symbol)
+      .filter(Boolean);
+
+    const bybitScan = await scanAllBybitSpotUsdtPairs(openPositionSymbols);
+    const appwriteSignals = signalRows.map(normalizeSignalRow).filter(s => s.symbol && s.price > 0);
+    const signalsBySymbol = new Map();
+    for (const sig of bybitScan.signals) {
+      signalsBySymbol.set(sig.symbol, sig);
+    }
+    for (const sig of appwriteSignals) {
+      if (!signalsBySymbol.has(sig.symbol)) {
+        const livePrice = bybitScan.tickerPriceBySymbol.get(sig.symbol) || sig.price;
+        signalsBySymbol.set(sig.symbol, { ...sig, price: livePrice });
+      }
+    }
+    const signals = Array.from(signalsBySymbol.values());
     const actions = [];
 
     for (const rawSetting of botSettingRows) {
       const setting = normalizeBotSetting(rawSetting);
-      if (!setting.userId) continue;
+      if (!setting.userId || setting.userId === BOT3_ADMIN_CONFIG_USER_ID) continue;
 
       try {
-        const balanceInfo = resolveRealLiveBalanceAr(liveBalanceRows, walletRows, setting.userId);
-        const liveBalanceAr = balanceInfo.balanceAr;
+        const liveBalanceAr = resolveRealBybitCapitalForSetting(bybitLive, rawSetting, setting.embedded);
 
-        // Jamais de solde virtuel : si Live Balance <= 0, le robot reste en attente à 0 Ar
+        // Si Bybit = 0 -> Capital = 0, pas de trade
         if (liveBalanceAr <= 0) {
           if (setting.enabled) {
             await updateRowAdaptive(tablesDb, databaseId, tableBotSetting, setting.rowId, {
               enabled: false,
-              status_label: 'Solde Live Balance Appwrite à 0 Ar — En attente de dépôt',
+              capital_ar: 0,
+              status_label: 'Solde Bybit réel à 0 USDT — Pas de trade',
               avatar_mood: 'OFF',
               last_run_at: nowIso
             });
@@ -454,7 +700,7 @@ export default async ({ req, res, log, error } = {}) => {
           continue;
         }
 
-        // Compter les Trades du jour par Coin dans Collection TRADE
+        // Compter les Trades du jour + ouverts par Coin dans Collection TRADE (Max 3 / coin)
         const userTrades = await listAllRowsSafe(
           tablesDb,
           databaseId,
@@ -464,15 +710,20 @@ export default async ({ req, res, log, error } = {}) => {
         );
 
         const coinCountsToday = {};
+        const openCountsByCoin = {};
         for (const tr of userTrades) {
-          if (String(tr.statut || '').toLowerCase() === 'annule') continue;
-          const trDay = getDayKey(tr.date_creation || tr.$createdAt, DEFAULT_TZ_OFFSET_MINUTES);
-          if (trDay !== todayKey) continue;
+          const statut = String(tr.statut || '').toLowerCase();
+          if (statut === 'annule') continue;
           const sym = String(tr.paire || '')
             .split('/')[0]
             ?.toUpperCase()
             .trim();
-          if (sym) {
+          if (!sym) continue;
+          if (statut === 'en_cours') {
+            openCountsByCoin[sym] = (openCountsByCoin[sym] || 0) + 1;
+          }
+          const trDay = getDayKey(tr.date_creation || tr.$createdAt, DEFAULT_TZ_OFFSET_MINUTES);
+          if (trDay === todayKey || statut === 'en_cours') {
             coinCountsToday[sym] = (coinCountsToday[sym] || 0) + 1;
           }
         }
@@ -514,13 +765,17 @@ export default async ({ req, res, log, error } = {}) => {
               finalPnlPct = Number(levMovePct.toFixed(2));
             }
 
-            let pnlAr = Math.round((pos.amountAr * finalPnlPct) / 100);
-            if (pnlAr === 0 && finalPnlPct !== 0) pnlAr = finalPnlPct > 0 ? 1 : -1;
+            let grossPnlAr = Math.round((pos.amountAr * finalPnlPct) / 100);
+            if (grossPnlAr === 0 && finalPnlPct !== 0) grossPnlAr = finalPnlPct > 0 ? 1 : -1;
 
             const maxAllowedDayCapital = Math.floor(dayStartCapitalAr * (1 + curDailyCapPct / 100));
-            if (pnlAr > 0 && liveBalanceAr + pnlAr > maxAllowedDayCapital) {
-              pnlAr = Math.max(0, maxAllowedDayCapital - liveBalanceAr);
+            if (grossPnlAr > 0 && liveBalanceAr + grossPnlAr > maxAllowedDayCapital) {
+              grossPnlAr = Math.max(0, maxAllowedDayCapital - liveBalanceAr);
             }
+
+            // Frais SALOMA 0.1% du profit net par trade clôturé (UNIQUEMENT si Admin ON, OFF par défaut = 0 frais)
+            const salomaFeeAr = computeBot3SalomaFeeAr(grossPnlAr, bot3SalomaFeeEnabled);
+            const pnlAr = salomaFeeAr > 0 ? Math.round(grossPnlAr - salomaFeeAr) : grossPnlAr;
 
             const newBalanceAr = Math.max(0, liveBalanceAr + pnlAr);
             const isWin = pnlAr >= 0;
@@ -544,6 +799,7 @@ export default async ({ req, res, log, error } = {}) => {
               await updateRowAdaptive(tablesDb, databaseId, tableTrades, pos.tradeRowId, {
                 statut: 'termine',
                 profit: pnlAr,
+                saloma_fee_ar: salomaFeeAr,
                 close_price: curPrice,
                 date_cloture: nowIso
               });
@@ -555,6 +811,7 @@ export default async ({ req, res, log, error } = {}) => {
                 montant: pos.amountAr,
                 prix: pos.entryPrice,
                 profit: pnlAr,
+                saloma_fee_ar: salomaFeeAr,
                 statut: 'termine',
                 date_creation: pos.entryIso || nowIso,
                 date_cloture: nowIso,
@@ -564,23 +821,14 @@ export default async ({ req, res, log, error } = {}) => {
               });
             }
 
-            // Mettre à jour Live Balance réelle dans Appwrite
-            if (balanceInfo.source === 'LIVE_BALANCE' && balanceInfo.row) {
-              await updateRowAdaptive(tablesDb, databaseId, tableLiveBalance, balanceInfo.row.$id, {
-                live_balance: newBalanceAr,
-                balance: newBalanceAr,
-                solde: newBalanceAr,
-                date_maj: nowIso
-              });
-            }
-
+            const feeTag = salomaFeeAr > 0 ? ` • Frais SALOMA : ${salomaFeeAr.toLocaleString('fr-FR')} Ar` : '';
             const nextStatusLabel =
               nextSleepMode === 'SLEEP_30M'
-                ? '3 pertes de suite — Dort 30 minutes'
+                ? `3 pertes de suite — Dort 30 minutes${feeTag}`
                 : nextSleepMode === 'SLEEP_MIDNIGHT'
-                ? `Profit ${curDailyCapPct}% atteint — Dort jusqu’à 00:00H`
+                ? `Profit ${curDailyCapPct}% atteint — Dort jusqu’à 00:00H${feeTag}`
                 : isWin
-                ? `SELL ${pos.symbol} : +${finalPnlPct.toFixed(2)}% (+${pnlAr.toLocaleString('fr-FR')} Ar)`
+                ? `SELL ${pos.symbol} : +${finalPnlPct.toFixed(2)}% (+${pnlAr.toLocaleString('fr-FR')} Ar)${feeTag}`
                 : `STOP LOSS ${pos.symbol} : ${finalPnlPct.toFixed(2)}% (${pnlAr.toLocaleString('fr-FR')} Ar)`;
 
             await updateRowAdaptive(tablesDb, databaseId, tableBotSetting, setting.rowId, {
@@ -609,7 +857,7 @@ export default async ({ req, res, log, error } = {}) => {
               })
             });
 
-            actions.push({ userId: setting.userId, action: 'CLOSE_TRADE', symbol: pos.symbol, pnlAr });
+            actions.push({ userId: setting.userId, action: 'CLOSE_TRADE', symbol: pos.symbol, pnlAr, salomaFeeAr });
           } else {
             const updatedPos = {
               ...pos,
@@ -633,7 +881,7 @@ export default async ({ req, res, log, error } = {}) => {
           continue;
         }
 
-        // 2) Pas de position ouverte : scanner Signales en appliquant LIMITE 3 TRADES / COIN / JOUR
+        // 2) Pas de position ouverte : scan TOUTES les paires Spot USDT Bybit (Max 3 trades / coin)
         const stakeNow = setting.usePercentStakeMode
           ? Math.round((liveBalanceAr * setting.capitalUsedPct) / 100)
           : Math.round(setting.investmentAr);
@@ -653,8 +901,9 @@ export default async ({ req, res, log, error } = {}) => {
 
         for (const sig of signals) {
           const usedToday = coinCountsToday[sig.symbol] || 0;
-          // LIMITE 3 TRADES / COIN / JOUR — Si 3/3 atteint (ex: PEPE), STOP sur ce Coin et continue sur les autres
-          if (usedToday >= BOT3_MAX_TRADES_PER_COIN_DAY) {
+          const openForCoin = openCountsByCoin[sig.symbol] || 0;
+          // Max 3 trades ouverts / jour par coin : si 3 déjà, passe au coin suivant
+          if (Math.max(usedToday, openForCoin) >= BOT3_MAX_TRADES_PER_COIN_DAY) {
             continue;
           }
           eligibleCount++;
@@ -666,20 +915,23 @@ export default async ({ req, res, log, error } = {}) => {
         }
 
         if (signals.length > 0 && eligibleCount === 0) {
+          safeLog('Aucun coin valide - En attente');
           await updateRowAdaptive(tablesDb, databaseId, tableBotSetting, setting.rowId, {
             avatar_mood: 'REST',
-            status_label: 'LIMITE 3/3 ATTEINTE - Pause pour ce Coin (tous les Coins à 3/3 aujourd’hui)',
+            scanned_symbol: '',
+            status_label: 'LIMITE 3/3 ATTEINTE - Aucun coin valide - En attente',
             last_run_at: nowIso
           });
           continue;
         }
 
+        // 3) AUCUN COIN VALIDE = AUCUN TRADE (Jamais de trade forcé / par défaut sur BTC ou PEPE)
         if (!bestCoin) {
-          const watchSym = signals.find(s => (coinCountsToday[s.symbol] || 0) < BOT3_MAX_TRADES_PER_COIN_DAY)?.symbol || 'PEPE';
+          safeLog('Aucun coin valide - En attente');
           await updateRowAdaptive(tablesDb, databaseId, tableBotSetting, setting.rowId, {
-            avatar_mood: 'WATCHING',
-            scanned_symbol: watchSym,
-            status_label: 'Pas de signal 1..9 — Bot 24/7 en veille (Appwrite Cron)',
+            avatar_mood: 'REST',
+            scanned_symbol: '',
+            status_label: 'Aucun coin valide - En attente',
             last_run_at: nowIso
           });
           continue;
