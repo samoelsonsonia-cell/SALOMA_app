@@ -13,6 +13,7 @@ import {
   Account,
   Users,
   TablesDB,
+  TablesDBIndexType,
   ID,
   Query,
   Permission,
@@ -2155,6 +2156,506 @@ const adminClient = getAdminClient();
 const adminUsers = new Users(adminClient);
 const adminDb = new TablesDB(adminClient);
 
+type CoreAppwriteTableKey =
+  | 'USERS'
+  | 'WALLETS'
+  | 'DEPOTS_RETRAITS'
+  | 'ECHANGES'
+  | 'EARN'
+  | 'NOTIFICATIONS'
+  | 'PROBLEMES'
+  | 'TRADES';
+
+interface AppwriteColumnSpec {
+  key: string;
+  type: 'string' | 'text' | 'float' | 'integer' | 'boolean';
+  size?: number;
+  required?: boolean;
+}
+
+interface CoreAppwriteTableSpec {
+  defaultName: string;
+  aliases: string[];
+  verifyColumns?: string[];
+  columns: AppwriteColumnSpec[];
+  indexes?: Array<{ key: string; columns: string[] }>;
+}
+
+const CORE_APPWRITE_TABLE_SPECS: Record<CoreAppwriteTableKey, CoreAppwriteTableSpec> = {
+  WALLETS: {
+    defaultName: 'wallets',
+    aliases: [
+      'wallets',
+      'wallet',
+      'portefeuilles',
+      'portefeuille',
+      'admin_wallets',
+      'admin_wallet',
+      'saloma_wallets',
+      'admin'
+    ],
+    verifyColumns: ['user_id', 'solde_disponible'],
+    columns: [
+      { key: 'user_id', type: 'string', size: 128, required: true },
+      { key: 'solde_total', type: 'float', required: false },
+      { key: 'solde_disponible', type: 'float', required: false },
+      { key: 'solde_bloque', type: 'float', required: false },
+      { key: 'devise', type: 'string', size: 32, required: false },
+      { key: 'date_maj', type: 'string', size: 64, required: false },
+      { key: 'coins_json', type: 'text', required: false }
+    ],
+    indexes: [{ key: 'idx_wallets_user_id', columns: ['user_id'] }]
+  },
+  USERS: {
+    defaultName: 'users',
+    aliases: ['users', 'user', 'utilisateurs', 'utilisateur', 'clients', 'saloma_users'],
+    verifyColumns: ['user_id', 'email'],
+    columns: [
+      { key: 'user_id', type: 'string', size: 128, required: true },
+      { key: 'name', type: 'string', size: 255, required: false },
+      { key: 'nom', type: 'string', size: 128, required: false },
+      { key: 'prenom', type: 'string', size: 128, required: false },
+      { key: 'email', type: 'string', size: 255, required: false },
+      { key: 'phone', type: 'string', size: 64, required: false },
+      { key: 'telephone', type: 'string', size: 64, required: false },
+      { key: 'mot_de_passe', type: 'string', size: 255, required: false },
+      { key: 'solde', type: 'float', required: false },
+      { key: 'code_parrainage', type: 'string', size: 64, required: false },
+      { key: 'parrain', type: 'string', size: 128, required: false },
+      { key: 'date_inscription', type: 'string', size: 64, required: false },
+      { key: 'statut', type: 'string', size: 64, required: false },
+      { key: 'email_verifie', type: 'boolean', required: false },
+      { key: 'kyc_level', type: 'integer', required: false },
+      { key: 'kyc_statut', type: 'string', size: 64, required: false },
+      { key: 'kyc_cin', type: 'string', size: 128, required: false },
+      { key: 'kyc_adresse', type: 'string', size: 255, required: false },
+      { key: 'kyc_code_postal', type: 'string', size: 64, required: false },
+      { key: 'pays', type: 'string', size: 128, required: false },
+      { key: 'role', type: 'string', size: 64, required: false }
+    ],
+    indexes: [
+      { key: 'idx_users_user_id', columns: ['user_id'] },
+      { key: 'idx_users_email', columns: ['email'] }
+    ]
+  },
+  DEPOTS_RETRAITS: {
+    defaultName: 'depots_retraits',
+    aliases: [
+      'depots_retraits',
+      'depotsretraits',
+      'depots-retraits',
+      'depot_retrait',
+      'transactions'
+    ],
+    verifyColumns: ['user_id', 'type'],
+    columns: [
+      { key: 'user_id', type: 'string', size: 128, required: true },
+      { key: 'type', type: 'string', size: 32, required: false },
+      { key: 'montant', type: 'float', required: false },
+      { key: 'methode', type: 'string', size: 64, required: false },
+      { key: 'numero_compte', type: 'string', size: 255, required: false },
+      { key: 'statut', type: 'string', size: 32, required: false },
+      { key: 'preuve', type: 'string', size: 1024, required: false },
+      { key: 'date', type: 'string', size: 64, required: false },
+      { key: 'devise', type: 'string', size: 32, required: false },
+      { key: 'frais', type: 'float', required: false }
+    ],
+    indexes: [{ key: 'idx_depots_user_id', columns: ['user_id'] }]
+  },
+  ECHANGES: {
+    defaultName: 'echanges',
+    aliases: ['echanges', 'echange', 'exchanges', 'exchange'],
+    verifyColumns: ['user_id', 'de_devise'],
+    columns: [
+      { key: 'user_id', type: 'string', size: 128, required: true },
+      { key: 'de_devise', type: 'string', size: 32, required: false },
+      { key: 'vers_devise', type: 'string', size: 32, required: false },
+      { key: 'montant_envoye', type: 'float', required: false },
+      { key: 'montant_recu', type: 'float', required: false },
+      { key: 'taux', type: 'float', required: false },
+      { key: 'frais', type: 'float', required: false },
+      { key: 'statut', type: 'string', size: 32, required: false },
+      { key: 'date', type: 'string', size: 64, required: false }
+    ],
+    indexes: [{ key: 'idx_echanges_user_id', columns: ['user_id'] }]
+  },
+  EARN: {
+    defaultName: 'earn',
+    aliases: ['earn', 'earns', 'epargne'],
+    verifyColumns: ['user_id', 'type_gain'],
+    columns: [
+      { key: 'user_id', type: 'string', size: 128, required: true },
+      { key: 'type_gain', type: 'string', size: 64, required: false },
+      { key: 'montant', type: 'float', required: false },
+      { key: 'description', type: 'string', size: 255, required: false },
+      { key: 'date', type: 'string', size: 64, required: false },
+      { key: 'task_id', type: 'string', size: 128, required: false }
+    ],
+    indexes: [{ key: 'idx_earn_user_id', columns: ['user_id'] }]
+  },
+  NOTIFICATIONS: {
+    defaultName: 'notifications',
+    aliases: ['notifications', 'notification', 'notifs'],
+    verifyColumns: ['user_id', 'titre'],
+    columns: [
+      { key: 'user_id', type: 'string', size: 128, required: true },
+      { key: 'titre', type: 'string', size: 255, required: false },
+      { key: 'message', type: 'string', size: 1024, required: false },
+      { key: 'type', type: 'string', size: 64, required: false },
+      { key: 'lu', type: 'boolean', required: false },
+      { key: 'date', type: 'string', size: 64, required: false }
+    ],
+    indexes: [{ key: 'idx_notif_user_id', columns: ['user_id'] }]
+  },
+  PROBLEMES: {
+    defaultName: 'problemes',
+    aliases: ['problemes', 'probleme', 'problems', 'support'],
+    verifyColumns: ['user_id', 'message'],
+    columns: [
+      { key: 'user_id', type: 'string', size: 128, required: true },
+      { key: 'nom', type: 'string', size: 128, required: false },
+      { key: 'email', type: 'string', size: 255, required: false },
+      { key: 'telephone', type: 'string', size: 64, required: false },
+      { key: 'message', type: 'string', size: 2000, required: false },
+      { key: 'statut', type: 'string', size: 32, required: false },
+      { key: 'date', type: 'string', size: 64, required: false }
+    ],
+    indexes: [{ key: 'idx_prob_user_id', columns: ['user_id'] }]
+  },
+  TRADES: {
+    defaultName: 'trades',
+    aliases: ['trades', 'trade'],
+    verifyColumns: ['user_id', 'paire'],
+    columns: [
+      { key: 'user_id', type: 'string', size: 128, required: true },
+      { key: 'paire', type: 'string', size: 64, required: false },
+      { key: 'type', type: 'string', size: 32, required: false },
+      { key: 'montant', type: 'float', required: false },
+      { key: 'prix', type: 'float', required: false },
+      { key: 'profit', type: 'float', required: false },
+      { key: 'statut', type: 'string', size: 32, required: false },
+      { key: 'date_creation', type: 'string', size: 64, required: false },
+      { key: 'date_cloture', type: 'string', size: 64, required: false },
+      { key: 'leverage', type: 'float', required: false },
+      { key: 'close_price', type: 'float', required: false },
+      { key: 'mode', type: 'string', size: 64, required: false }
+    ],
+    indexes: [{ key: 'idx_trades_user_id', columns: ['user_id'] }]
+  }
+};
+
+function normalizeTableIdentifier(raw: string): string {
+  return raw
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '_')
+    .replace(/^_+|_+$/g, '');
+}
+
+function isAppwriteTableNotFoundError(err: unknown): boolean {
+  if (!err || typeof err !== 'object') return false;
+  const e = err as { code?: number; type?: string; message?: string };
+  const type = String(e.type || '').toLowerCase();
+  const msg = String(e.message || '').toLowerCase();
+  return (
+    type === 'table_not_found' ||
+    type === 'collection_not_found' ||
+    msg.includes('table with the requested id') ||
+    msg.includes('collection with the requested id') ||
+    (e.code === 404 && msg.includes('could not be found'))
+  );
+}
+
+let lastCoreTablesVerifyAt = 0;
+let coreTablesResolveInFlight: Promise<void> | null = null;
+const CORE_TABLES_CACHE_TTL_MS = 5 * 60 * 1000;
+
+async function createAppwriteColumnSafe(tableId: string, col: AppwriteColumnSpec): Promise<void> {
+  if (!APPWRITE_DATABASE_ID) return;
+  try {
+    if (col.type === 'text') {
+      try {
+        await adminDb.createTextColumn({
+          databaseId: APPWRITE_DATABASE_ID,
+          tableId,
+          key: col.key,
+          required: Boolean(col.required)
+        });
+      } catch {
+        await adminDb.createStringColumn({
+          databaseId: APPWRITE_DATABASE_ID,
+          tableId,
+          key: col.key,
+          size: 4096,
+          required: Boolean(col.required)
+        });
+      }
+    } else if (col.type === 'string') {
+      await adminDb.createStringColumn({
+        databaseId: APPWRITE_DATABASE_ID,
+        tableId,
+        key: col.key,
+        size: col.size || 255,
+        required: Boolean(col.required)
+      });
+    } else if (col.type === 'float') {
+      await adminDb.createFloatColumn({
+        databaseId: APPWRITE_DATABASE_ID,
+        tableId,
+        key: col.key,
+        required: Boolean(col.required)
+      });
+    } else if (col.type === 'integer') {
+      await adminDb.createIntegerColumn({
+        databaseId: APPWRITE_DATABASE_ID,
+        tableId,
+        key: col.key,
+        required: Boolean(col.required)
+      });
+    } else if (col.type === 'boolean') {
+      await adminDb.createBooleanColumn({
+        databaseId: APPWRITE_DATABASE_ID,
+        tableId,
+        key: col.key,
+        required: Boolean(col.required)
+      });
+    }
+  } catch (err) {
+    const e = err as { code?: number; type?: string };
+    if (e?.code !== 409 && e?.type !== 'attribute_already_exists' && e?.type !== 'column_already_exists') {
+      console.warn(`[SALOMA Appwrite] Colonne ${tableId}.${col.key} non créée:`, err instanceof Error ? err.message : err);
+    }
+  }
+}
+
+async function recreateMissingCoreTable(key: CoreAppwriteTableKey): Promise<string | null> {
+  if (!APPWRITE_DATABASE_ID || !APPWRITE_API_KEY) return null;
+  const spec = CORE_APPWRITE_TABLE_SPECS[key];
+  const currentId = String(TABLES[key] || '').trim();
+  const candidates = Array.from(
+    new Set(
+      [
+        currentId && /^[a-zA-Z0-9][a-zA-Z0-9._-]{0,35}$/.test(currentId) ? currentId : '',
+        spec.defaultName
+      ].filter(Boolean)
+    )
+  );
+
+  let createdTableId = '';
+  for (const candidateId of candidates) {
+    try {
+      const created = await adminDb.createTable({
+        databaseId: APPWRITE_DATABASE_ID,
+        tableId: candidateId,
+        name: spec.defaultName,
+        permissions: [Permission.read(Role.any())],
+        rowSecurity: false,
+        enabled: true
+      });
+      createdTableId = String(created.$id || candidateId);
+      break;
+    } catch (err) {
+      const e = err as { code?: number; type?: string };
+      if (e?.code === 409) {
+        createdTableId = candidateId;
+        break;
+      }
+    }
+  }
+
+  if (!createdTableId) {
+    try {
+      const created = await adminDb.createTable({
+        databaseId: APPWRITE_DATABASE_ID,
+        tableId: ID.unique(),
+        name: spec.defaultName,
+        permissions: [Permission.read(Role.any())],
+        rowSecurity: false,
+        enabled: true
+      });
+      createdTableId = String(created.$id || '');
+    } catch (err) {
+      console.error(`[SALOMA Appwrite] Échec recréation table ${key}:`, err instanceof Error ? err.message : err);
+      return null;
+    }
+  }
+
+  if (!createdTableId) return null;
+
+  for (const col of spec.columns) {
+    await createAppwriteColumnSafe(createdTableId, col);
+  }
+
+  // Attendre brièvement que les colonnes Appwrite passent au statut "available"
+  const deadline = Date.now() + 3000;
+  while (Date.now() < deadline) {
+    try {
+      const colsRes = await adminDb.listColumns({
+        databaseId: APPWRITE_DATABASE_ID,
+        tableId: createdTableId,
+        queries: [Query.limit(100)]
+      });
+      const allReady =
+        colsRes.columns.length >= spec.columns.length &&
+        colsRes.columns.every(c => String(c.status || '').toLowerCase() === 'available');
+      if (allReady) break;
+    } catch {
+      break;
+    }
+    await new Promise(resolve => setTimeout(resolve, 250));
+  }
+
+  if (spec.indexes) {
+    for (const idx of spec.indexes) {
+      try {
+        await adminDb.createIndex({
+          databaseId: APPWRITE_DATABASE_ID,
+          tableId: createdTableId,
+          key: idx.key,
+          type: TablesDBIndexType.Key,
+          columns: idx.columns
+        });
+      } catch {
+        // ignore if index exists or columns still finalizing
+      }
+    }
+  }
+
+  TABLES[key] = createdTableId;
+  console.log(`[SALOMA Appwrite] Table ${key} recréée automatiquement (id="${createdTableId}", nom="${spec.defaultName}").`);
+  return createdTableId;
+}
+
+async function ensureCoreAppwriteTables(
+  force = false,
+  targetKeys?: CoreAppwriteTableKey[]
+): Promise<void> {
+  if (!isServerAppwriteConfigured() || !APPWRITE_DATABASE_ID || !APPWRITE_API_KEY) return;
+  const now = Date.now();
+  if (!force && !targetKeys && now - lastCoreTablesVerifyAt < CORE_TABLES_CACHE_TTL_MS) {
+    return;
+  }
+  if (coreTablesResolveInFlight) {
+    await coreTablesResolveInFlight;
+    if (!force && !targetKeys) return;
+  }
+
+  coreTablesResolveInFlight = (async () => {
+    try {
+      const listRes = await adminDb.listTables({
+        databaseId: APPWRITE_DATABASE_ID,
+        queries: [Query.limit(100)]
+      });
+      const existingTables = listRes.tables || [];
+      const byId = new Map(existingTables.map(t => [String(t.$id), t]));
+      const keysToCheck: CoreAppwriteTableKey[] =
+        targetKeys && targetKeys.length > 0
+          ? targetKeys
+          : ['USERS', 'WALLETS', 'DEPOTS_RETRAITS', 'ECHANGES', 'EARN', 'NOTIFICATIONS', 'PROBLEMES', 'TRADES'];
+
+      for (const key of keysToCheck) {
+        const currentId = String(TABLES[key] || '').trim();
+        if (currentId && byId.has(currentId)) {
+          continue;
+        }
+
+        const spec = CORE_APPWRITE_TABLE_SPECS[key];
+        let matched = existingTables.find(t => {
+          const normId = normalizeTableIdentifier(String(t.$id || ''));
+          const normName = normalizeTableIdentifier(String(t.name || ''));
+          return spec.aliases.some(alias => {
+            const normAlias = normalizeTableIdentifier(alias);
+            return normId === normAlias || normName === normAlias;
+          });
+        });
+
+        // Vérification supplémentaire si la table candidate s'appelle "admin"
+        if (matched && normalizeTableIdentifier(String(matched.name || '')) === 'admin' && spec.verifyColumns) {
+          try {
+            const colsRes = await adminDb.listColumns({
+              databaseId: APPWRITE_DATABASE_ID,
+              tableId: matched.$id,
+              queries: [Query.limit(100)]
+            });
+            const colKeys = new Set(colsRes.columns.map(c => String(c.key || '').toLowerCase()));
+            const hasExpected = spec.verifyColumns.every(k => colKeys.has(k.toLowerCase()));
+            if (!hasExpected) {
+              matched = undefined;
+            }
+          } catch {
+            matched = undefined;
+          }
+        }
+
+        if (matched) {
+          TABLES[key] = String(matched.$id);
+          console.log(
+            `[SALOMA Appwrite] Table ${key} résolue vers l'ID existant "${matched.$id}" (nom="${matched.name}").`
+          );
+          continue;
+        }
+
+        const recreatedId = await recreateMissingCoreTable(key);
+        if (recreatedId) {
+          byId.set(recreatedId, { $id: recreatedId, name: spec.defaultName } as (typeof existingTables)[number]);
+        }
+      }
+
+      lastCoreTablesVerifyAt = Date.now();
+    } catch (err) {
+      console.warn(
+        '[SALOMA Appwrite] Vérification des tables Appwrite ignorée:',
+        err instanceof Error ? err.message : err
+      );
+    } finally {
+      coreTablesResolveInFlight = null;
+    }
+  })();
+
+  await coreTablesResolveInFlight;
+}
+
+async function withAppwriteTableRetry<T>(
+  tableKey: CoreAppwriteTableKey,
+  op: (resolvedTableId: string) => Promise<T>
+): Promise<T> {
+  try {
+    return await op(TABLES[tableKey]);
+  } catch (err) {
+    if (!isAppwriteTableNotFoundError(err)) {
+      throw err;
+    }
+    await ensureCoreAppwriteTables(true, [tableKey]);
+    return await op(TABLES[tableKey]);
+  }
+}
+
+async function safeOverviewListRows(
+  tableKey: CoreAppwriteTableKey,
+  queries: string[]
+): Promise<{ rows: Array<Record<string, unknown>>; total: number }> {
+  try {
+    const res = await withAppwriteTableRetry(tableKey, tableId =>
+      adminDb.listRows({
+        databaseId: APPWRITE_DATABASE_ID,
+        tableId,
+        queries
+      })
+    );
+    return {
+      rows: (res.rows || []) as unknown as Array<Record<string, unknown>>,
+      total: Number(res.total) || 0
+    };
+  } catch (err) {
+    console.warn(
+      `[SALOMA Admin Overview] Lecture table ${tableKey} (${TABLES[tableKey]}) impossible:`,
+      err instanceof Error ? err.message : err
+    );
+    return { rows: [], total: 0 };
+  }
+}
+
 function formatAppwriteErrorFr(err: unknown, fallback = APPWRITE_CONNECTION_FAILED_MSG): string {
   if (!isServerAppwriteConfigured()) {
     return APPWRITE_CONFIG_MISSING_MSG;
@@ -2315,48 +2816,54 @@ function triggerPriceAlertNotifications(symbol: string, currentPriceUsd: number)
 }
 
 async function getUserRowByUserId(userId: string) {
-  const res = await adminDb.listRows({
-    databaseId: APPWRITE_DATABASE_ID,
-    tableId: TABLES.USERS,
-    queries: [Query.equal('user_id', userId), Query.limit(1)]
-  });
+  const res = await withAppwriteTableRetry('USERS', tableId =>
+    adminDb.listRows({
+      databaseId: APPWRITE_DATABASE_ID,
+      tableId,
+      queries: [Query.equal('user_id', userId), Query.limit(1)]
+    })
+  );
   return res.rows[0] || null;
 }
 
 async function getOrCreateWalletRow(userId: string) {
-  const res = await adminDb.listRows({
-    databaseId: APPWRITE_DATABASE_ID,
-    tableId: TABLES.WALLETS,
-    queries: [Query.equal('user_id', userId), Query.limit(1)]
-  });
-  if (res.rows[0]) return res.rows[0];
-  return adminDb.createRow({
-    databaseId: APPWRITE_DATABASE_ID,
-    tableId: TABLES.WALLETS,
-    rowId: ID.unique(),
-    data: {
-      user_id: userId,
-      solde_total: 0,
-      solde_disponible: 0,
-      solde_bloque: 0,
-      devise: 'Ar',
-      date_maj: new Date().toISOString(),
-      coins_json: '{}'
-    }
+  return withAppwriteTableRetry('WALLETS', async tableId => {
+    const res = await adminDb.listRows({
+      databaseId: APPWRITE_DATABASE_ID,
+      tableId,
+      queries: [Query.equal('user_id', userId), Query.limit(1)]
+    });
+    if (res.rows[0]) return res.rows[0];
+    return adminDb.createRow({
+      databaseId: APPWRITE_DATABASE_ID,
+      tableId,
+      rowId: ID.unique(),
+      data: {
+        user_id: userId,
+        solde_total: 0,
+        solde_disponible: 0,
+        solde_bloque: 0,
+        devise: 'Ar',
+        date_maj: new Date().toISOString(),
+        coins_json: '{}'
+      }
+    });
   });
 }
 
 async function syncUserSolde(userId: string, soldeDisponible: number) {
   const userRow = await getUserRowByUserId(userId);
   if (userRow) {
-    await adminDb.updateRow({
-      databaseId: APPWRITE_DATABASE_ID,
-      tableId: TABLES.USERS,
-      rowId: userRow.$id,
-      data: {
-        solde: Math.max(0, Math.round(soldeDisponible))
-      }
-    });
+    await withAppwriteTableRetry('USERS', tableId =>
+      adminDb.updateRow({
+        databaseId: APPWRITE_DATABASE_ID,
+        tableId,
+        rowId: userRow.$id,
+        data: {
+          solde: Math.max(0, Math.round(soldeDisponible))
+        }
+      })
+    );
   }
 }
 
@@ -2623,6 +3130,8 @@ export function createSalomaApiApp() {
     });
   });
 
+  void ensureCoreAppwriteTables().catch(() => {});
+
   // ========================================================
   // 0. CLOUDFLARE TURNSTILE PUBLIC CONFIG (SITE KEY ONLY)
   // ========================================================
@@ -2705,11 +3214,14 @@ export function createSalomaApiApp() {
 
       if (APPWRITE_API_KEY && APPWRITE_DATABASE_ID) {
         try {
-          await adminDb.listRows({
-            databaseId: APPWRITE_DATABASE_ID,
-            tableId: TABLES.USERS,
-            queries: [Query.limit(1)]
-          });
+          await ensureCoreAppwriteTables();
+          await withAppwriteTableRetry('USERS', tableId =>
+            adminDb.listRows({
+              databaseId: APPWRITE_DATABASE_ID,
+              tableId,
+              queries: [Query.limit(1)]
+            })
+          );
           res.json({ ok: true, configured: true });
           return;
         } catch (adminErr) {
@@ -6631,15 +7143,25 @@ export function createSalomaApiApp() {
 
   app.get('/api/admin/overview', requireAdminPin, async (_req: Request, res: Response) => {
     try {
-      await refreshMarketPrices();
+      try {
+        await refreshMarketPrices();
+      } catch {
+        // use latest cached prices if upstream refresh lags
+      }
+      await ensureCoreAppwriteTables();
       const [usersRes, walletsRes, txRes, tradesRes, echangesRes, probRes, bybitLiveBal] = await Promise.all([
-        adminDb.listRows({ databaseId: APPWRITE_DATABASE_ID, tableId: TABLES.USERS, queries: [Query.orderDesc('$createdAt'), Query.limit(100)] }),
-        adminDb.listRows({ databaseId: APPWRITE_DATABASE_ID, tableId: TABLES.WALLETS, queries: [Query.limit(100)] }),
-        adminDb.listRows({ databaseId: APPWRITE_DATABASE_ID, tableId: TABLES.DEPOTS_RETRAITS, queries: [Query.orderDesc('$createdAt'), Query.limit(100)] }),
-        adminDb.listRows({ databaseId: APPWRITE_DATABASE_ID, tableId: TABLES.TRADES, queries: [Query.orderDesc('$createdAt'), Query.limit(100)] }),
-        adminDb.listRows({ databaseId: APPWRITE_DATABASE_ID, tableId: TABLES.ECHANGES, queries: [Query.orderDesc('$createdAt'), Query.limit(100)] }),
-        adminDb.listRows({ databaseId: APPWRITE_DATABASE_ID, tableId: TABLES.PROBLEMES, queries: [Query.orderDesc('$createdAt'), Query.limit(100)] }),
-        checkSponsorConnectionStatus('bybit')
+        safeOverviewListRows('USERS', [Query.orderDesc('$createdAt'), Query.limit(100)]),
+        safeOverviewListRows('WALLETS', [Query.limit(100)]),
+        safeOverviewListRows('DEPOTS_RETRAITS', [Query.orderDesc('$createdAt'), Query.limit(100)]),
+        safeOverviewListRows('TRADES', [Query.orderDesc('$createdAt'), Query.limit(100)]),
+        safeOverviewListRows('ECHANGES', [Query.orderDesc('$createdAt'), Query.limit(100)]),
+        safeOverviewListRows('PROBLEMES', [Query.orderDesc('$createdAt'), Query.limit(100)]),
+        checkSponsorConnectionStatus('bybit').catch(() => ({
+          sponsor: 'BYBIT',
+          connected: false,
+          usdtBalance: 0,
+          source: 'none'
+        }))
       ]);
 
       const nowMs = Date.now();
@@ -7569,17 +8091,22 @@ export function createSalomaApiApp() {
     usingFallback: boolean;
   }> {
     try {
+      if (!APPWRITE_DATABASE_ID || !APPWRITE_API_KEY) {
+        throw new Error('Appwrite DB non configurée');
+      }
       const [walletRow, txRes] = await Promise.all([
         getOrCreateWalletRow(ADMIN_WALLET_USER_ID),
-        adminDb.listRows({
-          databaseId: APPWRITE_DATABASE_ID,
-          tableId: TABLES.DEPOTS_RETRAITS,
-          queries: [
-            Query.equal('user_id', ADMIN_WALLET_USER_ID),
-            Query.orderDesc('$createdAt'),
-            Query.limit(100)
-          ]
-        })
+        withAppwriteTableRetry('DEPOTS_RETRAITS', tableId =>
+          adminDb.listRows({
+            databaseId: APPWRITE_DATABASE_ID,
+            tableId,
+            queries: [
+              Query.equal('user_id', ADMIN_WALLET_USER_ID),
+              Query.orderDesc('$createdAt'),
+              Query.limit(100)
+            ]
+          })
+        )
       ]);
       return {
         walletId: String(walletRow.$id),
