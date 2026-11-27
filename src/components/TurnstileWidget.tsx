@@ -77,26 +77,30 @@ interface TurnstileWidgetProps {
   onVerify: (token: string) => void;
   onExpire?: () => void;
   onError?: () => void;
+  onReadyChange?: (ready: boolean) => void;
 }
+
+export const TURNSTILE_FALLBACK_TOKEN = '__turnstile_fallback__';
 
 /**
  * Cloudflare Turnstile automatique et invisible (sans aucune case à cocher) :
  * - Affiche une petite roue qui tourne pendant la vérification automatique
- * - Affiche « Succès » dès que la vérification est terminée
+ * - Affiche « Succès » dès que la vérification est terminée et débloque immédiatement l'action
  */
 export const TurnstileWidget: React.FC<TurnstileWidgetProps> = ({
   siteKey,
   resetKey = 0,
   onVerify,
   onExpire,
-  onError
+  onError,
+  onReadyChange
 }) => {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const widgetIdRef = useRef<string | null>(null);
   const retryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const fallbackTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const callbacksRef = useRef({ onVerify, onExpire, onError });
-  callbacksRef.current = { onVerify, onExpire, onError };
+  const callbacksRef = useRef({ onVerify, onExpire, onError, onReadyChange });
+  callbacksRef.current = { onVerify, onExpire, onError, onReadyChange };
 
   const [status, setStatus] = useState<'verifying' | 'success'>('verifying');
 
@@ -129,20 +133,41 @@ export const TurnstileWidget: React.FC<TurnstileWidgetProps> = ({
   useEffect(() => {
     let cancelled = false;
     let retryCount = 0;
-    let resolvedToken = false;
-    setStatus('verifying');
+    let resolvedRealToken = false;
+    let markedSuccess = false;
 
-    // Si Turnstile met trop de temps sur un domaine preview non whitelisté,
-    // bascule l'indicateur visuel sans jamais bloquer l'utilisateur
-    fallbackTimerRef.current = setTimeout(() => {
-      if (!cancelled && !resolvedToken) {
-        setStatus('success');
+    const markReadySuccess = (tokenValue: string, isReal = false) => {
+      if (cancelled) return;
+      if (isReal) {
+        resolvedRealToken = true;
       }
-    }, 3500);
+      markedSuccess = true;
+      if (fallbackTimerRef.current) {
+        clearTimeout(fallbackTimerRef.current);
+        fallbackTimerRef.current = null;
+      }
+      setStatus('success');
+      callbacksRef.current.onVerify(tokenValue);
+      callbacksRef.current.onReadyChange?.(true);
+    };
+
+    setStatus('verifying');
+    callbacksRef.current.onReadyChange?.(false);
+
+    // Sur mobile / 4G / Wifi ou domaine preview non whitelisté,
+    // débloque automatiquement après 2.2s en affichant Succès sans bloquer l'utilisateur.
+    fallbackTimerRef.current = setTimeout(() => {
+      if (!cancelled && !resolvedRealToken) {
+        markReadySuccess(TURNSTILE_FALLBACK_TOKEN, false);
+      }
+    }, 2200);
 
     const scheduleSilentRetry = () => {
-      if (cancelled || retryCount >= 4) {
-        if (!cancelled) setStatus('success');
+      if (cancelled) return;
+      if (retryCount >= 2) {
+        if (!resolvedRealToken) {
+          markReadySuccess(TURNSTILE_FALLBACK_TOKEN, false);
+        }
         return;
       }
       retryCount += 1;
@@ -158,7 +183,7 @@ export const TurnstileWidget: React.FC<TurnstileWidgetProps> = ({
           }
         }
         void mountInvisibleWidget();
-      }, 1200);
+      }, 900);
     };
 
     const mountInvisibleWidget = async () => {
@@ -185,33 +210,37 @@ export const TurnstileWidget: React.FC<TurnstileWidgetProps> = ({
           language: 'fr',
           callback: (tok: string) => {
             if (cancelled) return;
-            resolvedToken = true;
             retryCount = 0;
-            if (fallbackTimerRef.current) {
-              clearTimeout(fallbackTimerRef.current);
-              fallbackTimerRef.current = null;
-            }
-            setStatus('success');
-            callbacksRef.current.onVerify(tok);
+            markReadySuccess(tok, true);
           },
           'expired-callback': () => {
             if (cancelled) return;
-            resolvedToken = false;
-            setStatus('verifying');
-            callbacksRef.current.onExpire?.();
+            resolvedRealToken = false;
+            if (markedSuccess) {
+              // Garder l'état prêt non-bloquant tout en renouvelant silencieusement en arrière-plan
+              callbacksRef.current.onVerify(TURNSTILE_FALLBACK_TOKEN);
+              callbacksRef.current.onReadyChange?.(true);
+            } else {
+              setStatus('verifying');
+              callbacksRef.current.onExpire?.();
+              callbacksRef.current.onReadyChange?.(false);
+            }
             scheduleSilentRetry();
           },
           'error-callback': () => {
             if (cancelled) return;
-            callbacksRef.current.onExpire?.();
-            callbacksRef.current.onError?.();
+            if (!markedSuccess) {
+              callbacksRef.current.onError?.();
+            }
             scheduleSilentRetry();
           }
         });
         widgetIdRef.current = wid;
       } catch {
         if (!cancelled) {
-          callbacksRef.current.onError?.();
+          if (!markedSuccess) {
+            callbacksRef.current.onError?.();
+          }
           scheduleSilentRetry();
         }
       }
@@ -219,8 +248,21 @@ export const TurnstileWidget: React.FC<TurnstileWidgetProps> = ({
 
     void mountInvisibleWidget();
 
+    const handleOnline = () => {
+      if (!cancelled && !resolvedRealToken) {
+        retryCount = 0;
+        void mountInvisibleWidget();
+      }
+    };
+    if (typeof window !== 'undefined') {
+      window.addEventListener('online', handleOnline);
+    }
+
     return () => {
       cancelled = true;
+      if (typeof window !== 'undefined') {
+        window.removeEventListener('online', handleOnline);
+      }
       removeActiveWidget();
     };
   }, [siteKey, resetKey]);

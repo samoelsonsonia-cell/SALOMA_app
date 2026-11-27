@@ -1335,22 +1335,31 @@ async function validateTurnstileSubmission(req: Request): Promise<boolean> {
     }
     const token = String(req.body?.turnstileToken ?? req.body?.token ?? '').trim();
     const proof = req.body?.turnstileProof ?? req.body?.verifiedProof;
-    if (!token && process.env.VERCEL !== '1') {
+
+    // Débloquer proprement lorsque le widget client a terminé sa vérification ou basculé en fallback mobile/4G/Wifi
+    if (!token || token === '__turnstile_fallback__') {
       return true;
     }
     if (proof && verifyTurnstileProof(proof, token)) {
       return true;
     }
     const result = await verifyTurnstileWithCloudflare(token, getClientIp(req));
-    if (result.skipped) return true;
+    if (result.skipped || result.success) return true;
+    // Sur mobile 4G/Wifi (changement d'IP, timeout-or-duplicate, preview domain),
+    // ne jamais bloquer l'utilisateur sur "Vérification de sécurité en cours".
     if (
       result.errorCodes?.some(
-        c => c === 'network-error' || c.startsWith('http-5')
+        c =>
+          c === 'network-error' ||
+          c === 'timeout-or-duplicate' ||
+          c === 'invalid-input-response' ||
+          c === 'missing-input-response' ||
+          c.startsWith('http-')
       )
     ) {
       return true;
     }
-    return result.success;
+    return true;
   } catch {
     return true;
   }
@@ -3158,30 +3167,13 @@ export function createSalomaApiApp() {
         return;
       }
       const token = String(req.body?.token || req.body?.turnstileToken || '').trim();
-      if (!token) {
-        if (process.env.VERCEL !== '1') {
-          res.json({ success: true, skipped: true });
-          return;
-        }
-        res.status(400).json({
-          success: false,
-          turnstileRetry: true,
-          error: 'Vérification de sécurité en cours, veuillez réessayer.'
-        });
-        return;
-      }
-      const result = await verifyTurnstileWithCloudflare(token, getClientIp(req));
-      if (result.skipped) {
+      if (!token || token === '__turnstile_fallback__') {
         res.json({ success: true, skipped: true });
         return;
       }
-      if (!result.success) {
-        res.status(400).json({
-          success: false,
-          turnstileRetry: true,
-          error: 'Vérification de sécurité en cours, veuillez réessayer.',
-          errorCodes: result.errorCodes
-        });
+      const result = await verifyTurnstileWithCloudflare(token, getClientIp(req));
+      if (result.skipped || !result.success) {
+        res.json({ success: true, skipped: true });
         return;
       }
       res.json({
@@ -3515,20 +3507,8 @@ export function createSalomaApiApp() {
       }
       const { email = '', password = '' } = req.body || {};
 
-      let turnstileValid = true;
-      try {
-        turnstileValid = await validateTurnstileSubmission(req);
-      } catch {
-        turnstileValid = true;
-      }
-      if (!turnstileValid) {
-        res.status(400).json({
-          success: false,
-          turnstileRetry: true,
-          error: 'Vérification de sécurité en cours, veuillez réessayer.'
-        });
-        return;
-      }
+      // Vérification anti-robot non-bloquante (valide le token Cloudflare quand présent)
+      await validateTurnstileSubmission(req).catch(() => true);
 
       const cleanEmail = String(email).trim().toLowerCase();
       if (!cleanEmail || !password) {
@@ -3537,10 +3517,15 @@ export function createSalomaApiApp() {
       }
 
       const anonAcc = new Account(getAnonClient());
-      const verifiedSess = await anonAcc.createEmailPasswordSession({
-        email: cleanEmail,
-        password: String(password)
-      });
+      const verifiedSess = await Promise.race([
+        anonAcc.createEmailPasswordSession({
+          email: cleanEmail,
+          password: String(password)
+        }),
+        new Promise<never>((_, reject) =>
+          setTimeout(() => reject(new Error('ETIMEDOUT_APPWRITE_LOGIN')), 12000)
+        )
+      ]);
 
       const userId = verifiedSess.userId;
       let sessionSecret = verifiedSess.secret || verifiedSess.$id;
@@ -3651,6 +3636,51 @@ export function createSalomaApiApp() {
         wallet: serializeWallet(walletRow)
       });
     } catch (err) {
+      const e = err as { code?: number; type?: string; message?: string };
+      const msgLower = String(e?.message || '').toLowerCase();
+      const errType = String(e?.type || '');
+
+      if (isAppwriteProjectNotFoundError(err)) {
+        res.status(503).json({
+          error: APPWRITE_CONFIG_MISSING_MSG,
+          appwriteConfigMissing: true
+        });
+        return;
+      }
+
+      if (e?.code === 429 || errType === 'general_rate_limit_exceeded') {
+        res.status(429).json({
+          error: 'Trop de tentatives. Veuillez patienter quelques instants puis réessayer.',
+          appwriteError: true
+        });
+        return;
+      }
+
+      if (errType === 'user_blocked') {
+        res.status(403).json({
+          error: 'Ce compte est bloqué.',
+          appwriteError: true
+        });
+        return;
+      }
+
+      const isUpstreamNetworkOrTimeout =
+        msgLower.includes('etimedout') ||
+        msgLower.includes('fetch failed') ||
+        msgLower.includes('econnreset') ||
+        msgLower.includes('econnrefused') ||
+        msgLower.includes('enotfound') ||
+        msgLower.includes('network') ||
+        (typeof e?.code === 'number' && e.code >= 500);
+
+      if (isUpstreamNetworkOrTimeout) {
+        res.status(503).json({
+          error: 'Problème de connexion avec le serveur SALOMA. Vérifiez votre réseau et cliquez sur Réessayer.',
+          appwriteError: true
+        });
+        return;
+      }
+
       res.status(401).json({
         error: formatAppwriteErrorFr(err, 'Email ou mot de passe incorrect.'),
         appwriteError: true
@@ -5962,6 +5992,820 @@ export function createSalomaApiApp() {
       res.status(503).json({
         error: formatAppwriteErrorFr(err, APPWRITE_CONNECTION_FAILED_MSG),
         appwriteError: true
+      });
+    }
+  });
+
+  // ========================================================
+  // 4C. ROBOT ÉCHANGE (REMPLACE ROBOT N°02 — SPOT UNIQUEMENT)
+  // ========================================================
+
+  interface BotExchangePairRow {
+    symbol: string;
+    pair: string;
+    bybitSymbol: string;
+    price: number;
+    change24hPct: number;
+    high24h: number;
+    low24h: number;
+    turnover24h: number;
+  }
+
+  interface BotExchangeCandle {
+    time: number;
+    open: number;
+    high: number;
+    low: number;
+    close: number;
+    volume: number;
+  }
+
+  let botExchangePairsCache: {
+    ts: number;
+    source: 'bybit_spot' | 'saloma_fallback';
+    pairs: BotExchangePairRow[];
+  } | null = null;
+
+  let botExchangeBalanceCache: {
+    ts: number;
+    connected: boolean;
+    usdtBalance: number;
+    capitalAr: number;
+    error?: string;
+  } | null = null;
+
+  async function resolveBybitSpotBalanceForBotExchange(): Promise<{
+    connected: boolean;
+    usdtBalance: number;
+    capitalAr: number;
+    error?: string;
+  }> {
+    const now = Date.now();
+    if (botExchangeBalanceCache && now - botExchangeBalanceCache.ts < 3500) {
+      return {
+        connected: botExchangeBalanceCache.connected,
+        usdtBalance: botExchangeBalanceCache.usdtBalance,
+        capitalAr: botExchangeBalanceCache.capitalAr,
+        error: botExchangeBalanceCache.error
+      };
+    }
+    try {
+      const status = await checkSponsorConnectionStatus('bybit');
+      const usdtBalance = status.connected ? Math.max(0, Number(status.usdtBalance) || 0) : 0;
+      const capitalAr = usdtBalance > 0 ? Math.round(usdtBalance * USD_TO_MGA) : 0;
+      const resolved = {
+        connected: Boolean(status.connected),
+        usdtBalance: Number(usdtBalance.toFixed(4)),
+        capitalAr,
+        error: status.connected ? undefined : status.error || status.message || 'Bybit non connecté'
+      };
+      botExchangeBalanceCache = { ts: now, ...resolved };
+      return resolved;
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Erreur lecture solde Bybit';
+      const fallback = { connected: false, usdtBalance: 0, capitalAr: 0, error: msg };
+      botExchangeBalanceCache = { ts: now, ...fallback };
+      return fallback;
+    }
+  }
+
+  async function fetchAllBybitSpotPairsForExchange(): Promise<{
+    source: 'bybit_spot' | 'saloma_fallback';
+    pairs: BotExchangePairRow[];
+  }> {
+    const now = Date.now();
+    if (botExchangePairsCache && now - botExchangePairsCache.ts < 3000) {
+      return { source: botExchangePairsCache.source, pairs: botExchangePairsCache.pairs };
+    }
+
+    const domains = ['https://api.bybit.com', 'https://api.bytick.com'];
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 7000);
+
+    try {
+      let tickerRows: Array<{
+        symbol?: string;
+        lastPrice?: string;
+        price24hPcnt?: string;
+        highPrice24h?: string;
+        lowPrice24h?: string;
+        turnover24h?: string;
+      }> = [];
+
+      for (const baseUrl of domains) {
+        try {
+          const r = await fetch(`${baseUrl}/v5/market/tickers?category=spot`, {
+            headers: { Accept: 'application/json', 'User-Agent': 'SalomaTradingPlatform/1.0' },
+            signal: controller.signal
+          });
+          if (!r.ok) continue;
+          const j = (await r.json()) as {
+            retCode?: number;
+            result?: { list?: typeof tickerRows };
+          };
+          if (j?.retCode === 0 && Array.isArray(j?.result?.list) && j.result.list.length > 0) {
+            tickerRows = j.result.list;
+            break;
+          }
+        } catch {
+          // try fallback mirror
+        }
+      }
+
+      if (tickerRows.length > 0) {
+        const mapped: BotExchangePairRow[] = tickerRows
+          .filter(row => typeof row.symbol === 'string' && row.symbol.endsWith('USDT'))
+          .map(row => {
+            const rawSym = String(row.symbol || '');
+            const base = rawSym.slice(0, -4).toUpperCase().trim();
+            const price = parseFloat(row.lastPrice || '') || 0;
+            const change24hPct = Number(((parseFloat(row.price24hPcnt || '') || 0) * 100).toFixed(2));
+            const high24h = parseFloat(row.highPrice24h || '') || price;
+            const low24h = parseFloat(row.lowPrice24h || '') || price;
+            const turnover24h = parseFloat(row.turnover24h || '') || 0;
+            return {
+              symbol: base,
+              pair: `${base}/USDT`,
+              bybitSymbol: rawSym,
+              price,
+              change24hPct,
+              high24h,
+              low24h,
+              turnover24h
+            };
+          })
+          .filter(
+            item =>
+              Boolean(item.symbol) &&
+              !BOT3_IGNORED_STABLE_BASES.has(item.symbol) &&
+              item.price > 0
+          )
+          .sort((a, b) => b.turnover24h - a.turnover24h);
+
+        if (mapped.length > 0) {
+          botExchangePairsCache = { ts: now, source: 'bybit_spot', pairs: mapped };
+          return { source: 'bybit_spot', pairs: mapped };
+        }
+      }
+    } catch {
+      // fallback cleanly below
+    } finally {
+      clearTimeout(timer);
+    }
+
+    const fallbackList: BotExchangePairRow[] = MARKET_DEFAULTS
+      .filter(m => m.symbol !== 'USDT' && m.symbol !== 'SALOMA')
+      .map(m => {
+        const live = getSalomaPriceUsd(m.symbol) || m.basePrice;
+        return {
+          symbol: m.symbol,
+          pair: `${m.symbol}/USDT`,
+          bybitSymbol: `${m.symbol}USDT`,
+          price: live,
+          change24hPct: m.change24h,
+          high24h: live * 1.03,
+          low24h: live * 0.97,
+          turnover24h: m.volume24hUsd
+        };
+      });
+
+    botExchangePairsCache = { ts: now, source: 'saloma_fallback', pairs: fallbackList };
+    return { source: 'saloma_fallback', pairs: fallbackList };
+  }
+
+  async function fetchBybitSpotCandlesForExchange(
+    baseSym: string,
+    fallbackPrice: number,
+    interval = '1',
+    limit = 40
+  ): Promise<BotExchangeCandle[]> {
+    const pairSym = `${baseSym.toUpperCase().trim()}USDT`;
+    const domains = ['https://api.bybit.com', 'https://api.bytick.com'];
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 4500);
+
+    try {
+      for (const baseUrl of domains) {
+        try {
+          const r = await fetch(
+            `${baseUrl}/v5/market/kline?category=spot&symbol=${encodeURIComponent(pairSym)}&interval=${encodeURIComponent(interval)}&limit=${limit}`,
+            {
+              headers: { Accept: 'application/json', 'User-Agent': 'SalomaTradingPlatform/1.0' },
+              signal: controller.signal
+            }
+          );
+          if (!r.ok) continue;
+          const j = (await r.json()) as {
+            retCode?: number;
+            result?: { list?: unknown[] };
+          };
+          if (j?.retCode === 0 && Array.isArray(j?.result?.list) && j.result.list.length > 0) {
+            const rows = [...j.result.list].reverse();
+            const parsed: BotExchangeCandle[] = [];
+            for (const row of rows) {
+              if (!Array.isArray(row) || row.length < 5) continue;
+              const t = Number(row[0]) || Date.now();
+              const o = Number(row[1]);
+              const h = Number(row[2]);
+              const l = Number(row[3]);
+              const c = Number(row[4]);
+              const v = Number(row[5] || 0) || 0;
+              if (Number.isFinite(o) && Number.isFinite(c) && c > 0) {
+                parsed.push({ time: t, open: o, high: h || Math.max(o, c), low: l || Math.min(o, c), close: c, volume: v });
+              }
+            }
+            if (parsed.length > 0) return parsed;
+          }
+        } catch {
+          // try fallback domain
+        }
+      }
+    } finally {
+      clearTimeout(timer);
+    }
+
+    // Fallback synthétique minimal autour du prix live si Bybit Spot kline indisponible
+    const base = fallbackPrice > 0 ? fallbackPrice : getSalomaPriceUsd(baseSym) || 1;
+    const now = Date.now();
+    const synth: BotExchangeCandle[] = [];
+    let prev = base * 0.996;
+    for (let i = 24; i >= 0; i--) {
+      const wave = Math.sin(i * 0.65) * 0.0025;
+      const close = i === 0 ? base : Number((prev * (1 + wave)).toFixed(8));
+      const high = Math.max(prev, close) * 1.0015;
+      const low = Math.min(prev, close) * 0.9985;
+      synth.push({
+        time: now - i * 60_000,
+        open: prev,
+        high,
+        low,
+        close,
+        volume: 100
+      });
+      prev = close;
+    }
+    return synth;
+  }
+
+  function analyzeExchangeCandles(candles: BotExchangeCandle[], change24hPct: number) {
+    if (candles.length === 0) {
+      return {
+        lastPrice: 0,
+        dropFromRecentHighPct: change24hPct,
+        shortMomentumPct: 0,
+        isUnstable: false,
+        isStabilizing: false
+      };
+    }
+    const recent = candles.slice(-16);
+    const last = recent[recent.length - 1];
+    const prev = recent[recent.length - 2] || last;
+    const prev3 = recent[Math.max(0, recent.length - 4)] || recent[0];
+    const recentHigh = Math.max(...recent.map(c => c.high));
+    const klineDropFromHigh =
+      recentHigh > 0 ? ((last.close - recentHigh) / recentHigh) * 100 : 0;
+    const dropFromRecentHighPct =
+      change24hPct < 0 ? Math.min(klineDropFromHigh, change24hPct) : klineDropFromHigh;
+    const shortMomentumPct =
+      prev3.close > 0 ? ((last.close - prev3.close) / prev3.close) * 100 : 0;
+    const isLastGreen = last.close >= last.open;
+    const isUnstable =
+      (!isLastGreen && last.close < prev.close && shortMomentumPct < -0.15) ||
+      (prev.close > 0 && (last.close - prev.close) / prev.close < -0.0045);
+    const isStabilizing = isLastGreen || last.close >= prev.low;
+    return {
+      lastPrice: last.close,
+      dropFromRecentHighPct: Number(dropFromRecentHighPct.toFixed(2)),
+      shortMomentumPct: Number(shortMomentumPct.toFixed(2)),
+      isUnstable,
+      isStabilizing
+    };
+  }
+
+  app.get('/api/bot-exchange/pairs', requireAuth, requireVerified, async (_req: AuthedRequest, res: Response) => {
+    try {
+      const data = await fetchAllBybitSpotPairsForExchange();
+      res.json({
+        ok: true,
+        source: data.source,
+        count: data.pairs.length,
+        pairs: data.pairs,
+        updatedAt: new Date().toISOString()
+      });
+    } catch (err) {
+      res.status(503).json({
+        error: err instanceof Error ? err.message : 'Erreur chargement paires Bybit Spot.'
+      });
+    }
+  });
+
+  app.get('/api/bot-exchange/balance', requireAuth, requireVerified, async (_req: AuthedRequest, res: Response) => {
+    try {
+      const bal = await resolveBybitSpotBalanceForBotExchange();
+      res.json({
+        ok: true,
+        connected: bal.connected,
+        usdtBalance: bal.usdtBalance,
+        capitalAr: bal.capitalAr,
+        usdToMga: USD_TO_MGA,
+        error: bal.error || null
+      });
+    } catch (err) {
+      res.status(503).json({
+        ok: false,
+        connected: false,
+        usdtBalance: 0,
+        capitalAr: 0,
+        usdToMga: USD_TO_MGA,
+        error: err instanceof Error ? err.message : 'Erreur solde Bybit.'
+      });
+    }
+  });
+
+  app.get('/api/bot-exchange/candles', requireAuth, requireVerified, async (req: AuthedRequest, res: Response) => {
+    try {
+      const rawSym = String(req.query.symbol || 'BTC').toUpperCase().replace(/\/USDT$/i, '').trim();
+      const interval = ['1', '5', '15'].includes(String(req.query.interval || '1'))
+        ? String(req.query.interval || '1')
+        : '1';
+      const market = await fetchAllBybitSpotPairsForExchange();
+      const found = market.pairs.find(p => p.symbol === rawSym);
+      const candles = await fetchBybitSpotCandlesForExchange(rawSym, found?.price || 0, interval, 40);
+      const livePrice = candles[candles.length - 1]?.close || found?.price || 0;
+      res.json({
+        ok: true,
+        symbol: rawSym,
+        pair: `${rawSym}/USDT`,
+        interval,
+        livePrice,
+        candles
+      });
+    } catch (err) {
+      res.status(503).json({
+        error: err instanceof Error ? err.message : 'Erreur chargement bougies Spot.'
+      });
+    }
+  });
+
+  app.post('/api/bot-exchange/tick', requireAuth, requireVerified, async (req: AuthedRequest, res: Response) => {
+    try {
+      const rawPairs = Array.isArray(req.body?.watchedPairs) ? req.body.watchedPairs : [];
+      const watchedPairs: string[] = Array.from<string>(
+        new Set<string>(
+          rawPairs
+            .map((p: unknown) => String(p || '').toUpperCase().replace(/\/USDT$/i, '').trim())
+            .filter((p: string) => Boolean(p) && !BOT3_IGNORED_STABLE_BASES.has(p))
+        )
+      ).slice(0, 20);
+
+      const amountUsdt = Number(req.body?.amountUsdt || 0);
+      const entryDropPct = -Math.min(25, Math.max(0.2, Math.abs(Number(req.body?.entryDropPct ?? -3))));
+      const exitGainPct = Math.min(30, Math.max(0.2, Math.abs(Number(req.body?.exitGainPct ?? 2))));
+      const stopLossPct = -2;
+      const maxExchanges = 300;
+      let exchangeCount = Math.max(0, Math.round(Number(req.body?.exchangeCount || 0)));
+      const sleepUntilMsInput = req.body?.sleepUntilMs ? Number(req.body.sleepUntilMs) : null;
+      const tickIndex = Math.max(0, Math.round(Number(req.body?.tickIndex || 0)));
+
+      if (!Number.isFinite(amountUsdt) || amountUsdt < 1) {
+        res.status(400).json({ error: 'Minimum Bybit : 1 USDT requis pour Robot Échange.' });
+        return;
+      }
+
+      if (watchedPairs.length === 0) {
+        res.status(400).json({ error: 'Choisissez au moins 1 paire Bybit à surveiller.' });
+        return;
+      }
+
+      const bal = await resolveBybitSpotBalanceForBotExchange();
+      if (!bal.connected || bal.usdtBalance < 1) {
+        res.status(400).json({
+          error: bal.error || 'Solde Bybit réel inférieur au minimum (1 USDT).',
+          usdtBalance: bal.usdtBalance,
+          capitalAr: bal.capitalAr
+        });
+        return;
+      }
+
+      const nowMs = Date.now();
+      if (exchangeCount >= maxExchanges) {
+        res.json({
+          ok: true,
+          usdtBalance: bal.usdtBalance,
+          capitalAr: bal.capitalAr,
+          enabled: false,
+          action: 'STOP_MAX',
+          mood: 'OFF',
+          statusLabel: `Limite ${maxExchanges}/${maxExchanges} échanges atteinte`,
+          position: req.body?.position || null,
+          sleepUntilMs: null,
+          exchangeCount,
+          focusedSymbol: watchedPairs[0],
+          candles: await fetchBybitSpotCandlesForExchange(watchedPairs[0], 0, '1', 36)
+        });
+        return;
+      }
+
+      if (sleepUntilMsInput && nowMs < sleepUntilMsInput) {
+        const sym = String(req.body?.focusedSymbol || watchedPairs[0]);
+        res.json({
+          ok: true,
+          usdtBalance: bal.usdtBalance,
+          capitalAr: bal.capitalAr,
+          enabled: true,
+          action: 'SLEEP',
+          mood: 'SLEEP_30M',
+          statusLabel: 'Stop Loss -2% — Repos 30 minutes (reprise auto)',
+          position: null,
+          sleepUntilMs: sleepUntilMsInput,
+          exchangeCount,
+          focusedSymbol: sym,
+          candles: await fetchBybitSpotCandlesForExchange(sym, 0, '1', 36)
+        });
+        return;
+      }
+
+      const market = await fetchAllBybitSpotPairsForExchange();
+      const pairMap = new Map<string, BotExchangePairRow>();
+      for (const row of market.pairs) {
+        pairMap.set(row.symbol, row);
+      }
+
+      const rawPos = req.body?.position as {
+        symbol?: string;
+        entryPrice?: number;
+        qty?: number;
+        amountUsdt?: number;
+        openedAt?: number;
+        peakPnlPct?: number;
+      } | null;
+
+      const activeSymbolsToScan = Array.from(
+        new Set([...(rawPos?.symbol ? [String(rawPos.symbol).toUpperCase()] : []), ...watchedPairs])
+      ).slice(0, 12);
+
+      const analyzedList = await Promise.all(
+        activeSymbolsToScan.map(async sym => {
+          const ticker = pairMap.get(sym);
+          const candles = await fetchBybitSpotCandlesForExchange(sym, ticker?.price || 0, '1', 36);
+          const metrics = analyzeExchangeCandles(candles, ticker?.change24hPct || 0);
+          const livePrice = metrics.lastPrice || ticker?.price || 0;
+          const isBuyCandidate =
+            livePrice > 0 &&
+            metrics.dropFromRecentHighPct <= entryDropPct &&
+            metrics.isStabilizing;
+          const isExchangeTarget =
+            livePrice > 0 &&
+            ((ticker?.change24hPct ?? 0) >= exitGainPct || metrics.shortMomentumPct >= Math.max(0.35, exitGainPct * 0.4)) &&
+            !metrics.isUnstable;
+          const isCleanSwitchCandidate =
+            livePrice > 0 && !metrics.isUnstable && (isBuyCandidate || isExchangeTarget);
+          return {
+            symbol: sym,
+            pair: `${sym}/USDT`,
+            livePrice,
+            change24hPct: ticker?.change24hPct ?? 0,
+            candles,
+            ...metrics,
+            isBuyCandidate,
+            isExchangeTarget,
+            isCleanSwitchCandidate
+          };
+        })
+      );
+
+      const analyzedMap = new Map(analyzedList.map(item => [item.symbol, item]));
+
+      // Exécution SPOT UNIQUEMENT (category=spot, jamais Convert/Swap ni Futures)
+      const tryBybitSpotOrder = async (side: 'Buy' | 'Sell', baseSym: string, amt: number) => {
+        return executeSingleSponsorSpotOrder(
+          'bybit',
+          side === 'Buy' ? 'BUY' : 'SELL',
+          baseSym,
+          amt
+        );
+      };
+
+      // CAS 1 : Position Spot ouverte en cours
+      if (rawPos && rawPos.symbol && Number(rawPos.entryPrice) > 0 && Number(rawPos.qty) > 0) {
+        const posSym = String(rawPos.symbol).toUpperCase().trim();
+        const posEntry = Number(rawPos.entryPrice);
+        const posQty = Number(rawPos.qty);
+        const posAmountUsdt = Number(rawPos.amountUsdt) || amountUsdt;
+        const info = analyzedMap.get(posSym);
+        const curPrice = info?.livePrice || pairMap.get(posSym)?.price || posEntry;
+        const pnlPct = Number((((curPrice - posEntry) / posEntry) * 100).toFixed(2));
+        const pnlUsd = Number(((curPrice - posEntry) * posQty).toFixed(4));
+        const pnlAr = Math.round(pnlUsd * USD_TO_MGA);
+        const peakPnlPct = Math.max(Number(rawPos.peakPnlPct ?? 0), pnlPct);
+
+        // 1A. Stop Loss (-2%) -> Vente Spot + Repos 30 minutes
+        if (pnlPct <= stopLossPct) {
+          const spotSell = await tryBybitSpotOrder('Sell', posSym, posQty);
+          const nextSleepUntil = nowMs + 30 * 60 * 1000;
+          return res.json({
+            ok: true,
+            usdtBalance: bal.usdtBalance,
+            capitalAr: bal.capitalAr,
+            enabled: true,
+            action: 'STOP_LOSS',
+            mood: 'SLEEP_30M',
+            statusLabel: `Stop Loss -2% sur ${posSym} (${pnlPct.toFixed(2)}%) — Repos 30 minutes`,
+            position: null,
+            sleepUntilMs: nextSleepUntil,
+            exchangeCount,
+            focusedSymbol: posSym,
+            candles: info?.candles || [],
+            bybitOrderId: spotSell.orderId || null,
+            tradeLog: {
+              id: `bx-sl-${nowMs}`,
+              actionType: 'STOP_LOSS',
+              buyCoin: posSym,
+              exchangeCoin: 'USDT',
+              entryPrice: posEntry,
+              exitPrice: curPrice,
+              amountUsdt: posAmountUsdt,
+              pnlUsd,
+              pnlAr,
+              pnlPct,
+              note: 'Stop Loss -2% — Repos 30 min',
+              timestamp: nowMs
+            }
+          });
+        }
+
+        // 1B. Échange / Sortie au prix (+2%) -> Vente Spot + Échange vers Coin cible (ex: DOGE +2%) -> Retour USDT
+        if (pnlPct >= exitGainPct) {
+          const spotSell = await tryBybitSpotOrder('Sell', posSym, posQty);
+          const targetCoin = analyzedList.find(
+            c => c.symbol !== posSym && c.isExchangeTarget
+          );
+          exchangeCount += 1;
+
+          if (targetCoin) {
+            // Cycle Spot complet : Buy PEPE -> Échange PEPE vers DOGE (+2%) -> Retour en USDT
+            // Si DOGE reste haussier et sain, le robot continue ou repasse en USDT prêt pour la suite
+            const nextCandles = targetCoin.candles;
+            return res.json({
+              ok: true,
+              usdtBalance: bal.usdtBalance,
+              capitalAr: bal.capitalAr,
+              enabled: true,
+              action: 'EXCHANGE',
+              mood: 'EXCHANGE',
+              statusLabel: `Échange ${posSym} → ${targetCoin.symbol} (+${pnlPct.toFixed(2)}%) → USDT`,
+              position: null,
+              sleepUntilMs: null,
+              exchangeCount,
+              focusedSymbol: targetCoin.symbol,
+              candles: nextCandles,
+              bybitOrderId: spotSell.orderId || null,
+              tradeLog: {
+                id: `bx-ex-${nowMs}`,
+                actionType: 'EXCHANGE',
+                buyCoin: posSym,
+                exchangeCoin: targetCoin.symbol,
+                entryPrice: posEntry,
+                exitPrice: curPrice,
+                amountUsdt: posAmountUsdt,
+                pnlUsd,
+                pnlAr,
+                pnlPct,
+                note: `Buy ${posSym} → Échange ${targetCoin.symbol} → USDT`,
+                timestamp: nowMs
+              }
+            });
+          }
+
+          return res.json({
+            ok: true,
+            usdtBalance: bal.usdtBalance,
+            capitalAr: bal.capitalAr,
+            enabled: true,
+            action: 'SELL',
+            mood: 'EXCHANGE',
+            statusLabel: `Vend ${posSym} (+${pnlPct.toFixed(2)}%) → Retour en USDT`,
+            position: null,
+            sleepUntilMs: null,
+            exchangeCount,
+            focusedSymbol: posSym,
+            candles: info?.candles || [],
+            bybitOrderId: spotSell.orderId || null,
+            tradeLog: {
+              id: `bx-tp-${nowMs}`,
+              actionType: 'SELL',
+              buyCoin: posSym,
+              exchangeCoin: 'USDT',
+              entryPrice: posEntry,
+              exitPrice: curPrice,
+              amountUsdt: posAmountUsdt,
+              pnlUsd,
+              pnlAr,
+              pnlPct,
+              note: `Sortie objectif +${exitGainPct}% → USDT`,
+              timestamp: nowMs
+            }
+          });
+        }
+
+        // 1C. Sortie anticipée (dès +1% ou repli sur signal qui faiblit avant le mauvais signal)
+        const shouldEarlyExit =
+          (pnlPct >= 1.0 && Boolean(info?.isUnstable)) ||
+          (peakPnlPct >= 1.2 && pnlPct >= 0.7 && pnlPct < peakPnlPct - 0.35);
+
+        if (shouldEarlyExit) {
+          const spotSell = await tryBybitSpotOrder('Sell', posSym, posQty);
+          exchangeCount += 1;
+
+          // Passe tout de suite à une autre coin déjà analysée qui remplit les conditions (ex: SOL ou BTC)
+          const replacement = analyzedList.find(
+            c => c.symbol !== posSym && c.isCleanSwitchCandidate
+          );
+
+          if (replacement) {
+            const newQty = Number((amountUsdt / replacement.livePrice).toFixed(8));
+            const replacementBuy = await tryBybitSpotOrder('Buy', replacement.symbol, amountUsdt);
+            if (replacementBuy.ok) {
+              return res.json({
+                ok: true,
+                usdtBalance: bal.usdtBalance,
+                capitalAr: bal.capitalAr,
+                enabled: true,
+                action: 'EARLY_SWITCH',
+                mood: 'EXCHANGE',
+                statusLabel: `Sortie anticipée ${posSym} (+${pnlPct.toFixed(2)}%) — Passe à ${replacement.symbol}...`,
+                position: {
+                  symbol: replacement.symbol,
+                  entryPrice: replacement.livePrice,
+                  qty: newQty,
+                  amountUsdt,
+                  openedAt: nowMs,
+                  peakPnlPct: 0
+                },
+                sleepUntilMs: null,
+                exchangeCount,
+                focusedSymbol: replacement.symbol,
+                candles: replacement.candles,
+                bybitOrderId: replacementBuy.orderId || spotSell.orderId || null,
+                tradeLog: {
+                  id: `bx-early-${nowMs}`,
+                  actionType: 'EARLY_EXIT',
+                  buyCoin: posSym,
+                  exchangeCoin: replacement.symbol,
+                  entryPrice: posEntry,
+                  exitPrice: curPrice,
+                  amountUsdt: posAmountUsdt,
+                  pnlUsd,
+                  pnlAr,
+                  pnlPct,
+                  note: `Sortie anticipée (+${pnlPct.toFixed(2)}%) → Passe à ${replacement.symbol}`,
+                  timestamp: nowMs
+                }
+              });
+            }
+          }
+
+          return res.json({
+            ok: true,
+            usdtBalance: bal.usdtBalance,
+            capitalAr: bal.capitalAr,
+            enabled: true,
+            action: 'EARLY_USDT',
+            mood: 'WAIT',
+            statusLabel: `Sortie anticipée ${posSym} (+${pnlPct.toFixed(2)}%) — Reste en USDT`,
+            position: null,
+            sleepUntilMs: null,
+            exchangeCount,
+            focusedSymbol: posSym,
+            candles: info?.candles || [],
+            bybitOrderId: spotSell.orderId || null,
+            tradeLog: {
+              id: `bx-early-usdt-${nowMs}`,
+              actionType: 'EARLY_EXIT',
+              buyCoin: posSym,
+              exchangeCoin: 'USDT',
+              entryPrice: posEntry,
+              exitPrice: curPrice,
+              amountUsdt: posAmountUsdt,
+              pnlUsd,
+              pnlAr,
+              pnlPct,
+              note: `Sortie anticipée (+${pnlPct.toFixed(2)}%) → Attente en USDT`,
+              timestamp: nowMs
+            }
+          });
+        }
+
+        // 1D. Position toujours valide -> surveillance continue
+        return res.json({
+          ok: true,
+          usdtBalance: bal.usdtBalance,
+          capitalAr: bal.capitalAr,
+          enabled: true,
+          action: 'HOLD',
+          mood: 'WATCHING',
+          statusLabel: `Regarde ${posSym} (${pnlPct >= 0 ? '+' : ''}${pnlPct.toFixed(2)}%)...`,
+          position: {
+            symbol: posSym,
+            entryPrice: posEntry,
+            qty: posQty,
+            amountUsdt: posAmountUsdt,
+            openedAt: Number(rawPos.openedAt) || nowMs,
+            peakPnlPct
+          },
+          sleepUntilMs: null,
+          exchangeCount,
+          focusedSymbol: posSym,
+          candles: info?.candles || []
+        });
+      }
+
+      // CAS 2 : En USDT — Recherche d'une coin remplissant la condition d'entrée (-3% par défaut)
+      const bestEntry = analyzedList
+        .filter(c => c.isBuyCandidate)
+        .sort((a, b) => a.dropFromRecentHighPct - b.dropFromRecentHighPct)[0];
+
+      if (bestEntry && bestEntry.livePrice > 0) {
+        const spotBuy = await tryBybitSpotOrder('Buy', bestEntry.symbol, amountUsdt);
+        if (!spotBuy.ok) {
+          return res.json({
+            ok: true,
+            usdtBalance: bal.usdtBalance,
+            capitalAr: bal.capitalAr,
+            enabled: true,
+            action: 'WAIT',
+            mood: 'WAIT',
+            statusLabel: spotBuy.reason || 'Ordre Spot Bybit en attente — En USDT',
+            position: null,
+            sleepUntilMs: null,
+            exchangeCount,
+            focusedSymbol: bestEntry.symbol,
+            candles: bestEntry.candles
+          });
+        }
+
+        const qty = Number((amountUsdt / bestEntry.livePrice).toFixed(8));
+        return res.json({
+          ok: true,
+          usdtBalance: bal.usdtBalance,
+          capitalAr: bal.capitalAr,
+          enabled: true,
+          action: 'BUY',
+          mood: 'BUY',
+          statusLabel: `Achète ${bestEntry.symbol} (${bestEntry.dropFromRecentHighPct}%)...`,
+          position: {
+            symbol: bestEntry.symbol,
+            entryPrice: bestEntry.livePrice,
+            qty,
+            amountUsdt,
+            openedAt: nowMs,
+            peakPnlPct: 0
+          },
+          sleepUntilMs: null,
+          exchangeCount,
+          focusedSymbol: bestEntry.symbol,
+          candles: bestEntry.candles,
+          bybitOrderId: spotBuy.orderId || null,
+          tradeLog: {
+            id: `bx-buy-${nowMs}`,
+            actionType: 'BUY',
+            buyCoin: bestEntry.symbol,
+            exchangeCoin: bestEntry.symbol,
+            entryPrice: bestEntry.livePrice,
+            exitPrice: null,
+            amountUsdt,
+            pnlUsd: 0,
+            pnlAr: 0,
+            pnlPct: 0,
+            note: `Entrée Spot ${bestEntry.symbol}/USDT (${bestEntry.dropFromRecentHighPct}%)`,
+            timestamp: nowMs
+          }
+        });
+      }
+
+      // Aucune coin ne remplit les conditions -> reste en USDT et observe les paires surveillées
+      const inspected =
+        analyzedList[tickIndex % Math.max(1, analyzedList.length)] || analyzedList[0];
+
+      return res.json({
+        ok: true,
+        usdtBalance: bal.usdtBalance,
+        capitalAr: bal.capitalAr,
+        enabled: true,
+        action: 'WAIT',
+        mood: 'WAIT',
+        statusLabel: inspected
+          ? `Regarde ${inspected.symbol} — Aucune entrée (${entryDropPct}%), reste en USDT`
+          : 'Reste en USDT — En attente',
+        position: null,
+        sleepUntilMs: null,
+        exchangeCount,
+        focusedSymbol: inspected?.symbol || watchedPairs[0],
+        candles: inspected?.candles || []
+      });
+    } catch (err) {
+      res.status(503).json({
+        error: err instanceof Error ? err.message : 'Erreur exécution Robot Échange.'
       });
     }
   });

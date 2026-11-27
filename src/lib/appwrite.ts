@@ -46,6 +46,7 @@ export interface ApiError extends Error {
   liquidityUnavailable?: boolean;
   requiresKycLevel2?: boolean;
   isNetworkError?: boolean;
+  isTimeoutError?: boolean;
   appwriteConfigMissing?: boolean;
   appwriteError?: boolean;
 }
@@ -187,9 +188,15 @@ export async function apiRequest<T>(
   }
 
   const controller = typeof AbortController !== 'undefined' ? new AbortController() : null;
-  const timeoutMs = options.timeoutMs ?? 12000;
+  const timeoutMs = options.timeoutMs ?? 15000;
+  let didTimeout = false;
   const timer =
-    controller && timeoutMs > 0 ? setTimeout(() => controller.abort(), timeoutMs) : null;
+    controller && timeoutMs > 0
+      ? setTimeout(() => {
+          didTimeout = true;
+          controller.abort();
+        }, timeoutMs)
+      : null;
 
   let res: Response;
   try {
@@ -202,8 +209,16 @@ export async function apiRequest<T>(
     });
   } catch {
     if (timer) clearTimeout(timer);
+    if (didTimeout) {
+      const timeoutErr: ApiError = new Error(
+        'Délai dépassé (réseau 4G/Wifi lent ou serveur occupé). Veuillez réessayer.'
+      );
+      timeoutErr.status = 504;
+      timeoutErr.isTimeoutError = true;
+      throw timeoutErr;
+    }
     const netErr: ApiError = new Error(
-      'Connexion Internet requise - Vérifiez vos données mobiles.'
+      'Pas de connexion Internet (4G / Wifi). Vérifiez votre réseau et réessayez.'
     );
     netErr.isNetworkError = true;
     throw netErr;

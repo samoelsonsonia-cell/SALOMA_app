@@ -62,7 +62,7 @@ import {
   useOnlineStatus,
   checkInternetConnectivity
 } from './components/PWAInstall.tsx';
-import { TurnstileWidget } from './components/TurnstileWidget.tsx';
+import { TurnstileWidget, TURNSTILE_FALLBACK_TOKEN } from './components/TurnstileWidget.tsx';
 import {
   AdminWalletView,
   type AdminWalletRow,
@@ -74,6 +74,8 @@ import {
   getLocalDayKey,
   type Bot3TradeRecord
 } from './hooks/useBot3Engine.ts';
+import { BotExchangePanel } from './components/BotExchangePanel.tsx';
+import { useBotExchangeEngine } from './hooks/useBotExchangeEngine.ts';
 import {
   Coin,
   BackendPublicCoin,
@@ -719,23 +721,31 @@ export default function App() {
   const [signUpTurnstileReset, setSignUpTurnstileReset] = useState<number>(0);
   const loginTurnstileTokenRef = useRef<string>('');
   const [loginTurnstileReset, setLoginTurnstileReset] = useState<number>(0);
+  const [loginTurnstileReady, setLoginTurnstileReady] = useState<boolean>(false);
+  const loginTurnstileReadyRef = useRef<boolean>(false);
   const withdrawTurnstileTokenRef = useRef<string>('');
   const [withdrawTurnstileReset, setWithdrawTurnstileReset] = useState<number>(0);
 
   const waitForTurnstileToken = useCallback(
-    async (tokenRef: React.MutableRefObject<string>, triggerReset: () => void): Promise<string> => {
+    async (
+      tokenRef: React.MutableRefObject<string>,
+      triggerReset: () => void,
+      readyRef?: React.MutableRefObject<boolean>
+    ): Promise<string> => {
       if (tokenRef.current) return tokenRef.current;
+      if (readyRef?.current) return TURNSTILE_FALLBACK_TOKEN;
       let resetTriggered = false;
       const started = Date.now();
-      while (Date.now() - started < 2200) {
+      while (Date.now() - started < 1800) {
         if (tokenRef.current) return tokenRef.current;
+        if (readyRef?.current) return TURNSTILE_FALLBACK_TOKEN;
         if (!resetTriggered && Date.now() - started >= 900) {
           resetTriggered = true;
           triggerReset();
         }
         await new Promise(r => setTimeout(r, 120));
       }
-      return tokenRef.current;
+      return tokenRef.current || TURNSTILE_FALLBACK_TOKEN;
     },
     []
   );
@@ -762,6 +772,8 @@ export default function App() {
   useEffect(() => {
     signUpTurnstileTokenRef.current = '';
     loginTurnstileTokenRef.current = '';
+    loginTurnstileReadyRef.current = false;
+    setLoginTurnstileReady(false);
   }, [screen]);
 
   useEffect(() => {
@@ -1400,10 +1412,15 @@ export default function App() {
     }
   };
 
-  const handleRealLogin = async (e: React.FormEvent) => {
-    e.preventDefault();
+  const performLoginAttempt = async () => {
     setLoginError('');
-    if (!(await ensureOnlineOrBlock())) return;
+    if (typeof navigator !== 'undefined' && navigator.onLine === false) {
+      setIsOnline(false);
+      setLoginError(
+        'Pas de connexion Internet (4G / Wifi). Vérifiez votre connexion puis appuyez sur Réessayer.'
+      );
+      return;
+    }
     if (!loginEmail.trim() || !loginPassword) {
       setLoginError('Veuillez entrer votre email et votre mot de passe.');
       return;
@@ -1421,16 +1438,23 @@ export default function App() {
           wallet: AppwriteWalletRow;
         }>('/api/auth/login', {
           method: 'POST',
+          timeoutMs: 20000,
           body: {
             email: cleanEmail,
             password: loginPassword,
-            turnstileToken: tok
+            turnstileToken: tok || TURNSTILE_FALLBACK_TOKEN
           }
         });
 
-      const tok = await waitForTurnstileToken(loginTurnstileTokenRef, () =>
-        setLoginTurnstileReset(k => k + 1)
-      );
+      const tok =
+        loginTurnstileTokenRef.current ||
+        (loginTurnstileReadyRef.current
+          ? TURNSTILE_FALLBACK_TOKEN
+          : await waitForTurnstileToken(
+              loginTurnstileTokenRef,
+              () => setLoginTurnstileReset(k => k + 1),
+              loginTurnstileReadyRef
+            ));
 
       let res: {
         sessionSecret: string;
@@ -1446,20 +1470,7 @@ export default function App() {
         if (isApiNotFoundError(err)) {
           res = await directAppwriteLogin(cleanEmail, loginPassword);
         } else if (isTurnstileRetryError(err)) {
-          loginTurnstileTokenRef.current = '';
-          setLoginTurnstileReset(k => k + 1);
-          const freshTok = await waitForTurnstileToken(loginTurnstileTokenRef, () =>
-            setLoginTurnstileReset(k => k + 1)
-          );
-          try {
-            res = await submitLoginRequest(freshTok);
-          } catch (retryErr) {
-            if (isApiNotFoundError(retryErr)) {
-              res = await directAppwriteLogin(cleanEmail, loginPassword);
-            } else {
-              throw retryErr;
-            }
-          }
+          res = await submitLoginRequest(TURNSTILE_FALLBACK_TOKEN);
         } else {
           throw err;
         }
@@ -1477,6 +1488,8 @@ export default function App() {
       setSessionToken(res.sessionSecret);
       setUserRow(res.user);
       setWalletRow(res.wallet);
+      setIsOnline(true);
+      setOfflineBlocked(false);
       loginTurnstileTokenRef.current = '';
       setLoginTurnstileReset(k => k + 1);
 
@@ -1493,15 +1506,64 @@ export default function App() {
         showToast(`Bienvenue ${res.user.nom} !`);
       }
     } catch (err) {
-      if ((err as ApiError)?.isNetworkError) {
+      const apiErr = err as ApiError;
+      const msgRaw = err instanceof Error ? err.message : '';
+      const msgLow = msgRaw.toLowerCase();
+
+      if (
+        apiErr?.isNetworkError ||
+        (typeof navigator !== 'undefined' && navigator.onLine === false)
+      ) {
         setIsOnline(false);
-        setOfflineBlocked(true);
+        setLoginError(
+          'Pas de connexion Internet (4G / Wifi). Vérifiez votre réseau et cliquez sur Réessayer.'
+        );
+      } else if (apiErr?.isTimeoutError) {
+        setLoginError(
+          'Connexion lente (4G / Wifi) ou serveur occupé. Cliquez sur Réessayer.'
+        );
+      } else if (
+        apiErr?.status === 401 ||
+        msgLow.includes('incorrect') ||
+        msgLow.includes('invalid credentials')
+      ) {
+        setLoginError('Email ou mot de passe incorrect. Vérifiez vos identifiants.');
+      } else if (typeof apiErr?.status === 'number' && apiErr.status >= 500) {
+        setLoginError(
+          'Problème du serveur SALOMA. Patientez un instant puis cliquez sur Réessayer.'
+        );
+      } else {
+        setLoginError(msgRaw || 'Impossible de se connecter. Cliquez sur Réessayer.');
       }
-      loginTurnstileTokenRef.current = '';
-      setLoginTurnstileReset(k => k + 1);
-      setLoginError(err instanceof Error ? err.message : 'Email ou mot de passe incorrect.');
     } finally {
       setLoginLoading(false);
+    }
+  };
+
+  const handleRealLogin = async (e: React.FormEvent) => {
+    e.preventDefault();
+    await performLoginAttempt();
+  };
+
+  const handleRetryLogin = async () => {
+    setLoginError('');
+    setAppwriteStatusError(null);
+    const ok = await checkInternetConnectivity(4000);
+    if (!ok) {
+      setIsOnline(false);
+      setLoginError(
+        'Pas de connexion Internet (4G / Wifi). Activez vos données mobiles ou Wifi puis cliquez sur Réessayer.'
+      );
+      return;
+    }
+    setIsOnline(true);
+    setOfflineBlocked(false);
+    if (loginEmail.trim() && loginPassword) {
+      await performLoginAttempt();
+    } else {
+      loginTurnstileTokenRef.current = TURNSTILE_FALLBACK_TOKEN;
+      loginTurnstileReadyRef.current = true;
+      setLoginTurnstileReady(true);
     }
   };
 
@@ -1874,13 +1936,11 @@ export default function App() {
   const clientUsdtBalance = Number(coinsJson['USDT'] || 0);
   const clientSelectedCryptoBalance = Number(coinsJson[selectedCoin.symbol.toUpperCase()] || 0);
 
-  // --- AUTO STRATEGIE (BOTS BINANCE: Spot Grid Bot & DCA Bot & BOT 3) ---
-  const [selectedBotType, setSelectedBotType] = useState<'SPOT_GRID' | 'DCA' | 'BOT_3'>('SPOT_GRID');
+  // --- AUTO STRATEGIE (BOT 1: Spot Grid Bot, BOT 2: ROBOT ÉCHANGE, BOT 3) ---
+  const [selectedBotType, setSelectedBotType] = useState<'SPOT_GRID' | 'BOT_ECHANGE' | 'BOT_3'>('SPOT_GRID');
   const [botAmountCurrency, setBotAmountCurrency] = useState<string>('ARIARY');
   const [botAmountInput, setBotAmountInput] = useState<string>('25000');
   const [botGridProfile, setBotGridProfile] = useState<'Prudent (5 grilles)' | 'Équilibré (10 grilles)' | 'Dynamique (20 grilles)'>('Équilibré (10 grilles)');
-  const [botDcaFreq, setBotDcaFreq] = useState<'Toutes les 1h' | 'Toutes les 4h' | 'Quotidien'>('Toutes les 4h');
-  const [botDcaTp, setBotDcaTp] = useState<'+2%' | '+5%' | '+10%'>('+5%');
   const [botSubmitting, setBotSubmitting] = useState<boolean>(false);
 
   const appwriteCoinTradesToday = useMemo(() => {
@@ -1909,6 +1969,12 @@ export default function App() {
     appwriteError: appwriteStatusError,
     appwriteCoinTradesToday,
     coins,
+    onNotify: showToast
+  });
+
+  const botExchangeEngine = useBotExchangeEngine({
+    sessionToken,
+    userId: userRow?.user_id || userRow?.$id || null,
     onNotify: showToast
   });
 
@@ -2556,10 +2622,7 @@ export default function App() {
     }
 
     setBotSubmitting(true);
-    const botLabel =
-      selectedBotType === 'SPOT_GRID'
-        ? `Spot Grid Bot (${botGridProfile})`
-        : `DCA Bot (${botDcaFreq}, TP ${botDcaTp})`;
+    const botLabel = `Spot Grid Bot (${botGridProfile})`;
 
     try {
       await apiRequest('/api/trades', {
@@ -2575,7 +2638,7 @@ export default function App() {
         }
       });
       await loadDashboard(sessionToken);
-      showToast(`🤖 ${selectedBotType === 'SPOT_GRID' ? 'Spot Grid Bot' : 'DCA Bot'} démarré sur ${selectedCoin.symbol}/USDT !`);
+      showToast(`🤖 Spot Grid Bot démarré sur ${selectedCoin.symbol}/USDT !`);
     } catch (err) {
       showToast(err instanceof Error ? err.message : 'Erreur démarrage du bot.');
     } finally {
@@ -5113,14 +5176,31 @@ export default function App() {
             </div>
 
             {appwriteStatusError && !loginError && (
-              <div className="p-3 mb-4 rounded-xl bg-amber-500/15 border border-amber-400/50 text-amber-200 text-xs font-bold">
-                {appwriteStatusError}
+              <div className="p-3 mb-4 rounded-xl bg-amber-500/15 border border-amber-400/50 text-amber-200 text-xs font-bold flex items-center justify-between gap-2">
+                <span>{appwriteStatusError}</span>
+                <button
+                  type="button"
+                  onClick={() => void handleRetryLogin()}
+                  className="shrink-0 px-2.5 py-1.5 rounded-lg bg-amber-500/25 border border-amber-300/50 text-amber-100 text-[11px] font-black flex items-center gap-1"
+                >
+                  <RefreshCw className="w-3 h-3" />
+                  <span>Réessayer</span>
+                </button>
               </div>
             )}
 
             {loginError && (
-              <div className="p-3 mb-4 rounded-xl bg-rose-500/20 border border-rose-500/40 text-rose-300 text-xs font-bold">
-                {loginError}
+              <div className="p-3 mb-4 rounded-xl bg-rose-500/20 border border-rose-500/40 text-rose-200 text-xs font-bold space-y-2">
+                <p>{loginError}</p>
+                <button
+                  type="button"
+                  onClick={() => void handleRetryLogin()}
+                  disabled={loginLoading}
+                  className="px-3 py-1.5 rounded-lg bg-rose-600 hover:bg-rose-500 text-white text-[11px] font-black inline-flex items-center gap-1.5 disabled:opacity-50"
+                >
+                  <RefreshCw className="w-3.5 h-3.5" />
+                  <span>Réessayer</span>
+                </button>
               </div>
             )}
 
@@ -5175,19 +5255,29 @@ export default function App() {
                 siteKey={turnstileSiteKey}
                 resetKey={loginTurnstileReset}
                 onVerify={tok => {
-                  loginTurnstileTokenRef.current = tok;
+                  loginTurnstileTokenRef.current = tok || TURNSTILE_FALLBACK_TOKEN;
+                  loginTurnstileReadyRef.current = true;
+                  setLoginTurnstileReady(true);
                 }}
                 onExpire={() => {
-                  loginTurnstileTokenRef.current = '';
+                  loginTurnstileTokenRef.current = TURNSTILE_FALLBACK_TOKEN;
+                }}
+                onReadyChange={ready => {
+                  loginTurnstileReadyRef.current = ready;
+                  setLoginTurnstileReady(ready);
                 }}
               />
 
               <button
                 type="submit"
-                disabled={loginLoading}
-                className="w-full py-3.5 rounded-xl bg-gradient-to-r from-[#7C3AED] to-[#8B5CF6] text-white font-black text-sm shadow-[0_0_20px_rgba(124,58,237,0.6)] disabled:opacity-45 disabled:cursor-not-allowed transition"
+                disabled={loginLoading || !loginTurnstileReady}
+                className="w-full min-h-[48px] py-3.5 rounded-xl bg-gradient-to-r from-[#7C3AED] to-[#8B5CF6] text-white font-black text-sm shadow-[0_0_20px_rgba(124,58,237,0.6)] disabled:opacity-45 disabled:cursor-not-allowed transition"
               >
-                {loginLoading ? 'Connexion...' : 'Se Connecter'}
+                {loginLoading
+                  ? 'Connexion...'
+                  : !loginTurnstileReady
+                  ? 'Vérification...'
+                  : 'Se Connecter'}
               </button>
             </form>
           </div>
@@ -6795,7 +6885,7 @@ export default function App() {
                       <span className="text-[10px] font-mono font-bold text-emerald-300">Exécution Auto</span>
                     </div>
 
-                    {/* CHOIX DES BOTS : SPOT GRID BOT (BOT 1), DCA BOT (BOT 2) & BOT 3 TRÈS INTELLIGENT */}
+                    {/* CHOIX DES BOTS : SPOT GRID BOT (BOT 1), ROBOT ÉCHANGE (BOT 2) & BOT 3 TRÈS INTELLIGENT */}
                     <div className="grid grid-cols-2 gap-2">
                       <button
                         type="button"
@@ -6817,19 +6907,25 @@ export default function App() {
 
                       <button
                         type="button"
-                        onClick={() => setSelectedBotType('DCA')}
+                        onClick={() => setSelectedBotType('BOT_ECHANGE')}
                         className={`p-3 rounded-xl border text-left transition space-y-1 ${
-                          selectedBotType === 'DCA'
+                          selectedBotType === 'BOT_ECHANGE'
                             ? 'bg-[#251552] border-emerald-400 shadow-[0_0_12px_rgba(16,185,129,0.25)]'
                             : 'bg-[#150D2E] border-purple-500/30 opacity-80'
                         }`}
                       >
-                        <div className="flex items-center justify-between">
-                          <span className="font-black text-xs text-white">2. DCA Bot</span>
-                          <span className="text-[9px] px-1.5 py-0.5 rounded bg-purple-500/30 text-purple-200 font-bold">Débutant</span>
+                        <div className="flex items-center justify-between gap-1">
+                          <span className="font-black text-xs text-white">2. ROBOT ÉCHANGE</span>
+                          <span
+                            className={`text-[9px] font-mono-num font-black ${
+                              botExchangeEngine.enabled ? 'text-emerald-400' : 'text-purple-200'
+                            }`}
+                          >
+                            {botExchangeEngine.enabled ? 'ON' : 'Spot'}
+                          </span>
                         </div>
                         <p className="text-[10px] text-purple-200 leading-snug">
-                          Investit par paliers réguliers pour lisser le prix d'achat.
+                          Spot uniquement · Buy -3% · Échange +2% · Sortie anticipée +1% · Stop Loss -2%.
                         </p>
                       </button>
 
@@ -6866,9 +6962,14 @@ export default function App() {
                         coins={coins}
                         formatCoinPrice={formatCoinPrice}
                       />
+                    ) : selectedBotType === 'BOT_ECHANGE' ? (
+                      <BotExchangePanel
+                        engine={botExchangeEngine}
+                        formatCoinPrice={formatCoinPrice}
+                      />
                     ) : (
                       <>
-                    {/* CONFIGURATION SIMPLE DU BOT */}
+                    {/* CONFIGURATION SIMPLE DU BOT 1 (SPOT GRID BOT) */}
                     <div className="p-3 rounded-xl bg-[#150D2E] border border-purple-500/30 space-y-2.5 text-xs">
                       <div className="flex justify-between items-center text-[11px]">
                         <span className="text-purple-300 font-bold">Paire sélectionnée :</span>
@@ -6930,60 +7031,31 @@ export default function App() {
                         </div>
                       </div>
 
-                      {selectedBotType === 'SPOT_GRID' ? (
-                        <div>
-                          <label className="text-[11px] font-bold text-purple-300 block mb-1">
-                            Mode Grille (Fourchette ±5% auto) :
-                          </label>
-                          <div className="grid grid-cols-3 gap-1">
-                            {(['Prudent (5 grilles)', 'Équilibré (10 grilles)', 'Dynamique (20 grilles)'] as const).map(prof => (
-                              <button
-                                key={prof}
-                                type="button"
-                                onClick={() => setBotGridProfile(prof)}
-                                className={`py-1.5 px-1 rounded-lg text-[10px] font-bold border transition ${
-                                  botGridProfile === prof
-                                    ? 'bg-[#7C3AED] border-purple-300 text-white'
-                                    : 'bg-[#100926] border-purple-500/30 text-purple-200'
-                                }`}
-                              >
-                                {prof}
-                              </button>
-                            ))}
-                          </div>
-                          <div className="flex justify-between text-[10px] font-mono text-emerald-300 mt-1.5">
-                            <span>Bas: ${formatCoinPrice(selectedCoin.price * 0.95)}</span>
-                            <span>Haut: ${formatCoinPrice(selectedCoin.price * 1.05)}</span>
-                          </div>
-                        </div>
-                      ) : (
-                        <div className="grid grid-cols-2 gap-2">
-                          <div>
-                            <label className="text-[10px] font-bold text-purple-300 block mb-1">Fréquence DCA :</label>
-                            <select
-                              value={botDcaFreq}
-                              onChange={e => setBotDcaFreq(e.target.value as typeof botDcaFreq)}
-                              className="w-full px-2 py-1.5 rounded-lg bg-[#100926] border border-purple-500/40 text-white text-[11px] font-bold"
+                      <div>
+                        <label className="text-[11px] font-bold text-purple-300 block mb-1">
+                          Mode Grille (Fourchette ±5% auto) :
+                        </label>
+                        <div className="grid grid-cols-3 gap-1">
+                          {(['Prudent (5 grilles)', 'Équilibré (10 grilles)', 'Dynamique (20 grilles)'] as const).map(prof => (
+                            <button
+                              key={prof}
+                              type="button"
+                              onClick={() => setBotGridProfile(prof)}
+                              className={`py-1.5 px-1 rounded-lg text-[10px] font-bold border transition ${
+                                botGridProfile === prof
+                                  ? 'bg-[#7C3AED] border-purple-300 text-white'
+                                  : 'bg-[#100926] border-purple-500/30 text-purple-200'
+                              }`}
                             >
-                              <option value="Toutes les 1h">Toutes les 1h</option>
-                              <option value="Toutes les 4h">Toutes les 4h</option>
-                              <option value="Quotidien">Quotidien</option>
-                            </select>
-                          </div>
-                          <div>
-                            <label className="text-[10px] font-bold text-purple-300 block mb-1">Objectif Gain (TP) :</label>
-                            <select
-                              value={botDcaTp}
-                              onChange={e => setBotDcaTp(e.target.value as typeof botDcaTp)}
-                              className="w-full px-2 py-1.5 rounded-lg bg-[#100926] border border-purple-500/40 text-white text-[11px] font-bold"
-                            >
-                              <option value="+2%">+2% Sécurisé</option>
-                              <option value="+5%">+5% Équilibré</option>
-                              <option value="+10%">+10% Objectif Haut</option>
-                            </select>
-                          </div>
+                              {prof}
+                            </button>
+                          ))}
                         </div>
-                      )}
+                        <div className="flex justify-between text-[10px] font-mono text-emerald-300 mt-1.5">
+                          <span>Bas: ${formatCoinPrice(selectedCoin.price * 0.95)}</span>
+                          <span>Haut: ${formatCoinPrice(selectedCoin.price * 1.05)}</span>
+                        </div>
+                      </div>
 
                       <button
                         type="button"
@@ -6993,9 +7065,7 @@ export default function App() {
                       >
                         <Play className="w-4 h-4" />
                         <span>
-                          {botSubmitting
-                            ? 'DÉMARRAGE...'
-                            : `START ${selectedBotType === 'SPOT_GRID' ? 'SPOT GRID BOT' : 'DCA BOT'}`}
+                          {botSubmitting ? 'DÉMARRAGE...' : 'START SPOT GRID BOT'}
                         </span>
                       </button>
                     </div>
@@ -8342,7 +8412,7 @@ export default function App() {
             </div>
             <div className="text-xs text-purple-200 space-y-2 leading-relaxed">
               <p>• <strong>Portefeuille & Convertir</strong> : Gérez votre <strong>WALLET</strong> (dépôt/retrait Crypto uniquement) et votre <strong>COMPTE TRADE</strong>. Utilisez <strong>Convertir</strong> (0 Ar) pour transférer entre Wallet et Compte Trade.</p>
-              <p>• <strong>Trading</strong> : Manuel (Spot / Levier) ou Auto Stratégie (Spot Grid Bot / DCA Bot) en Marge Isolée individuelle au prix final affiché.</p>
+              <p>• <strong>Trading</strong> : Manuel (Spot / Levier) ou Auto Stratégie (Spot Grid Bot / Robot Échange / BOT 3) en Marge Isolée individuelle au prix final affiché.</p>
               <p>• <strong>Échange</strong> : Convertissez Ar ⇄ Crypto ou Crypto ⇄ Crypto instantanément au prix final SALOMA affiché.</p>
               <p>• <strong>Retrait Crypto</strong> : Transferts blockchain sécurisés (USDT TRC20, BTC, ETH et 50 cryptos) avec paramètres réseau affichés avant confirmation.</p>
             </div>
