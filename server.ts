@@ -78,6 +78,68 @@ const APIS_CONFIG_FILE =
     ? path.join(os.tmpdir(), '.saloma-apis.json')
     : path.resolve(process.cwd(), '.saloma-apis.json');
 const TEST_TURNSTILE_SITE_KEY = '1x00000000000000000000AA';
+const SESSION_SIGNING_SECRET =
+  process.env.SESSION_SECRET ||
+  process.env.SALOMA_SESSION_SECRET ||
+  crypto.randomBytes(32).toString('hex');
+
+function signFallbackSessionToken(payload: {
+  userId: string;
+  email: string;
+  name: string;
+}): string {
+  const body = Buffer.from(
+    JSON.stringify({
+      uid: payload.userId,
+      email: payload.email,
+      name: payload.name,
+      exp: Date.now() + 7 * 24 * 60 * 60 * 1000
+    }),
+    'utf8'
+  ).toString('base64url');
+  const sig = crypto
+    .createHmac('sha256', SESSION_SIGNING_SECRET)
+    .update(body)
+    .digest('base64url');
+  return `saloma_sess.${body}.${sig}`;
+}
+
+function verifyFallbackSessionToken(token: string): {
+  userId: string;
+  email: string;
+  name: string;
+} | null {
+  if (!token.startsWith('saloma_sess.')) return null;
+  const parts = token.split('.');
+  if (parts.length !== 3) return null;
+  const [, body, sig] = parts;
+  if (!body || !sig) return null;
+  const expectedSig = crypto
+    .createHmac('sha256', SESSION_SIGNING_SECRET)
+    .update(body)
+    .digest('base64url');
+  const sigBuf = Buffer.from(sig);
+  const expBuf = Buffer.from(expectedSig);
+  if (sigBuf.length !== expBuf.length || !crypto.timingSafeEqual(sigBuf, expBuf)) {
+    return null;
+  }
+  try {
+    const parsed = JSON.parse(Buffer.from(body, 'base64url').toString('utf8')) as {
+      uid?: string;
+      email?: string;
+      name?: string;
+      exp?: number;
+    };
+    if (!parsed.uid || !parsed.exp || parsed.exp < Date.now()) return null;
+    return {
+      userId: String(parsed.uid),
+      email: String(parsed.email || ''),
+      name: String(parsed.name || 'Client')
+    };
+  } catch {
+    return null;
+  }
+}
 
 type BrokerExchangeId = 'bybit' | 'okx' | 'binance';
 
@@ -2936,6 +2998,38 @@ async function requireAuth(req: AuthedRequest, res: Response, next: NextFunction
     return;
   }
 
+  // Fallback HMAC-signed token verified on login/signup when Appwrite admin session secret is unavailable
+  if (secret.startsWith('saloma_sess.')) {
+    const verified = verifyFallbackSessionToken(secret);
+    if (!verified) {
+      res.status(401).json({ error: 'Session invalide ou expirée. Reconnectez-vous.' });
+      return;
+    }
+    const normalizedAuthUser = {
+      $id: verified.userId,
+      email: verified.email,
+      name: verified.name,
+      emailVerification: true
+    };
+    let normalizedUserRow: (Record<string, unknown> & { $id: string }) | undefined;
+    try {
+      const uRow = await getUserRowByUserId(verified.userId);
+      normalizedUserRow = uRow ? (uRow as Record<string, unknown> & { $id: string }) : undefined;
+    } catch {
+      // ignore transient DB lookup failure on fallback token
+    }
+    req.authUser = normalizedAuthUser;
+    req.sessionSecret = secret;
+    if (normalizedUserRow) req.userRow = normalizedUserRow;
+    AUTH_SESSION_CACHE.set(cacheKey, {
+      authUser: normalizedAuthUser,
+      userRow: normalizedUserRow,
+      expiresAt: Date.now() + AUTH_SESSION_TTL_MS
+    });
+    next();
+    return;
+  }
+
   try {
     const userClient = getUserSessionClient(secret);
     const acc = new Account(userClient);
@@ -2944,7 +3038,7 @@ async function requireAuth(req: AuthedRequest, res: Response, next: NextFunction
       $id: authUser.$id,
       email: authUser.email,
       name: authUser.name,
-      emailVerification: Boolean(authUser.emailVerification)
+      emailVerification: true
     };
     req.authUser = normalizedAuthUser;
     req.sessionSecret = secret;
@@ -2974,20 +3068,28 @@ async function requireAuth(req: AuthedRequest, res: Response, next: NextFunction
       });
       return;
     }
+    const e = err as { code?: number; message?: string };
+    const msgLower = String(e?.message || '').toLowerCase();
+    const isTransientNetwork =
+      msgLower.includes('etimedout') ||
+      msgLower.includes('fetch failed') ||
+      msgLower.includes('econnreset') ||
+      msgLower.includes('econnrefused') ||
+      msgLower.includes('network') ||
+      (typeof e?.code === 'number' && e.code >= 500);
+    if (isTransientNetwork) {
+      res.status(503).json({
+        error: 'Connexion lente avec le serveur SALOMA. Réessayez dans un instant.',
+        appwriteError: true
+      });
+      return;
+    }
     res.status(401).json({ error: 'Session invalide ou expirée. Reconnectez-vous.' });
   }
 }
 
-function requireVerified(req: AuthedRequest, res: Response, next: NextFunction) {
-  const isVerified =
-    Boolean(req.userRow?.email_verifie) || Boolean(req.authUser?.emailVerification);
-  if (!isVerified) {
-    res.status(403).json({
-      error: 'Veuillez vérifier votre adresse e-mail avec le code à 6 chiffres avant d’accéder à l’application.',
-      requiresEmailVerification: true
-    });
-    return;
-  }
+function requireVerified(_req: AuthedRequest, _res: Response, next: NextFunction) {
+  // Vérification par code email désactivée : accès direct après Email + Mot de passe
   next();
 }
 
@@ -3390,8 +3492,8 @@ export function createSalomaApiApp() {
             parrain: cleanParrain,
             date_inscription: nowIso,
             statut: 'actif',
-            email_verifie: false,
-            kyc_level: 0,
+            email_verifie: true,
+            kyc_level: 1,
             pays: String(pays),
             role: 'client'
           }
@@ -3413,22 +3515,9 @@ export function createSalomaApiApp() {
         })) as unknown as Record<string, unknown>;
 
         const session = await adminUsers.createSession({ userId: authUserId });
-        sessionSecret = session.secret;
-
-        try {
-          const userClient = getUserSessionClient(session.secret);
-          const acc = new Account(userClient);
-          await acc.createEmailVerificationOTP();
-        } catch {
-          // ignore transient OTP error
-        }
-
-        await createNotification(
-          authUserId,
-          'Code envoyé',
-          'Code de vérification envoyé à votre email',
-          'auth'
-        );
+        sessionSecret =
+          session.secret ||
+          signFallbackSessionToken({ userId: authUserId, email: cleanEmail, name: fullName });
       } catch (adminErr) {
         if (isAppwriteProjectNotFoundError(adminErr)) {
           throw adminErr;
@@ -3450,7 +3539,9 @@ export function createSalomaApiApp() {
           email: cleanEmail,
           password: String(password)
         });
-        sessionSecret = sess.secret || sess.$id;
+        sessionSecret =
+          sess.secret ||
+          signFallbackSessionToken({ userId: authUserId, email: cleanEmail, name: fullName });
         userRow = {
           $id: authUserId,
           user_id: authUserId,
@@ -3464,8 +3555,8 @@ export function createSalomaApiApp() {
           parrain: cleanParrain,
           date_inscription: nowIso,
           statut: 'actif',
-          email_verifie: false,
-          kyc_level: 0,
+          email_verifie: true,
+          kyc_level: 1,
           pays: String(pays),
           role: 'client'
         };
@@ -3481,11 +3572,24 @@ export function createSalomaApiApp() {
         };
       }
 
+      if (sessionSecret) {
+        AUTH_SESSION_CACHE.set(getSessionCacheKey(sessionSecret), {
+          authUser: {
+            $id: authUserId,
+            email: cleanEmail,
+            name: fullName,
+            emailVerification: true
+          },
+          userRow: userRow as Record<string, unknown> & { $id: string },
+          expiresAt: Date.now() + AUTH_SESSION_TTL_MS
+        });
+      }
+
       res.status(201).json({
         sessionSecret,
         userId: authUserId,
-        requiresEmailVerification: true,
-        user: sanitizeUserRow(userRow),
+        requiresEmailVerification: false,
+        user: sanitizeUserRow({ ...userRow, email_verifie: true }),
         wallet: serializeWallet(walletRow)
       });
     } catch (err) {
@@ -3528,10 +3632,11 @@ export function createSalomaApiApp() {
       ]);
 
       const userId = verifiedSess.userId;
-      let sessionSecret = verifiedSess.secret || verifiedSess.$id;
+      let sessionSecret =
+        verifiedSess.secret ||
+        signFallbackSessionToken({ userId, email: cleanEmail, name: cleanEmail });
       let authUserName = cleanEmail;
       let authUserPhone = '';
-      let authEmailVerification = false;
       let userRow: Record<string, unknown> | null = null;
       let walletRow: Record<string, unknown> | null = null;
 
@@ -3542,11 +3647,12 @@ export function createSalomaApiApp() {
           // ignore cleanup failure
         }
         const session = await adminUsers.createSession({ userId });
-        sessionSecret = session.secret;
         const authUser = await adminUsers.get({ userId });
         authUserName = authUser.name || cleanEmail;
         authUserPhone = authUser.phone || '';
-        authEmailVerification = Boolean(authUser.emailVerification);
+        sessionSecret =
+          session.secret ||
+          signFallbackSessionToken({ userId, email: cleanEmail, name: authUserName });
 
         userRow = (await getUserRowByUserId(userId)) as Record<string, unknown> | null;
         if (!userRow) {
@@ -3570,8 +3676,8 @@ export function createSalomaApiApp() {
               parrain: '',
               date_inscription: nowIso,
               statut: 'actif',
-              email_verifie: authEmailVerification,
-              kyc_level: 0,
+              email_verifie: true,
+              kyc_level: 1,
               pays: 'Madagascar 🇲🇬',
               role: 'client'
             }
@@ -3579,8 +3685,13 @@ export function createSalomaApiApp() {
         }
         walletRow = (await getOrCreateWalletRow(userId)) as Record<string, unknown>;
       } catch {
-        // Fallback non-bloquant si APPWRITE_API_KEY ou TablesDB admin absent sur Vercel
+        // Fallback non-bloquant si APPWRITE_API_KEY ou TablesDB admin absent
         const nowIso = new Date().toISOString();
+        sessionSecret = signFallbackSessionToken({
+          userId,
+          email: cleanEmail,
+          name: authUserName
+        });
         userRow = {
           $id: userId,
           user_id: userId,
@@ -3593,8 +3704,8 @@ export function createSalomaApiApp() {
           code_parrainage: `SALOMA-${userId.slice(-6).toUpperCase()}`,
           date_inscription: nowIso,
           statut: 'actif',
-          email_verifie: authEmailVerification,
-          kyc_level: authEmailVerification ? 1 : 0,
+          email_verifie: true,
+          kyc_level: 1,
           pays: 'Madagascar 🇲🇬',
           role: 'client'
         };
@@ -3610,29 +3721,24 @@ export function createSalomaApiApp() {
         };
       }
 
-      const isVerified =
-        Boolean(userRow?.email_verifie) || Boolean(authEmailVerification);
-
-      if (!isVerified && sessionSecret) {
-        try {
-          const acc = new Account(getUserSessionClient(sessionSecret));
-          await acc.createEmailVerificationOTP();
-          await createNotification(
-            userId,
-            'Code envoyé',
-            'Code de vérification envoyé à votre email',
-            'auth'
-          );
-        } catch {
-          // rate limit or transient error handled gracefully on resend button
-        }
+      if (sessionSecret) {
+        AUTH_SESSION_CACHE.set(getSessionCacheKey(sessionSecret), {
+          authUser: {
+            $id: userId,
+            email: cleanEmail,
+            name: authUserName,
+            emailVerification: true
+          },
+          userRow: userRow as Record<string, unknown> & { $id: string },
+          expiresAt: Date.now() + AUTH_SESSION_TTL_MS
+        });
       }
 
       res.json({
         sessionSecret,
         userId,
-        requiresEmailVerification: !isVerified,
-        user: sanitizeUserRow(userRow),
+        requiresEmailVerification: false,
+        user: sanitizeUserRow({ ...userRow, email_verifie: true }),
         wallet: serializeWallet(walletRow)
       });
     } catch (err) {
@@ -3912,13 +4018,13 @@ export function createSalomaApiApp() {
   app.get('/api/me/session', requireAuth, async (req: AuthedRequest, res: Response) => {
     try {
       const userId = req.authUser!.$id;
-      const isVerified =
-        Boolean(req.userRow?.email_verifie) || Boolean(req.authUser?.emailVerification);
       const wallet = await getOrCreateWalletRow(userId);
       res.json({
         userId,
-        requiresEmailVerification: !isVerified,
-        user: req.userRow ? sanitizeUserRow(req.userRow) : { user_id: userId, email: req.authUser!.email, nom: req.authUser!.name },
+        requiresEmailVerification: false,
+        user: req.userRow
+          ? sanitizeUserRow({ ...req.userRow, email_verifie: true })
+          : { user_id: userId, email: req.authUser!.email, nom: req.authUser!.name, email_verifie: true },
         wallet: serializeWallet(wallet as unknown as Record<string, unknown>)
       });
     } catch (err) {
@@ -6247,20 +6353,74 @@ export function createSalomaApiApp() {
     return synth;
   }
 
-  function analyzeExchangeCandles(candles: BotExchangeCandle[], change24hPct: number) {
-    if (candles.length === 0) {
+  type BotExchangeSignalStrength = 'FAIBLE' | 'MOYEN' | 'FORT';
+
+  function assertBotExchangeSpotOnly(params: {
+    executionMode?: unknown;
+    category?: unknown;
+    forbidConversion?: unknown;
+    orderTypeTag?: unknown;
+  }): { ok: true } | { ok: false; error: string } {
+    const mode = String(params.executionMode || 'SPOT_ONLY').toUpperCase().trim();
+    const cat = String(params.category || 'spot').toLowerCase().trim();
+    const tag = String(params.orderTypeTag || 'spot').toLowerCase().trim();
+    const forbid = params.forbidConversion !== false;
+    const forbiddenPattern = /convert|conversion|swap|futures|linear|inverse|perpetual|perp|margin/i;
+
+    if (
+      !forbid ||
+      mode !== 'SPOT_ONLY' ||
+      cat !== 'spot' ||
+      forbiddenPattern.test(mode) ||
+      forbiddenPattern.test(cat) ||
+      forbiddenPattern.test(tag)
+    ) {
+      return {
+        ok: false,
+        error: 'Conversion interdite - Spot uniquement'
+      };
+    }
+    return { ok: true };
+  }
+
+  function analyzeExchangeCandles(
+    candles: BotExchangeCandle[],
+    change24hPct: number,
+    turnover24h = 0,
+    entryDropPct = -3,
+    exitGainPct = 2
+  ) {
+    if (candles.length < 6) {
       return {
         lastPrice: 0,
         dropFromRecentHighPct: change24hPct,
         shortMomentumPct: 0,
-        isUnstable: false,
-        isStabilizing: false
+        volumeRatio: 0,
+        candleBullConfirm: false,
+        volumeConfirm: false,
+        isUnstable: true,
+        isStabilizing: false,
+        isFortEntry: false,
+        isFortTarget: false,
+        signalScore: 0,
+        signalStrength: 'FAIBLE' as BotExchangeSignalStrength,
+        reason: 'Bougies insuffisantes'
       };
     }
+
     const recent = candles.slice(-16);
     const last = recent[recent.length - 1];
     const prev = recent[recent.length - 2] || last;
     const prev3 = recent[Math.max(0, recent.length - 4)] || recent[0];
+    const priorForVol = recent.slice(Math.max(0, recent.length - 11), recent.length - 1);
+    const avgVol =
+      priorForVol.length > 0
+        ? priorForVol.reduce((acc, c) => acc + (Number(c.volume) || 0), 0) / priorForVol.length
+        : Number(last.volume) || 0;
+    const recentVol = Math.max(Number(last.volume) || 0, Number(prev.volume) || 0);
+    const volumeRatio =
+      avgVol > 0 ? Number((recentVol / avgVol).toFixed(2)) : recentVol > 0 ? 1 : 0;
+
     const recentHigh = Math.max(...recent.map(c => c.high));
     const klineDropFromHigh =
       recentHigh > 0 ? ((last.close - recentHigh) / recentHigh) * 100 : 0;
@@ -6268,17 +6428,82 @@ export function createSalomaApiApp() {
       change24hPct < 0 ? Math.min(klineDropFromHigh, change24hPct) : klineDropFromHigh;
     const shortMomentumPct =
       prev3.close > 0 ? ((last.close - prev3.close) / prev3.close) * 100 : 0;
-    const isLastGreen = last.close >= last.open;
+
+    const lowerWick = Math.max(0, Math.min(last.open, last.close) - last.low);
+    const upperWick = Math.max(0, last.high - Math.max(last.open, last.close));
+    const candleBullConfirm =
+      (last.close > last.open && last.close >= prev.close) ||
+      (lowerWick > upperWick * 1.35 && last.close >= prev.low && last.close >= last.open * 0.999);
+
+    const hasRealLiquidity = turnover24h <= 0 ? volumeRatio >= 1.25 : turnover24h >= 50_000;
+    const volumeConfirm = recentVol > 0 && volumeRatio >= 1.15 && hasRealLiquidity;
+
+    const isFallingKnife =
+      last.close < last.open && last.close < prev.close && prev.close < prev3.close;
+    const stepDropPct = prev.close > 0 ? ((last.close - prev.close) / prev.close) * 100 : 0;
     const isUnstable =
-      (!isLastGreen && last.close < prev.close && shortMomentumPct < -0.15) ||
-      (prev.close > 0 && (last.close - prev.close) / prev.close < -0.0045);
-    const isStabilizing = isLastGreen || last.close >= prev.low;
+      isFallingKnife ||
+      stepDropPct < -0.4 ||
+      (!candleBullConfirm && shortMomentumPct < -0.25) ||
+      volumeRatio < 0.75;
+
+    const isStabilizing = candleBullConfirm && !isUnstable;
+    const isFortEntry =
+      last.close > 0 &&
+      dropFromRecentHighPct <= entryDropPct &&
+      candleBullConfirm &&
+      volumeConfirm &&
+      !isUnstable;
+
+    const isFortTarget =
+      last.close > 0 &&
+      !isUnstable &&
+      candleBullConfirm &&
+      volumeConfirm &&
+      (dropFromRecentHighPct <= entryDropPct ||
+        shortMomentumPct >= Math.max(0.45, exitGainPct * 0.35) ||
+        change24hPct >= exitGainPct);
+
+    let signalScore = 0;
+    if (dropFromRecentHighPct <= entryDropPct) signalScore += 35;
+    else if (dropFromRecentHighPct <= entryDropPct * 0.6) signalScore += 18;
+    if (candleBullConfirm) signalScore += 28;
+    if (volumeConfirm) signalScore += 27;
+    if (!isUnstable) signalScore += 10;
+    if (isUnstable) signalScore = Math.max(0, signalScore - 45);
+    signalScore = Math.min(100, Math.max(0, signalScore));
+
+    let signalStrength: BotExchangeSignalStrength = 'FAIBLE';
+    if (isFortEntry || (isFortTarget && signalScore >= 75)) {
+      signalStrength = 'FORT';
+    } else if (!isUnstable && signalScore >= 45) {
+      signalStrength = 'MOYEN';
+    }
+
+    const reason = isUnstable
+      ? 'Signal instable'
+      : !candleBullConfirm
+      ? 'Bougie non confirmée'
+      : !volumeConfirm
+      ? 'Volume insuffisant'
+      : dropFromRecentHighPct > entryDropPct
+      ? `Attente baisse ${entryDropPct}%`
+      : 'Signal FORT confirmé (bougie + volume)';
+
     return {
       lastPrice: last.close,
       dropFromRecentHighPct: Number(dropFromRecentHighPct.toFixed(2)),
       shortMomentumPct: Number(shortMomentumPct.toFixed(2)),
+      volumeRatio,
+      candleBullConfirm,
+      volumeConfirm,
       isUnstable,
-      isStabilizing
+      isStabilizing,
+      isFortEntry,
+      isFortTarget,
+      signalScore,
+      signalStrength,
+      reason
     };
   }
 
@@ -6328,16 +6553,28 @@ export function createSalomaApiApp() {
       const interval = ['1', '5', '15'].includes(String(req.query.interval || '1'))
         ? String(req.query.interval || '1')
         : '1';
+      const entryDropPct = -Math.min(25, Math.max(0.2, Math.abs(Number(req.query.entryDropPct ?? -3))));
+      const exitGainPct = Math.min(30, Math.max(0.2, Math.abs(Number(req.query.exitGainPct ?? 2))));
       const market = await fetchAllBybitSpotPairsForExchange();
       const found = market.pairs.find(p => p.symbol === rawSym);
       const candles = await fetchBybitSpotCandlesForExchange(rawSym, found?.price || 0, interval, 40);
       const livePrice = candles[candles.length - 1]?.close || found?.price || 0;
+      const analysis = analyzeExchangeCandles(
+        candles,
+        found?.change24hPct || 0,
+        found?.turnover24h || 0,
+        entryDropPct,
+        exitGainPct
+      );
       res.json({
         ok: true,
         symbol: rawSym,
         pair: `${rawSym}/USDT`,
         interval,
         livePrice,
+        signalStrength: analysis.signalStrength,
+        signalScore: analysis.signalScore,
+        signalReason: analysis.reason,
         candles
       });
     } catch (err) {
@@ -6349,6 +6586,26 @@ export function createSalomaApiApp() {
 
   app.post('/api/bot-exchange/tick', requireAuth, requireVerified, async (req: AuthedRequest, res: Response) => {
     try {
+      // Interdiction totale Conversion / Convert / Swap / Futures — SPOT BYBIT UNIQUEMENT
+      const spotOnlyGuard = assertBotExchangeSpotOnly({
+        executionMode: req.body?.executionMode ?? 'SPOT_ONLY',
+        category: req.body?.category ?? 'spot',
+        forbidConversion: req.body?.forbidConversion ?? true,
+        orderTypeTag: req.body?.orderTypeTag ?? 'spot'
+      });
+      if (!spotOnlyGuard.ok) {
+        res.status(403).json({
+          ok: false,
+          blockedConversion: true,
+          enabled: false,
+          action: 'BLOCKED_CONVERSION',
+          mood: 'OFF',
+          error: spotOnlyGuard.error,
+          statusLabel: spotOnlyGuard.error
+        });
+        return;
+      }
+
       const rawPairs = Array.isArray(req.body?.watchedPairs) ? req.body.watchedPairs : [];
       const watchedPairs: string[] = Array.from<string>(
         new Set<string>(
@@ -6356,7 +6613,7 @@ export function createSalomaApiApp() {
             .map((p: unknown) => String(p || '').toUpperCase().replace(/\/USDT$/i, '').trim())
             .filter((p: string) => Boolean(p) && !BOT3_IGNORED_STABLE_BASES.has(p))
         )
-      ).slice(0, 20);
+      ).slice(0, 30);
 
       const amountUsdt = Number(req.body?.amountUsdt || 0);
       const entryDropPct = -Math.min(25, Math.max(0.2, Math.abs(Number(req.body?.entryDropPct ?? -3))));
@@ -6397,6 +6654,9 @@ export function createSalomaApiApp() {
           action: 'STOP_MAX',
           mood: 'OFF',
           statusLabel: `Limite ${maxExchanges}/${maxExchanges} échanges atteinte`,
+          signalStrength: 'FAIBLE',
+          preparedCoin: null,
+          watchedSignals: [],
           position: req.body?.position || null,
           sleepUntilMs: null,
           exchangeCount,
@@ -6416,6 +6676,9 @@ export function createSalomaApiApp() {
           action: 'SLEEP',
           mood: 'SLEEP_30M',
           statusLabel: 'Stop Loss -2% — Repos 30 minutes (reprise auto)',
+          signalStrength: 'FAIBLE',
+          preparedCoin: null,
+          watchedSignals: [],
           position: null,
           sleepUntilMs: sleepUntilMsInput,
           exchangeCount,
@@ -6442,42 +6705,68 @@ export function createSalomaApiApp() {
 
       const activeSymbolsToScan = Array.from(
         new Set([...(rawPos?.symbol ? [String(rawPos.symbol).toUpperCase()] : []), ...watchedPairs])
-      ).slice(0, 12);
+      ).slice(0, 30);
 
+      // Surveille toutes les paires choisies en même temps + prépare la prochaine coin FORT
       const analyzedList = await Promise.all(
         activeSymbolsToScan.map(async sym => {
           const ticker = pairMap.get(sym);
           const candles = await fetchBybitSpotCandlesForExchange(sym, ticker?.price || 0, '1', 36);
-          const metrics = analyzeExchangeCandles(candles, ticker?.change24hPct || 0);
+          const metrics = analyzeExchangeCandles(
+            candles,
+            ticker?.change24hPct || 0,
+            ticker?.turnover24h || 0,
+            entryDropPct,
+            exitGainPct
+          );
           const livePrice = metrics.lastPrice || ticker?.price || 0;
-          const isBuyCandidate =
-            livePrice > 0 &&
-            metrics.dropFromRecentHighPct <= entryDropPct &&
-            metrics.isStabilizing;
-          const isExchangeTarget =
-            livePrice > 0 &&
-            ((ticker?.change24hPct ?? 0) >= exitGainPct || metrics.shortMomentumPct >= Math.max(0.35, exitGainPct * 0.4)) &&
-            !metrics.isUnstable;
-          const isCleanSwitchCandidate =
-            livePrice > 0 && !metrics.isUnstable && (isBuyCandidate || isExchangeTarget);
           return {
             symbol: sym,
             pair: `${sym}/USDT`,
             livePrice,
             change24hPct: ticker?.change24hPct ?? 0,
             candles,
-            ...metrics,
-            isBuyCandidate,
-            isExchangeTarget,
-            isCleanSwitchCandidate
+            ...metrics
           };
         })
       );
 
       const analyzedMap = new Map(analyzedList.map(item => [item.symbol, item]));
 
-      // Exécution SPOT UNIQUEMENT (category=spot, jamais Convert/Swap ni Futures)
+      const watchedSignals = analyzedList.map(item => ({
+        symbol: item.symbol,
+        signalStrength: item.signalStrength,
+        signalScore: item.signalScore,
+        dropFromRecentHighPct: item.dropFromRecentHighPct,
+        volumeRatio: item.volumeRatio,
+        reason: item.reason
+      }));
+
+      const pickPreparedFortCoin = (excludeSym?: string) =>
+        analyzedList
+          .filter(
+            c =>
+              c.symbol !== excludeSym &&
+              c.livePrice > 0 &&
+              c.signalStrength === 'FORT' &&
+              !c.isUnstable
+          )
+          .sort((a, b) => {
+            if (a.isFortEntry !== b.isFortEntry) return a.isFortEntry ? -1 : 1;
+            return b.signalScore - a.signalScore;
+          })[0] || null;
+
+      // Exécution SPOT BYBIT UNIQUEMENT (Buy Spot / Sell Spot — zéro Convert / Swap / Futures)
       const tryBybitSpotOrder = async (side: 'Buy' | 'Sell', baseSym: string, amt: number) => {
+        const orderGuard = assertBotExchangeSpotOnly({
+          executionMode: 'SPOT_ONLY',
+          category: 'spot',
+          forbidConversion: true,
+          orderTypeTag: `bybit_spot_${side.toLowerCase()}`
+        });
+        if (!orderGuard.ok) {
+          return { ok: false, insufficientLiquidity: false, reason: orderGuard.error };
+        }
         return executeSingleSponsorSpotOrder(
           'bybit',
           side === 'Buy' ? 'BUY' : 'SELL',
@@ -6498,8 +6787,16 @@ export function createSalomaApiApp() {
         const pnlUsd = Number(((curPrice - posEntry) * posQty).toFixed(4));
         const pnlAr = Math.round(pnlUsd * USD_TO_MGA);
         const peakPnlPct = Math.max(Number(rawPos.peakPnlPct ?? 0), pnlPct);
+        const preparedNext = pickPreparedFortCoin(posSym);
+        const preparedSummary = preparedNext
+          ? {
+              symbol: preparedNext.symbol,
+              signalStrength: preparedNext.signalStrength,
+              signalScore: preparedNext.signalScore
+            }
+          : null;
 
-        // 1A. Stop Loss (-2%) -> Vente Spot + Repos 30 minutes
+        // 1A. Stop Loss (-2%) -> Sell Spot + Pause 30 minutes, puis reprise auto
         if (pnlPct <= stopLossPct) {
           const spotSell = await tryBybitSpotOrder('Sell', posSym, posQty);
           const nextSleepUntil = nowMs + 30 * 60 * 1000;
@@ -6510,7 +6807,10 @@ export function createSalomaApiApp() {
             enabled: true,
             action: 'STOP_LOSS',
             mood: 'SLEEP_30M',
-            statusLabel: `Stop Loss -2% sur ${posSym} (${pnlPct.toFixed(2)}%) — Repos 30 minutes`,
+            statusLabel: `Stop Loss -2% sur ${posSym} (${pnlPct.toFixed(2)}%) — Pause 30 minutes`,
+            signalStrength: info?.signalStrength || 'FAIBLE',
+            preparedCoin: preparedSummary,
+            watchedSignals,
             position: null,
             sleepUntilMs: nextSleepUntil,
             exchangeCount,
@@ -6528,24 +6828,22 @@ export function createSalomaApiApp() {
               pnlUsd,
               pnlAr,
               pnlPct,
-              note: 'Stop Loss -2% — Repos 30 min',
+              note: 'Stop Loss -2% (Sell Spot) — Pause 30 min',
               timestamp: nowMs
             }
           });
         }
 
-        // 1B. Échange / Sortie au prix (+2%) -> Vente Spot + Échange vers Coin cible (ex: DOGE +2%) -> Retour USDT
-        if (pnlPct >= exitGainPct) {
+        // 1B. Sortie +2% confirmé -> Sell Spot + passage immédiat à la coin préparée FORT si dispo, sinon USDT
+        const isTakeProfitConfirmed =
+          pnlPct >= exitGainPct && (!info?.isUnstable || info?.candleBullConfirm || pnlPct >= exitGainPct + 0.35);
+
+        if (isTakeProfitConfirmed) {
           const spotSell = await tryBybitSpotOrder('Sell', posSym, posQty);
-          const targetCoin = analyzedList.find(
-            c => c.symbol !== posSym && c.isExchangeTarget
-          );
           exchangeCount += 1;
 
-          if (targetCoin) {
-            // Cycle Spot complet : Buy PEPE -> Échange PEPE vers DOGE (+2%) -> Retour en USDT
-            // Si DOGE reste haussier et sain, le robot continue ou repasse en USDT prêt pour la suite
-            const nextCandles = targetCoin.candles;
+          if (preparedNext) {
+            const nextCandles = preparedNext.candles;
             return res.json({
               ok: true,
               usdtBalance: bal.usdtBalance,
@@ -6553,25 +6851,28 @@ export function createSalomaApiApp() {
               enabled: true,
               action: 'EXCHANGE',
               mood: 'EXCHANGE',
-              statusLabel: `Échange ${posSym} → ${targetCoin.symbol} (+${pnlPct.toFixed(2)}%) → USDT`,
+              statusLabel: `Sortie Spot ${posSym} (+${pnlPct.toFixed(2)}%) → ${preparedNext.symbol} FORT prêt`,
+              signalStrength: preparedNext.signalStrength,
+              preparedCoin: preparedSummary,
+              watchedSignals,
               position: null,
               sleepUntilMs: null,
               exchangeCount,
-              focusedSymbol: targetCoin.symbol,
+              focusedSymbol: preparedNext.symbol,
               candles: nextCandles,
               bybitOrderId: spotSell.orderId || null,
               tradeLog: {
                 id: `bx-ex-${nowMs}`,
                 actionType: 'EXCHANGE',
                 buyCoin: posSym,
-                exchangeCoin: targetCoin.symbol,
+                exchangeCoin: preparedNext.symbol,
                 entryPrice: posEntry,
                 exitPrice: curPrice,
                 amountUsdt: posAmountUsdt,
                 pnlUsd,
                 pnlAr,
                 pnlPct,
-                note: `Buy ${posSym} → Échange ${targetCoin.symbol} → USDT`,
+                note: `Sell Spot ${posSym} (+${pnlPct.toFixed(2)}%) → ${preparedNext.symbol} FORT`,
                 timestamp: nowMs
               }
             });
@@ -6584,7 +6885,10 @@ export function createSalomaApiApp() {
             enabled: true,
             action: 'SELL',
             mood: 'EXCHANGE',
-            statusLabel: `Vend ${posSym} (+${pnlPct.toFixed(2)}%) → Retour en USDT`,
+            statusLabel: `Sell Spot ${posSym} (+${pnlPct.toFixed(2)}%) confirmé → En USDT`,
+            signalStrength: info?.signalStrength || 'FORT',
+            preparedCoin: null,
+            watchedSignals,
             position: null,
             sleepUntilMs: null,
             exchangeCount,
@@ -6602,29 +6906,27 @@ export function createSalomaApiApp() {
               pnlUsd,
               pnlAr,
               pnlPct,
-              note: `Sortie objectif +${exitGainPct}% → USDT`,
+              note: `Sortie Spot +${exitGainPct}% confirmé → USDT`,
               timestamp: nowMs
             }
           });
         }
 
-        // 1C. Sortie anticipée (dès +1% ou repli sur signal qui faiblit avant le mauvais signal)
-        const shouldEarlyExit =
-          (pnlPct >= 1.0 && Boolean(info?.isUnstable)) ||
+        // 1C. Changement de coin rapide & propre : dès que la coin actuelle perd son signal ou devient FAIBLE (même à +1%), Sell Spot et passage immédiat à la coin préparée FORT
+        const currentSignalLostOrWeak =
+          info?.signalStrength === 'FAIBLE' || Boolean(info?.isUnstable);
+        const shouldFastSwitchOrExit =
+          (pnlPct >= 1.0 && currentSignalLostOrWeak) ||
+          (currentSignalLostOrWeak && pnlPct >= 0.25 && Boolean(preparedNext)) ||
           (peakPnlPct >= 1.2 && pnlPct >= 0.7 && pnlPct < peakPnlPct - 0.35);
 
-        if (shouldEarlyExit) {
+        if (shouldFastSwitchOrExit) {
           const spotSell = await tryBybitSpotOrder('Sell', posSym, posQty);
           exchangeCount += 1;
 
-          // Passe tout de suite à une autre coin déjà analysée qui remplit les conditions (ex: SOL ou BTC)
-          const replacement = analyzedList.find(
-            c => c.symbol !== posSym && c.isCleanSwitchCandidate
-          );
-
-          if (replacement) {
-            const newQty = Number((amountUsdt / replacement.livePrice).toFixed(8));
-            const replacementBuy = await tryBybitSpotOrder('Buy', replacement.symbol, amountUsdt);
+          if (preparedNext && preparedNext.isFortEntry) {
+            const newQty = Number((amountUsdt / preparedNext.livePrice).toFixed(8));
+            const replacementBuy = await tryBybitSpotOrder('Buy', preparedNext.symbol, amountUsdt);
             if (replacementBuy.ok) {
               return res.json({
                 ok: true,
@@ -6633,10 +6935,13 @@ export function createSalomaApiApp() {
                 enabled: true,
                 action: 'EARLY_SWITCH',
                 mood: 'EXCHANGE',
-                statusLabel: `Sortie anticipée ${posSym} (+${pnlPct.toFixed(2)}%) — Passe à ${replacement.symbol}...`,
+                statusLabel: `${posSym} faible (+${pnlPct.toFixed(2)}%) → passe immédiatement à ${preparedNext.symbol} FORT`,
+                signalStrength: 'FORT',
+                preparedCoin: null,
+                watchedSignals,
                 position: {
-                  symbol: replacement.symbol,
-                  entryPrice: replacement.livePrice,
+                  symbol: preparedNext.symbol,
+                  entryPrice: preparedNext.livePrice,
                   qty: newQty,
                   amountUsdt,
                   openedAt: nowMs,
@@ -6644,21 +6949,21 @@ export function createSalomaApiApp() {
                 },
                 sleepUntilMs: null,
                 exchangeCount,
-                focusedSymbol: replacement.symbol,
-                candles: replacement.candles,
+                focusedSymbol: preparedNext.symbol,
+                candles: preparedNext.candles,
                 bybitOrderId: replacementBuy.orderId || spotSell.orderId || null,
                 tradeLog: {
                   id: `bx-early-${nowMs}`,
                   actionType: 'EARLY_EXIT',
                   buyCoin: posSym,
-                  exchangeCoin: replacement.symbol,
+                  exchangeCoin: preparedNext.symbol,
                   entryPrice: posEntry,
                   exitPrice: curPrice,
                   amountUsdt: posAmountUsdt,
                   pnlUsd,
                   pnlAr,
                   pnlPct,
-                  note: `Sortie anticipée (+${pnlPct.toFixed(2)}%) → Passe à ${replacement.symbol}`,
+                  note: `${posSym} faible (+${pnlPct.toFixed(2)}%) → Buy Spot ${preparedNext.symbol} FORT`,
                   timestamp: nowMs
                 }
               });
@@ -6672,7 +6977,10 @@ export function createSalomaApiApp() {
             enabled: true,
             action: 'EARLY_USDT',
             mood: 'WAIT',
-            statusLabel: `Sortie anticipée ${posSym} (+${pnlPct.toFixed(2)}%) — Reste en USDT`,
+            statusLabel: `${posSym} faible (+${pnlPct.toFixed(2)}%) — Aucune coin FORT, reste en USDT`,
+            signalStrength: info?.signalStrength || 'FAIBLE',
+            preparedCoin: preparedSummary,
+            watchedSignals,
             position: null,
             sleepUntilMs: null,
             exchangeCount,
@@ -6690,13 +6998,13 @@ export function createSalomaApiApp() {
               pnlUsd,
               pnlAr,
               pnlPct,
-              note: `Sortie anticipée (+${pnlPct.toFixed(2)}%) → Attente en USDT`,
+              note: `Sortie anticipée Spot (+${pnlPct.toFixed(2)}%) → Attente en USDT`,
               timestamp: nowMs
             }
           });
         }
 
-        // 1D. Position toujours valide -> surveillance continue
+        // 1D. Position toujours valide -> surveillance continue + coin FORT préparée affichée
         return res.json({
           ok: true,
           usdtBalance: bal.usdtBalance,
@@ -6704,7 +7012,12 @@ export function createSalomaApiApp() {
           enabled: true,
           action: 'HOLD',
           mood: 'WATCHING',
-          statusLabel: `Regarde ${posSym} (${pnlPct >= 0 ? '+' : ''}${pnlPct.toFixed(2)}%)...`,
+          statusLabel: preparedNext
+            ? `${posSym} (${pnlPct >= 0 ? '+' : ''}${pnlPct.toFixed(2)}%) · Prêt : ${preparedNext.symbol} FORT`
+            : `Regarde ${posSym} (${pnlPct >= 0 ? '+' : ''}${pnlPct.toFixed(2)}%) · Signal ${info?.signalStrength || 'MOYEN'}`,
+          signalStrength: info?.signalStrength || 'MOYEN',
+          preparedCoin: preparedSummary,
+          watchedSignals,
           position: {
             symbol: posSym,
             entryPrice: posEntry,
@@ -6720,12 +7033,18 @@ export function createSalomaApiApp() {
         });
       }
 
-      // CAS 2 : En USDT — Recherche d'une coin remplissant la condition d'entrée (-3% par défaut)
-      const bestEntry = analyzedList
-        .filter(c => c.isBuyCandidate)
-        .sort((a, b) => a.dropFromRecentHighPct - b.dropFromRecentHighPct)[0];
+      // CAS 2 : En USDT — Entre UNIQUEMENT sur signal FORT (-3% confirmé par bougie + volume)
+      const fortEntries = analyzedList
+        .filter(c => c.livePrice > 0 && c.signalStrength === 'FORT' && c.isFortEntry)
+        .sort((a, b) => {
+          if (b.signalScore !== a.signalScore) return b.signalScore - a.signalScore;
+          return a.dropFromRecentHighPct - b.dropFromRecentHighPct;
+        });
 
-      if (bestEntry && bestEntry.livePrice > 0) {
+      const bestEntry = fortEntries[0];
+      const nextPrepared = fortEntries[1] || pickPreparedFortCoin(bestEntry?.symbol);
+
+      if (bestEntry) {
         const spotBuy = await tryBybitSpotOrder('Buy', bestEntry.symbol, amountUsdt);
         if (!spotBuy.ok) {
           return res.json({
@@ -6736,6 +7055,15 @@ export function createSalomaApiApp() {
             action: 'WAIT',
             mood: 'WAIT',
             statusLabel: spotBuy.reason || 'Ordre Spot Bybit en attente — En USDT',
+            signalStrength: bestEntry.signalStrength,
+            preparedCoin: nextPrepared
+              ? {
+                  symbol: nextPrepared.symbol,
+                  signalStrength: nextPrepared.signalStrength,
+                  signalScore: nextPrepared.signalScore
+                }
+              : null,
+            watchedSignals,
             position: null,
             sleepUntilMs: null,
             exchangeCount,
@@ -6752,7 +7080,16 @@ export function createSalomaApiApp() {
           enabled: true,
           action: 'BUY',
           mood: 'BUY',
-          statusLabel: `Achète ${bestEntry.symbol} (${bestEntry.dropFromRecentHighPct}%)...`,
+          statusLabel: `Buy Spot ${bestEntry.symbol} — Signal FORT (${bestEntry.dropFromRecentHighPct}%, vol ×${bestEntry.volumeRatio})`,
+          signalStrength: 'FORT',
+          preparedCoin: nextPrepared
+            ? {
+                symbol: nextPrepared.symbol,
+                signalStrength: nextPrepared.signalStrength,
+                signalScore: nextPrepared.signalScore
+              }
+            : null,
+          watchedSignals,
           position: {
             symbol: bestEntry.symbol,
             entryPrice: bestEntry.livePrice,
@@ -6777,13 +7114,13 @@ export function createSalomaApiApp() {
             pnlUsd: 0,
             pnlAr: 0,
             pnlPct: 0,
-            note: `Entrée Spot ${bestEntry.symbol}/USDT (${bestEntry.dropFromRecentHighPct}%)`,
+            note: `Buy Spot ${bestEntry.symbol}/USDT · Signal FORT (${bestEntry.dropFromRecentHighPct}%, vol ×${bestEntry.volumeRatio})`,
             timestamp: nowMs
           }
         });
       }
 
-      // Aucune coin ne remplit les conditions -> reste en USDT et observe les paires surveillées
+      // Aucune coin avec signal FORT -> reste en USDT, ne trade pas sur FAIBLE / MOYEN
       const inspected =
         analyzedList[tickIndex % Math.max(1, analyzedList.length)] || analyzedList[0];
 
@@ -6795,8 +7132,11 @@ export function createSalomaApiApp() {
         action: 'WAIT',
         mood: 'WAIT',
         statusLabel: inspected
-          ? `Regarde ${inspected.symbol} — Aucune entrée (${entryDropPct}%), reste en USDT`
-          : 'Reste en USDT — En attente',
+          ? `Signal ${inspected.signalStrength} sur ${inspected.symbol} — Reste en USDT (attend FORT)`
+          : 'Aucun signal FORT — Reste en USDT',
+        signalStrength: inspected?.signalStrength || 'FAIBLE',
+        preparedCoin: null,
+        watchedSignals,
         position: null,
         sleepUntilMs: null,
         exchangeCount,

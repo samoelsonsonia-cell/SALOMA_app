@@ -908,12 +908,12 @@ export default function App() {
   );
 
   useEffect(() => {
-    if (!sessionToken || sessionToken === COOKIE_SESSION_MARKER || !userRow?.email_verifie) return;
+    if (!sessionToken || sessionToken === COOKIE_SESSION_MARKER || !userRow?.user_id) return;
     if (Object.keys(userWalletAddresses).length > 0) return;
     void fetchWalletAddressesFast(selectedWalletCoin.symbol, activeNetwork.chain);
   }, [
     sessionToken,
-    userRow?.email_verifie,
+    userRow?.user_id,
     userWalletAddresses,
     selectedWalletCoin.symbol,
     activeNetwork.chain,
@@ -1030,12 +1030,8 @@ export default function App() {
         if (cancelled) return;
         setUserRow(sess.user);
         setWalletRow(sess.wallet);
-        if (sess.requiresEmailVerification) {
-          setScreen('verifyEmail');
-        } else {
-          await loadDashboard(sessionToken);
-          if (!cancelled) setScreen('main');
-        }
+        await loadDashboard(sessionToken);
+        if (!cancelled) setScreen('main');
       } catch (err) {
         if (!cancelled) {
           const apiErr = err as ApiError | undefined;
@@ -1081,7 +1077,7 @@ export default function App() {
 
   // --- SERVER-SENT EVENTS (SSE) FOR LIVE NOTIFICATIONS ---
   useEffect(() => {
-    if (!sessionToken || !userRow?.user_id || !userRow?.email_verifie) return;
+    if (!sessionToken || !userRow?.user_id) return;
 
     const unsubscribe = subscribeToNotificationsStream<AppwriteNotificationRow>(
       sessionToken,
@@ -1119,7 +1115,7 @@ export default function App() {
     return () => {
       unsubscribe();
     };
-  }, [sessionToken, userRow?.user_id, userRow?.email_verifie, showToast, loadDashboard, sendBrowserPushNotification]);
+  }, [sessionToken, userRow?.user_id, showToast, loadDashboard, sendBrowserPushNotification]);
 
   // --- FORMAT HELPERS ---
   const formatMoney = (amountAr: number, cur: 'MGA' | 'USD' = displayCurrency) => {
@@ -1316,13 +1312,12 @@ export default function App() {
       setSessionToken(res.sessionSecret);
       setUserRow(res.user);
       setWalletRow(res.wallet);
-      setVerifyOtpInput('');
-      setVerifyOtpError('');
-      setResendCooldown(60);
       signUpTurnstileTokenRef.current = '';
       setSignUpTurnstileReset(k => k + 1);
-      setScreen('verifyEmail');
-      showToast('Code de vérification envoyé à votre email');
+      await loadDashboard(res.sessionSecret);
+      setScreen('main');
+      setActiveTab('trading');
+      showToast(`Bienvenue ${res.user.nom} !`);
     } catch (err) {
       if ((err as ApiError)?.isNetworkError) {
         setIsOnline(false);
@@ -1493,18 +1488,10 @@ export default function App() {
       loginTurnstileTokenRef.current = '';
       setLoginTurnstileReset(k => k + 1);
 
-      if (res.requiresEmailVerification) {
-        setVerifyOtpInput('');
-        setVerifyOtpError('');
-        setResendCooldown(60);
-        setScreen('verifyEmail');
-        showToast('Veuillez entrer le code envoyé à votre email.');
-      } else {
-        await loadDashboard(res.sessionSecret);
-        setScreen('main');
-        setActiveTab('trading');
-        showToast(`Bienvenue ${res.user.nom} !`);
-      }
+      await loadDashboard(res.sessionSecret);
+      setScreen('main');
+      setActiveTab('trading');
+      showToast(`Bienvenue ${res.user.nom} !`);
     } catch (err) {
       const apiErr = err as ApiError;
       const msgRaw = err instanceof Error ? err.message : '';
@@ -2851,16 +2838,6 @@ export default function App() {
   };
 
   const handleOpenWithdraw = () => {
-    const effectiveKycLevel = Math.max(
-      userRow?.kyc_level ?? 0,
-      userRow?.email_verifie ? 1 : 0,
-      userRow?.kyc_statut === 'valide' ? 2 : 0
-    );
-    if (effectiveKycLevel < 1) {
-      showToast('Veuillez vérifier votre email (KYC Niveau 1) avant de retirer');
-      setActiveModal('kyc');
-      return;
-    }
     setIsWalletCoinDropdownOpen(false);
     setWalletCoinSearchTerm('');
     withdrawTurnstileTokenRef.current = '';

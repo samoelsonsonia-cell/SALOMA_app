@@ -61,6 +61,9 @@ export const BotExchangePanel: React.FC<BotExchangePanelProps> = ({
     setFocusedSymbol,
     candles,
     mood,
+    signalStrength,
+    preparedCoin,
+    watchedSignals,
     statusLabel,
     history,
     clearHistory,
@@ -223,7 +226,7 @@ export const BotExchangePanel: React.FC<BotExchangePanelProps> = ({
             2. ROBOT ÉCHANGE (Spot Bybit)
           </span>
           <span className="text-[10px] text-purple-300 block truncate">
-            Spot uniquement · Sortie anticipée +1% · Stop Loss -2% (Repos 30m)
+            Spot uniquement (Conversion interdite) · Signal FORT requis · Stop Loss -2%
           </span>
         </div>
         <button
@@ -403,14 +406,43 @@ export const BotExchangePanel: React.FC<BotExchangePanelProps> = ({
           </div>
         </div>
 
-        {/* BOUGIE EN DIRECT */}
+        {/* BOUGIE EN DIRECT + FORCE DU SIGNAL */}
         <div className="p-2.5 rounded-xl bg-[#100926] border border-purple-500/30 space-y-2">
-          <div className="flex items-center justify-between text-[11px]">
-            <span className="font-black text-white">
+          <div className="flex items-center justify-between gap-2 text-[11px]">
+            <span className="font-black text-white truncate">
               Bougie Spot · {focusedSymbol}/USDT
             </span>
-            <span className="font-mono-num font-black text-emerald-300">
-              ${formatCoinPrice(liveFocusedPrice)}
+            <div className="flex items-center gap-1.5 shrink-0">
+              <span
+                className={`px-2 py-0.5 rounded-md font-black text-[10px] border ${
+                  signalStrength === 'FORT'
+                    ? 'bg-emerald-500/20 border-emerald-400 text-emerald-300'
+                    : signalStrength === 'MOYEN'
+                    ? 'bg-amber-500/20 border-amber-400 text-amber-300'
+                    : 'bg-rose-500/20 border-rose-400 text-rose-300'
+                }`}
+              >
+                Signal : {signalStrength}
+              </span>
+              <span className="font-mono-num font-black text-emerald-300">
+                ${formatCoinPrice(liveFocusedPrice)}
+              </span>
+            </div>
+          </div>
+
+          <div className="flex items-center justify-between text-[10px] text-purple-300 px-0.5">
+            <span>
+              Mode : <strong className="text-emerald-300">SPOT BYBIT</strong> ·{' '}
+              <span className="text-rose-300">Conversion interdite</span>
+            </span>
+            <span>
+              {preparedCoin ? (
+                <strong className="text-emerald-300">
+                  Prêt : {preparedCoin.symbol} ({preparedCoin.signalStrength})
+                </strong>
+              ) : (
+                'Trade sur FORT uniquement'
+              )}
             </span>
           </div>
 
@@ -543,32 +575,48 @@ export const BotExchangePanel: React.FC<BotExchangePanelProps> = ({
         {/* PAIRES ACTUELLEMENT SURVEILLÉES */}
         {watchedPairs.length > 0 && (
           <div className="flex flex-wrap gap-1.5">
-            {watchedPairs.map(sym => (
-              <div
-                key={sym}
-                className={`min-h-[36px] rounded-lg border text-[11px] font-black flex items-center transition ${
-                  focusedSymbol === sym
-                    ? 'bg-[#7C3AED] border-emerald-400 text-white'
-                    : 'bg-[#1D1240] border-purple-500/40 text-purple-200'
-                }`}
-              >
-                <button
-                  type="button"
-                  onClick={() => setFocusedSymbol(sym)}
-                  className="px-2.5 py-1 text-left"
+            {watchedPairs.map(sym => {
+              const sig = watchedSignals.find(w => w.symbol === sym)?.signalStrength;
+              return (
+                <div
+                  key={sym}
+                  className={`min-h-[36px] rounded-lg border text-[11px] font-black flex items-center transition ${
+                    focusedSymbol === sym
+                      ? 'bg-[#7C3AED] border-emerald-400 text-white'
+                      : 'bg-[#1D1240] border-purple-500/40 text-purple-200'
+                  }`}
                 >
-                  {sym}/USDT
-                </button>
-                <button
-                  type="button"
-                  aria-label={`Retirer ${sym}`}
-                  onClick={() => toggleWatchedPair(sym)}
-                  className="pr-2 pl-1 py-1 text-purple-200 hover:text-rose-300 font-bold"
-                >
-                  ×
-                </button>
-              </div>
-            ))}
+                  <button
+                    type="button"
+                    onClick={() => setFocusedSymbol(sym)}
+                    className="px-2.5 py-1 text-left flex items-center gap-1"
+                  >
+                    <span>{sym}/USDT</span>
+                    {sig && (
+                      <span
+                        className={`text-[9px] font-black px-1 rounded ${
+                          sig === 'FORT'
+                            ? 'bg-emerald-500/25 text-emerald-300'
+                            : sig === 'MOYEN'
+                            ? 'bg-amber-500/25 text-amber-300'
+                            : 'bg-rose-500/25 text-rose-300'
+                        }`}
+                      >
+                        {sig}
+                      </span>
+                    )}
+                  </button>
+                  <button
+                    type="button"
+                    aria-label={`Retirer ${sym}`}
+                    onClick={() => toggleWatchedPair(sym)}
+                    className="pr-2 pl-1 py-1 text-purple-200 hover:text-rose-300 font-bold"
+                  >
+                    ×
+                  </button>
+                </div>
+              );
+            })}
           </div>
         )}
 

@@ -33,6 +33,23 @@ export interface BotExchangePosition {
   peakPnlPct?: number;
 }
 
+export type BotExchangeSignalStrength = 'FAIBLE' | 'MOYEN' | 'FORT';
+
+export interface BotExchangePreparedCoin {
+  symbol: string;
+  signalStrength: BotExchangeSignalStrength;
+  signalScore: number;
+}
+
+export interface BotExchangeWatchedSignal {
+  symbol: string;
+  signalStrength: BotExchangeSignalStrength;
+  signalScore: number;
+  dropFromRecentHighPct: number;
+  volumeRatio: number;
+  reason: string;
+}
+
 export interface BotExchangeHistoryEntry {
   id: string;
   actionType: 'BUY' | 'EXCHANGE' | 'SELL' | 'EARLY_EXIT' | 'STOP_LOSS';
@@ -151,8 +168,11 @@ export function useBotExchangeEngine(params: {
   );
   const [candles, setCandles] = useState<BotExchangeCandleItem[]>([]);
   const [mood, setMood] = useState<BotExchangeAvatarMood>('OFF');
+  const [signalStrength, setSignalStrength] = useState<BotExchangeSignalStrength>('FAIBLE');
+  const [preparedCoin, setPreparedCoin] = useState<BotExchangePreparedCoin | null>(null);
+  const [watchedSignals, setWatchedSignals] = useState<BotExchangeWatchedSignal[]>([]);
   const [statusLabel, setStatusLabel] = useState<string>(
-    'Robot Échange prêt (Spot uniquement)'
+    'Robot Échange prêt (Spot Bybit uniquement · Signal FORT requis)'
   );
   const [nowMs, setNowMs] = useState<number>(() => Date.now());
   const [startError, setStartError] = useState<string | null>(null);
@@ -282,19 +302,28 @@ export function useBotExchangeEngine(params: {
       try {
         const res = await apiRequest<{
           ok: boolean;
+          signalStrength?: BotExchangeSignalStrength;
           candles: BotExchangeCandleItem[];
-        }>(`/api/bot-exchange/candles?symbol=${encodeURIComponent(sym)}&interval=1`, {
-          token: sessionToken,
-          timeoutMs: 7000
-        });
+        }>(
+          `/api/bot-exchange/candles?symbol=${encodeURIComponent(sym)}&interval=1&entryDropPct=${encodeURIComponent(
+            String(entryDropPct)
+          )}&exitGainPct=${encodeURIComponent(String(exitGainPct))}`,
+          {
+            token: sessionToken,
+            timeoutMs: 7000
+          }
+        );
         if (res?.candles && Array.isArray(res.candles)) {
           setCandles(res.candles);
+        }
+        if (res?.signalStrength) {
+          setSignalStrength(res.signalStrength);
         }
       } catch {
         // ignore transient candle fetch error
       }
     },
-    [sessionToken]
+    [sessionToken, entryDropPct, exitGainPct]
   );
 
   useEffect(() => {
@@ -370,13 +399,21 @@ export function useBotExchangeEngine(params: {
     tickBusyRef.current = true;
     try {
       tickIndexRef.current += 1;
+      const executionMode = 'SPOT_ONLY';
+      const category = 'spot';
+      const forbidConversion = true;
       const res = await apiRequest<{
         ok: boolean;
+        blockedConversion?: boolean;
+        error?: string;
         usdtBalance: number;
         capitalAr: number;
         enabled: boolean;
         action: string;
         mood: BotExchangeAvatarMood;
+        signalStrength?: BotExchangeSignalStrength;
+        preparedCoin?: BotExchangePreparedCoin | null;
+        watchedSignals?: BotExchangeWatchedSignal[];
         statusLabel: string;
         position: BotExchangePosition | null;
         sleepUntilMs: number | null;
@@ -389,6 +426,10 @@ export function useBotExchangeEngine(params: {
         token: sessionToken,
         timeoutMs: 12000,
         body: {
+          executionMode,
+          category,
+          forbidConversion,
+          orderTypeTag: 'bybit_spot',
           watchedPairs,
           amountUsdt: numericAmountUsdt,
           entryDropPct,
@@ -401,10 +442,22 @@ export function useBotExchangeEngine(params: {
         }
       });
 
+      if (res.blockedConversion || res.action === 'BLOCKED_CONVERSION') {
+        setEnabled(false);
+        setMood('OFF');
+        const msg = res.error || 'Conversion interdite - Spot uniquement';
+        setStatusLabel(msg);
+        setStartError(msg);
+        return;
+      }
+
       if (typeof res.usdtBalance === 'number') setBybitUsdtBalance(res.usdtBalance);
       if (typeof res.capitalAr === 'number') setBybitCapitalAr(res.capitalAr);
       if (!res.enabled) setEnabled(false);
       setMood(res.mood || 'WATCHING');
+      if (res.signalStrength) setSignalStrength(res.signalStrength);
+      setPreparedCoin(res.preparedCoin ?? null);
+      if (Array.isArray(res.watchedSignals)) setWatchedSignals(res.watchedSignals);
       setStatusLabel(res.statusLabel || 'Analyse en cours...');
       setPosition(res.position || null);
       setSleepUntilMs(res.sleepUntilMs || null);
@@ -428,7 +481,11 @@ export function useBotExchangeEngine(params: {
     } catch (err) {
       const msg = err instanceof Error ? err.message : 'Erreur Robot Échange';
       setStatusLabel(msg);
-      if (msg.includes('Minimum Bybit') || msg.includes('inférieur')) {
+      if (
+        msg.includes('Minimum Bybit') ||
+        msg.includes('inférieur') ||
+        msg.includes('Conversion interdite')
+      ) {
         setEnabled(false);
         setMood('OFF');
         setStartError(msg);
@@ -558,6 +615,9 @@ export function useBotExchangeEngine(params: {
     setFocusedSymbol,
     candles,
     mood,
+    signalStrength,
+    preparedCoin,
+    watchedSignals,
     statusLabel,
     history,
     clearHistory,

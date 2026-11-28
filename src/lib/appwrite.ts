@@ -419,7 +419,7 @@ function buildFallbackUserAndWallet(
     ? `${extra.prenom ? extra.prenom + ' ' : ''}${extra.nom || ''}`.trim() || acc.name || acc.email
     : acc.name || acc.email;
   const nowIso = new Date().toISOString();
-  const isEmailVerified = Boolean(acc.emailVerification);
+  const isEmailVerified = true;
   return {
     user: {
       $id: acc.$id,
@@ -436,7 +436,7 @@ function buildFallbackUserAndWallet(
       date_inscription: nowIso,
       statut: 'actif',
       email_verifie: isEmailVerified,
-      kyc_level: isEmailVerified ? 1 : 0,
+      kyc_level: 1,
       pays: extra?.pays || 'Madagascar 🇲🇬',
       role: 'client'
     },
@@ -465,7 +465,7 @@ export async function directAppwriteGetSession(): Promise<{
   const { user, wallet } = buildFallbackUserAndWallet(acc);
   return {
     userId: acc.$id,
-    requiresEmailVerification: !acc.emailVerification,
+    requiresEmailVerification: false,
     user,
     wallet
   };
@@ -505,22 +505,11 @@ export async function directAppwriteLogin(
   }
 
   const acc = await directAppwriteFetch<AppwriteAccountResponse>('/account');
-  if (!acc.emailVerification) {
-    try {
-      await directAppwriteFetch('/account/verifications/email/otp', {
-        method: 'POST',
-        body: {}
-      });
-    } catch {
-      // ignore rate limit on email OTP resend
-    }
-  }
-
   const { user, wallet } = buildFallbackUserAndWallet(acc);
   return {
     sessionSecret: COOKIE_SESSION_MARKER,
     userId: acc.$id,
-    requiresEmailVerification: !acc.emailVerification,
+    requiresEmailVerification: false,
     user,
     wallet
   };
@@ -559,15 +548,6 @@ export async function directAppwriteRegister(params: {
     body: { email: cleanEmail, password: params.password }
   });
 
-  try {
-    await directAppwriteFetch('/account/verifications/email/otp', {
-      method: 'POST',
-      body: {}
-    });
-  } catch {
-    // ignore transient OTP issue
-  }
-
   const acc = await directAppwriteFetch<AppwriteAccountResponse>('/account');
   const { user, wallet } = buildFallbackUserAndWallet(acc, {
     nom: params.nom,
@@ -580,7 +560,7 @@ export async function directAppwriteRegister(params: {
   return {
     sessionSecret: COOKIE_SESSION_MARKER,
     userId: acc.$id,
-    requiresEmailVerification: true,
+    requiresEmailVerification: false,
     user,
     wallet
   };
