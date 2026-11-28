@@ -114,8 +114,6 @@ import {
   directAppwriteLogin,
   directAppwriteRegister,
   directAppwriteGetSession,
-  directAppwriteVerifyEmailOtp,
-  directAppwriteResendEmailOtp,
   directAppwriteLogout,
   subscribeToNotificationsStream,
   type ApiError
@@ -419,7 +417,7 @@ const COUNTRY_OPTIONS = [
 export default function App() {
   // --- NAVIGATION & AUTH SESSION ---
   const [screen, setScreen] = useState<
-    'splash' | 'main' | 'signup' | 'verifyEmail' | 'conditions' | 'privacy' | 'login' | 'forgotPassword' | 'admin'
+    'splash' | 'main' | 'signup' | 'conditions' | 'privacy' | 'login' | 'forgotPassword' | 'admin'
   >('splash');
   const [privacyReturnScreen, setPrivacyReturnScreen] = useState<'splash' | 'signup' | 'login' | 'main'>('splash');
   const openPrivacyPolicy = useCallback(
@@ -1145,19 +1143,6 @@ export default function App() {
   const [signUpError, setSignUpError] = useState('');
   const [signUpLoading, setSignUpLoading] = useState(false);
 
-  // Verification email OTP state
-  const [verifyOtpInput, setVerifyOtpInput] = useState('');
-  const [verifyOtpError, setVerifyOtpError] = useState('');
-  const [verifyOtpLoading, setVerifyOtpLoading] = useState(false);
-  const [resendCooldown, setResendCooldown] = useState(60);
-  const [resendLoading, setResendLoading] = useState(false);
-
-  useEffect(() => {
-    if (screen !== 'verifyEmail' || resendCooldown <= 0) return;
-    const t = setTimeout(() => setResendCooldown(c => c - 1), 1000);
-    return () => clearTimeout(t);
-  }, [screen, resendCooldown]);
-
   // Login & Forgot Password state
   const [loginEmail, setLoginEmail] = useState('');
   const [loginPassword, setLoginPassword] = useState('');
@@ -1314,7 +1299,7 @@ export default function App() {
       setWalletRow(res.wallet);
       signUpTurnstileTokenRef.current = '';
       setSignUpTurnstileReset(k => k + 1);
-      await loadDashboard(res.sessionSecret);
+      await loadDashboard(res.sessionSecret).catch(() => {});
       setScreen('main');
       setActiveTab('trading');
       showToast(`Bienvenue ${res.user.nom} !`);
@@ -1328,82 +1313,6 @@ export default function App() {
       setSignUpError(err instanceof Error ? err.message : 'Erreur lors de l’inscription.');
     } finally {
       setSignUpLoading(false);
-    }
-  };
-
-  const handleVerifyEmailCode = async (e: React.FormEvent) => {
-    e.preventDefault();
-    setVerifyOtpError('');
-    if (!(await ensureOnlineOrBlock())) return;
-    const code = verifyOtpInput.trim();
-    if (!/^\d{6}$/.test(code)) {
-      setVerifyOtpError('Code incorrect');
-      return;
-    }
-    if (!sessionToken) return;
-
-    setVerifyOtpLoading(true);
-    try {
-      if (sessionToken === COOKIE_SESSION_MARKER && userRow?.user_id) {
-        await directAppwriteVerifyEmailOtp(userRow.user_id, code);
-      } else {
-        try {
-          await apiRequest('/api/auth/verify-email', {
-            method: 'POST',
-            token: sessionToken,
-            body: { code }
-          });
-        } catch (err) {
-          if (isApiNotFoundError(err) && userRow?.user_id) {
-            await directAppwriteVerifyEmailOtp(userRow.user_id, code);
-          } else {
-            throw err;
-          }
-        }
-      }
-      await loadDashboard(sessionToken);
-      setScreen('main');
-      setActiveTab('trading');
-      showToast('✅ Compte vérifié avec succès');
-    } catch (err) {
-      if ((err as ApiError)?.isNetworkError) {
-        setIsOnline(false);
-        setOfflineBlocked(true);
-      }
-      setVerifyOtpError(err instanceof Error ? err.message : 'Code incorrect');
-    } finally {
-      setVerifyOtpLoading(false);
-    }
-  };
-
-  const handleResendEmailCode = async () => {
-    if (!sessionToken || resendCooldown > 0 || resendLoading) return;
-    if (!(await ensureOnlineOrBlock())) return;
-    setVerifyOtpError('');
-    setResendLoading(true);
-    try {
-      if (sessionToken === COOKIE_SESSION_MARKER) {
-        await directAppwriteResendEmailOtp();
-      } else {
-        try {
-          await apiRequest('/api/auth/resend-code', {
-            method: 'POST',
-            token: sessionToken
-          });
-        } catch (err) {
-          if (isApiNotFoundError(err)) {
-            await directAppwriteResendEmailOtp();
-          } else {
-            throw err;
-          }
-        }
-      }
-      setResendCooldown(60);
-      showToast('Code de vérification envoyé à votre email');
-    } catch (err) {
-      setVerifyOtpError(err instanceof Error ? err.message : 'Impossible de renvoyer le code.');
-    } finally {
-      setResendLoading(false);
     }
   };
 
@@ -1488,7 +1397,7 @@ export default function App() {
       loginTurnstileTokenRef.current = '';
       setLoginTurnstileReset(k => k + 1);
 
-      await loadDashboard(res.sessionSecret);
+      await loadDashboard(res.sessionSecret).catch(() => {});
       setScreen('main');
       setActiveTab('trading');
       showToast(`Bienvenue ${res.user.nom} !`);
@@ -4940,80 +4849,6 @@ export default function App() {
       )}
 
       {/* ========================================================
-          ÉCRAN OBLIGATOIRE : VÉRIFICATION PAR CODE EMAIL APPWRITE
-         ======================================================== */}
-      {screen === 'verifyEmail' && (
-        <div className="min-h-screen p-6 max-w-md mx-auto w-full z-10 flex flex-col justify-between">
-          <div className="my-auto bg-[#1D1240] border-2 border-[#8B5CF6] rounded-3xl p-6 space-y-5 shadow-[0_0_40px_rgba(124,58,237,0.45)]">
-            <div className="flex flex-col items-center text-center space-y-2">
-              <div className="w-14 h-14 rounded-2xl bg-[#7C3AED]/30 border-2 border-[#8B5CF6] flex items-center justify-center">
-                <Mail className="w-7 h-7 text-purple-200" />
-              </div>
-              <h2 className="font-black text-xl text-white">Entrez le code reçu par email</h2>
-              <p className="text-xs text-purple-200/80 leading-relaxed">
-                Un code de sécurité à 6 chiffres a été envoyé à{' '}
-                <strong className="text-white font-mono">{userRow?.email}</strong>. Vérifiez votre boîte de réception et vos spams.
-              </p>
-            </div>
-
-            {verifyOtpError && (
-              <div className="p-3 rounded-xl bg-rose-500/20 border border-rose-500/40 text-rose-300 text-xs font-bold text-center">
-                {verifyOtpError}
-              </div>
-            )}
-
-            <form onSubmit={handleVerifyEmailCode} className="space-y-4">
-              <input
-                type="text"
-                inputMode="numeric"
-                maxLength={6}
-                required
-                placeholder="000000"
-                value={verifyOtpInput}
-                onChange={e => {
-                  setVerifyOtpInput(e.target.value.replace(/[^0-9]/g, ''));
-                  setVerifyOtpError('');
-                }}
-                className="w-full py-3.5 px-4 rounded-2xl bg-[#150D2E] border-2 border-[#8B5CF6]/60 text-white font-mono text-2xl font-black text-center tracking-[0.4em] focus:outline-none focus:border-[#8B5CF6]"
-              />
-
-              <button
-                type="submit"
-                disabled={verifyOtpLoading || verifyOtpInput.length !== 6}
-                className="w-full py-3.5 rounded-2xl bg-gradient-to-r from-[#7C3AED] to-[#8B5CF6] text-white font-black text-sm shadow-[0_0_25px_rgba(124,58,237,0.6)] disabled:opacity-50"
-              >
-                {verifyOtpLoading ? 'Vérification...' : 'Vérifier le code'}
-              </button>
-            </form>
-
-            <div className="flex items-center justify-between pt-2 border-t border-purple-500/25 text-xs">
-              <button
-                type="button"
-                disabled={resendCooldown > 0 || resendLoading}
-                onClick={handleResendEmailCode}
-                className="font-bold text-[#A78BFA] hover:text-white disabled:opacity-50 flex items-center gap-1.5"
-              >
-                <Clock className="w-3.5 h-3.5" />
-                {resendCooldown > 0
-                  ? `Renvoyer le code (${resendCooldown}s)`
-                  : resendLoading
-                  ? 'Envoi...'
-                  : 'Renvoyer le code'}
-              </button>
-
-              <button
-                type="button"
-                onClick={handleLogout}
-                className="text-rose-300 hover:text-rose-200 font-bold"
-              >
-                Se déconnecter
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* ========================================================
           CONDITIONS D'UTILISATION
          ======================================================== */}
       {screen === 'conditions' && (
@@ -5036,7 +4871,7 @@ export default function App() {
               Règlement Général et Conditions d'Utilisation de la Plateforme Financière SALOMA
             </p>
             <p>
-              <strong>1. Unicité & Sécurité :</strong> Chaque compte SALOMA est strictement personnel et vérifié par code email à 6 chiffres. Tous les nouveaux comptes démarrent à 0 Ar.
+              <strong>1. Unicité & Sécurité :</strong> Chaque compte SALOMA est strictement personnel et sécurisé par authentification Email et Mot de passe. Tous les nouveaux comptes démarrent à 0 Ar.
             </p>
             <p>
               <strong>2. Dépôts, Retraits & KYC :</strong> Toute demande de dépôt ou de retrait est enregistrée avec le statut initial « en_attente » pour vérification et validation sécurisée. Le niveau KYC 2 est requis avant tout retrait.

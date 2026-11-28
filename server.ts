@@ -2673,7 +2673,10 @@ async function ensureCoreAppwriteTables(
         }
       }
 
-      lastCoreTablesVerifyAt = Date.now();
+      await ensureCoreAccountSyncedByEmail('appsaloma@gmail.com').catch(() => {});
+      if (!targetKeys || targetKeys.length === 0) {
+        lastCoreTablesVerifyAt = Date.now();
+      }
     } catch (err) {
       console.warn(
         '[SALOMA Appwrite] Vérification des tables Appwrite ignorée:',
@@ -2685,6 +2688,84 @@ async function ensureCoreAppwriteTables(
   })();
 
   await coreTablesResolveInFlight;
+}
+
+async function ensureCoreAccountSyncedByEmail(targetEmail: string): Promise<void> {
+  const cleanEmail = targetEmail.trim().toLowerCase();
+  if (!cleanEmail || !APPWRITE_DATABASE_ID || !APPWRITE_API_KEY || !TABLES.USERS) return;
+  try {
+    let authUser: { $id: string; name?: string; phone?: string } | null = null;
+    try {
+      const listUsers = await adminUsers.list({
+        queries: [Query.equal('email', cleanEmail), Query.limit(1)]
+      });
+      if (listUsers.users && listUsers.users.length > 0) {
+        authUser = listUsers.users[0] as unknown as { $id: string; name?: string; phone?: string };
+      }
+    } catch {
+      // ignore if users list unavailable
+    }
+
+    const byEmailRes = await adminDb.listRows({
+      databaseId: APPWRITE_DATABASE_ID,
+      tableId: TABLES.USERS,
+      queries: [Query.equal('email', cleanEmail), Query.limit(1)]
+    });
+    const existingRow = byEmailRes.rows[0] as (Record<string, unknown> & { $id: string }) | undefined;
+
+    if (existingRow) {
+      if (authUser && String(existingRow.user_id || '') !== authUser.$id) {
+        await adminDb.updateRow({
+          databaseId: APPWRITE_DATABASE_ID,
+          tableId: TABLES.USERS,
+          rowId: existingRow.$id,
+          data: {
+            user_id: authUser.$id,
+            email_verifie: true,
+            statut: existingRow.statut || 'actif'
+          }
+        });
+      }
+      if (authUser) {
+        await getOrCreateWalletRow(authUser.$id).catch(() => null);
+      }
+      return;
+    }
+
+    if (authUser) {
+      const nowIso = new Date().toISOString();
+      await adminDb.createRow({
+        databaseId: APPWRITE_DATABASE_ID,
+        tableId: TABLES.USERS,
+        rowId: ID.unique(),
+        data: {
+          user_id: authUser.$id,
+          name: authUser.name || 'SALOMA',
+          nom: authUser.name || 'SALOMA',
+          prenom: '',
+          email: cleanEmail,
+          phone: authUser.phone || '',
+          telephone: authUser.phone || '',
+          mot_de_passe: '',
+          solde: 0,
+          code_parrainage: `SALOMA-${authUser.$id.slice(-6).toUpperCase()}`,
+          parrain: '',
+          date_inscription: nowIso,
+          statut: 'actif',
+          email_verifie: true,
+          kyc_level: 1,
+          pays: 'Madagascar 🇲🇬',
+          role: 'client'
+        }
+      });
+      await getOrCreateWalletRow(authUser.$id).catch(() => null);
+    }
+  } catch (err) {
+    console.warn(
+      `[SALOMA Appwrite] Sync compte ${cleanEmail} ignorée:`,
+      err instanceof Error ? err.message : err
+    );
+  }
 }
 
 async function withAppwriteTableRetry<T>(
@@ -2727,6 +2808,31 @@ async function safeOverviewListRows(
   }
 }
 
+async function safeUserTableListRows(
+  tableKey: CoreAppwriteTableKey,
+  queries: string[]
+): Promise<{ rows: Array<Record<string, unknown>>; total: number }> {
+  try {
+    const res = await withAppwriteTableRetry(tableKey, tableId =>
+      adminDb.listRows({
+        databaseId: APPWRITE_DATABASE_ID,
+        tableId,
+        queries
+      })
+    );
+    return {
+      rows: (res.rows || []) as unknown as Array<Record<string, unknown>>,
+      total: Number(res.total) || 0
+    };
+  } catch (err) {
+    console.warn(
+      `[SALOMA Dashboard] Lecture table ${tableKey} (${TABLES[tableKey]}) contournée:`,
+      err instanceof Error ? err.message : err
+    );
+    return { rows: [], total: 0 };
+  }
+}
+
 function formatAppwriteErrorFr(err: unknown, fallback = APPWRITE_CONNECTION_FAILED_MSG): string {
   if (!isServerAppwriteConfigured()) {
     return APPWRITE_CONFIG_MISSING_MSG;
@@ -2736,6 +2842,9 @@ function formatAppwriteErrorFr(err: unknown, fallback = APPWRITE_CONNECTION_FAIL
   const type = e?.type || '';
   if (isAppwriteProjectNotFoundError(err)) {
     return e?.message || APPWRITE_CONFIG_MISSING_MSG;
+  }
+  if (isAppwriteTableNotFoundError(err)) {
+    return 'Table de base de données introuvable ou en cours de réparation. Veuillez réessayer.';
   }
   if (
     msg.includes('fetch failed') ||
@@ -2749,11 +2858,14 @@ function formatAppwriteErrorFr(err: unknown, fallback = APPWRITE_CONNECTION_FAIL
   if (type === 'user_already_exists' || msg.includes('already exists')) {
     return 'Un compte existe déjà avec cette adresse e-mail.';
   }
+  if (type === 'user_not_found' || msg.includes('user with the requested id')) {
+    return 'Aucun compte trouvé avec cet email.';
+  }
   if (type === 'user_invalid_credentials' || msg.includes('invalid credentials')) {
     return 'Email ou mot de passe incorrect.';
   }
   if (type === 'user_invalid_token' || msg.includes('invalid token') || msg.includes('expired')) {
-    return 'Code incorrect ou expiré.';
+    return 'Session expirée. Veuillez vous reconnecter.';
   }
   if (type === 'user_blocked') {
     return 'Ce compte est bloqué.';
@@ -2835,23 +2947,25 @@ async function createNotification(
   type: string = 'info'
 ) {
   try {
-    const row = await adminDb.createRow({
-      databaseId: APPWRITE_DATABASE_ID,
-      tableId: TABLES.NOTIFICATIONS,
-      rowId: ID.unique(),
-      data: {
-        user_id: userId,
-        titre,
-        message,
-        type,
-        lu: false,
-        date: new Date().toISOString()
-      },
-      permissions: [
-        Permission.read(Role.user(userId)),
-        Permission.update(Role.user(userId))
-      ]
-    });
+    const row = await withAppwriteTableRetry('NOTIFICATIONS', tableId =>
+      adminDb.createRow({
+        databaseId: APPWRITE_DATABASE_ID,
+        tableId,
+        rowId: ID.unique(),
+        data: {
+          user_id: userId,
+          titre,
+          message,
+          type,
+          lu: false,
+          date: new Date().toISOString()
+        },
+        permissions: [
+          Permission.read(Role.user(userId)),
+          Permission.update(Role.user(userId))
+        ]
+      })
+    );
     notificationEmitter.emit(`user:${userId}`, row);
     return row;
   } catch (err) {
@@ -2886,15 +3000,65 @@ function triggerPriceAlertNotifications(symbol: string, currentPriceUsd: number)
   }
 }
 
-async function getUserRowByUserId(userId: string) {
-  const res = await withAppwriteTableRetry('USERS', tableId =>
+async function getUserRowByUserIdOrEmail(userId: string, email?: string) {
+  const byId = await withAppwriteTableRetry('USERS', tableId =>
     adminDb.listRows({
       databaseId: APPWRITE_DATABASE_ID,
       tableId,
       queries: [Query.equal('user_id', userId), Query.limit(1)]
     })
   );
-  return res.rows[0] || null;
+  if (byId.rows[0]) {
+    return byId.rows[0];
+  }
+
+  let lookupEmail = String(email || '').trim().toLowerCase();
+  if (!lookupEmail && APPWRITE_API_KEY) {
+    try {
+      const authUser = await adminUsers.get({ userId });
+      lookupEmail = String(authUser.email || '').trim().toLowerCase();
+    } catch {
+      // ignore if user not readable by ID
+    }
+  }
+
+  if (lookupEmail) {
+    const byEmail = await withAppwriteTableRetry('USERS', tableId =>
+      adminDb.listRows({
+        databaseId: APPWRITE_DATABASE_ID,
+        tableId,
+        queries: [Query.equal('email', lookupEmail), Query.limit(1)]
+      })
+    );
+    if (byEmail.rows[0]) {
+      const foundRow = byEmail.rows[0];
+      if (String(foundRow.user_id || '') !== userId || !foundRow.email_verifie) {
+        try {
+          return await withAppwriteTableRetry('USERS', tableId =>
+            adminDb.updateRow({
+              databaseId: APPWRITE_DATABASE_ID,
+              tableId,
+              rowId: foundRow.$id,
+              data: {
+                user_id: userId,
+                email_verifie: true,
+                kyc_level: Math.max(Number(foundRow.kyc_level || 0), 1)
+              }
+            })
+          );
+        } catch {
+          return foundRow;
+        }
+      }
+      return foundRow;
+    }
+  }
+
+  return null;
+}
+
+async function getUserRowByUserId(userId: string) {
+  return getUserRowByUserIdOrEmail(userId);
 }
 
 async function getOrCreateWalletRow(userId: string) {
@@ -3013,7 +3177,7 @@ async function requireAuth(req: AuthedRequest, res: Response, next: NextFunction
     };
     let normalizedUserRow: (Record<string, unknown> & { $id: string }) | undefined;
     try {
-      const uRow = await getUserRowByUserId(verified.userId);
+      const uRow = await getUserRowByUserIdOrEmail(verified.userId, verified.email);
       normalizedUserRow = uRow ? (uRow as Record<string, unknown> & { $id: string }) : undefined;
     } catch {
       // ignore transient DB lookup failure on fallback token
@@ -3042,7 +3206,7 @@ async function requireAuth(req: AuthedRequest, res: Response, next: NextFunction
     };
     req.authUser = normalizedAuthUser;
     req.sessionSecret = secret;
-    const uRow = await getUserRowByUserId(authUser.$id);
+    const uRow = await getUserRowByUserIdOrEmail(authUser.$id, authUser.email);
     const normalizedUserRow = uRow ? (uRow as Record<string, unknown> & { $id: string }) : undefined;
     if (normalizedUserRow) {
       req.userRow = normalizedUserRow;
@@ -3453,11 +3617,14 @@ export function createSalomaApiApp() {
       let walletRow: Record<string, unknown> | null = null;
 
       try {
-        const existingEmail = await adminDb.listRows({
-          databaseId: APPWRITE_DATABASE_ID,
-          tableId: TABLES.USERS,
-          queries: [Query.equal('email', cleanEmail), Query.limit(1)]
-        });
+        await ensureCoreAppwriteTables(false, ['USERS', 'WALLETS']).catch(() => {});
+        const existingEmail = await withAppwriteTableRetry('USERS', tableId =>
+          adminDb.listRows({
+            databaseId: APPWRITE_DATABASE_ID,
+            tableId,
+            queries: [Query.equal('email', cleanEmail), Query.limit(1)]
+          })
+        );
         if (existingEmail.total > 0) {
           res.status(409).json({ error: 'Cette adresse e-mail est déjà utilisée.' });
           return;
@@ -3474,45 +3641,49 @@ export function createSalomaApiApp() {
         const hashedPassword = await bcrypt.hash(String(password), 10);
         const referralCode = `SALOMA-${authUserId.slice(-6).toUpperCase()}`;
 
-        userRow = (await adminDb.createRow({
-          databaseId: APPWRITE_DATABASE_ID,
-          tableId: TABLES.USERS,
-          rowId: ID.unique(),
-          data: {
-            user_id: authUserId,
-            name: fullName,
-            nom: cleanNom,
-            prenom: cleanPrenom,
-            email: cleanEmail,
-            phone: cleanPhone,
-            telephone: cleanPhone,
-            mot_de_passe: hashedPassword,
-            solde: 0,
-            code_parrainage: referralCode,
-            parrain: cleanParrain,
-            date_inscription: nowIso,
-            statut: 'actif',
-            email_verifie: true,
-            kyc_level: 1,
-            pays: String(pays),
-            role: 'client'
-          }
-        })) as unknown as Record<string, unknown>;
+        userRow = (await withAppwriteTableRetry('USERS', tableId =>
+          adminDb.createRow({
+            databaseId: APPWRITE_DATABASE_ID,
+            tableId,
+            rowId: ID.unique(),
+            data: {
+              user_id: authUserId,
+              name: fullName,
+              nom: cleanNom,
+              prenom: cleanPrenom,
+              email: cleanEmail,
+              phone: cleanPhone,
+              telephone: cleanPhone,
+              mot_de_passe: hashedPassword,
+              solde: 0,
+              code_parrainage: referralCode,
+              parrain: cleanParrain,
+              date_inscription: nowIso,
+              statut: 'actif',
+              email_verifie: true,
+              kyc_level: 1,
+              pays: String(pays),
+              role: 'client'
+            }
+          })
+        )) as unknown as Record<string, unknown>;
 
-        walletRow = (await adminDb.createRow({
-          databaseId: APPWRITE_DATABASE_ID,
-          tableId: TABLES.WALLETS,
-          rowId: ID.unique(),
-          data: {
-            user_id: authUserId,
-            solde_total: 0,
-            solde_disponible: 0,
-            solde_bloque: 0,
-            devise: 'Ar',
-            date_maj: nowIso,
-            coins_json: '{}'
-          }
-        })) as unknown as Record<string, unknown>;
+        walletRow = (await withAppwriteTableRetry('WALLETS', tableId =>
+          adminDb.createRow({
+            databaseId: APPWRITE_DATABASE_ID,
+            tableId,
+            rowId: ID.unique(),
+            data: {
+              user_id: authUserId,
+              solde_total: 0,
+              solde_disponible: 0,
+              solde_bloque: 0,
+              devise: 'Ar',
+              date_maj: nowIso,
+              coins_json: '{}'
+            }
+          })
+        )) as unknown as Record<string, unknown>;
 
         const session = await adminUsers.createSession({ userId: authUserId });
         sessionSecret =
@@ -3620,16 +3791,47 @@ export function createSalomaApiApp() {
         return;
       }
 
+      await ensureCoreAppwriteTables(false).catch(() => {});
+
       const anonAcc = new Account(getAnonClient());
-      const verifiedSess = await Promise.race([
-        anonAcc.createEmailPasswordSession({
-          email: cleanEmail,
-          password: String(password)
-        }),
-        new Promise<never>((_, reject) =>
-          setTimeout(() => reject(new Error('ETIMEDOUT_APPWRITE_LOGIN')), 12000)
-        )
-      ]);
+      let verifiedSess;
+      try {
+        verifiedSess = await Promise.race([
+          anonAcc.createEmailPasswordSession({
+            email: cleanEmail,
+            password: String(password)
+          }),
+          new Promise<never>((_, reject) =>
+            setTimeout(() => reject(new Error('ETIMEDOUT_APPWRITE_LOGIN')), 12000)
+          )
+        ]);
+      } catch (credErr) {
+        const ce = credErr as { code?: number; type?: string };
+        const ceType = String(ce?.type || '');
+        if (ce?.code === 401 || ce?.code === 404 || ceType === 'user_invalid_credentials' || ceType === 'user_not_found') {
+          if (APPWRITE_API_KEY) {
+            try {
+              const foundByEmail = await adminUsers.list({
+                queries: [Query.equal('email', cleanEmail), Query.limit(1)]
+              });
+              if (!foundByEmail.users || foundByEmail.users.length === 0) {
+                res.status(404).json({
+                  error: 'Aucun compte trouvé avec cet email. Vérifiez votre adresse ou créez un compte.',
+                  accountNotFound: true
+                });
+                return;
+              }
+              res.status(401).json({
+                error: 'Mot de passe incorrect pour ce compte. Vérifiez votre mot de passe et réessayez.'
+              });
+              return;
+            } catch {
+              // fall through to generic cred error
+            }
+          }
+        }
+        throw credErr;
+      }
 
       const userId = verifiedSess.userId;
       let sessionSecret =
@@ -3654,34 +3856,36 @@ export function createSalomaApiApp() {
           session.secret ||
           signFallbackSessionToken({ userId, email: cleanEmail, name: authUserName });
 
-        userRow = (await getUserRowByUserId(userId)) as Record<string, unknown> | null;
+        userRow = (await getUserRowByUserIdOrEmail(userId, cleanEmail)) as Record<string, unknown> | null;
         if (!userRow) {
           const nowIso = new Date().toISOString();
           const hashedPassword = await bcrypt.hash(String(password), 10);
-          userRow = (await adminDb.createRow({
-            databaseId: APPWRITE_DATABASE_ID,
-            tableId: TABLES.USERS,
-            rowId: ID.unique(),
-            data: {
-              user_id: userId,
-              name: authUserName,
-              nom: authUser.name || 'Client',
-              prenom: '',
-              email: cleanEmail,
-              phone: authUserPhone,
-              telephone: authUserPhone,
-              mot_de_passe: hashedPassword,
-              solde: 0,
-              code_parrainage: `SALOMA-${userId.slice(-6).toUpperCase()}`,
-              parrain: '',
-              date_inscription: nowIso,
-              statut: 'actif',
-              email_verifie: true,
-              kyc_level: 1,
-              pays: 'Madagascar 🇲🇬',
-              role: 'client'
-            }
-          })) as unknown as Record<string, unknown>;
+          userRow = (await withAppwriteTableRetry('USERS', tableId =>
+            adminDb.createRow({
+              databaseId: APPWRITE_DATABASE_ID,
+              tableId,
+              rowId: ID.unique(),
+              data: {
+                user_id: userId,
+                name: authUserName,
+                nom: authUser.name || 'Client',
+                prenom: '',
+                email: cleanEmail,
+                phone: authUserPhone,
+                telephone: authUserPhone,
+                mot_de_passe: hashedPassword,
+                solde: 0,
+                code_parrainage: `SALOMA-${userId.slice(-6).toUpperCase()}`,
+                parrain: '',
+                date_inscription: nowIso,
+                statut: 'actif',
+                email_verifie: true,
+                kyc_level: 1,
+                pays: 'Madagascar 🇲🇬',
+                role: 'client'
+              }
+            })
+          )) as unknown as Record<string, unknown>;
         }
         walletRow = (await getOrCreateWalletRow(userId)) as Record<string, unknown>;
       } catch {
@@ -3944,11 +4148,11 @@ export function createSalomaApiApp() {
   async function settleLiquidatedTradesForUser(userId: string) {
     try {
       await refreshMarketPrices();
-      const openRes = await adminDb.listRows({
-        databaseId: APPWRITE_DATABASE_ID,
-        tableId: TABLES.TRADES,
-        queries: [Query.equal('user_id', userId), Query.equal('statut', 'en_cours'), Query.limit(100)]
-      });
+      const openRes = await safeUserTableListRows('TRADES', [
+        Query.equal('user_id', userId),
+        Query.equal('statut', 'en_cours'),
+        Query.limit(100)
+      ]);
       if (openRes.rows.length === 0) return;
 
       const wallet = await getOrCreateWalletRow(userId);
@@ -3976,17 +4180,19 @@ export function createSalomaApiApp() {
         if (isLiquidated) {
           liquidatedCount++;
           soldeBloque = Math.max(0, Number((soldeBloque - margin).toFixed(2)));
-          await adminDb.updateRow({
-            databaseId: APPWRITE_DATABASE_ID,
-            tableId: TABLES.TRADES,
-            rowId: tr.$id,
-            data: {
-              statut: 'termine',
-              profit: -Math.round(margin),
-              close_price: livePrice,
-              date_cloture: new Date().toISOString()
-            }
-          });
+          await withAppwriteTableRetry('TRADES', tableId =>
+            adminDb.updateRow({
+              databaseId: APPWRITE_DATABASE_ID,
+              tableId,
+              rowId: String(tr.$id),
+              data: {
+                statut: 'termine',
+                profit: -Math.round(margin),
+                close_price: livePrice,
+                date_cloture: new Date().toISOString()
+              }
+            })
+          );
           await createNotification(
             userId,
             'Position liquidée (Marge Isolée)',
@@ -3998,17 +4204,19 @@ export function createSalomaApiApp() {
 
       if (liquidatedCount > 0) {
         const nextTotal = Number((soldeDisp + compteTrade + soldeBloque).toFixed(2));
-        await adminDb.updateRow({
-          databaseId: APPWRITE_DATABASE_ID,
-          tableId: TABLES.WALLETS,
-          rowId: wallet.$id,
-          data: {
-            solde_bloque: soldeBloque,
-            solde_total: nextTotal,
-            date_maj: new Date().toISOString(),
-            coins_json: encodeCoinsWithTradeAr(coins, compteTrade)
-          }
-        });
+        await withAppwriteTableRetry('WALLETS', tableId =>
+          adminDb.updateRow({
+            databaseId: APPWRITE_DATABASE_ID,
+            tableId,
+            rowId: wallet.$id,
+            data: {
+              solde_bloque: soldeBloque,
+              solde_total: nextTotal,
+              date_maj: new Date().toISOString(),
+              coins_json: encodeCoinsWithTradeAr(coins, compteTrade)
+            }
+          })
+        );
       }
     } catch {
       // ignore transient liquidation sync error
@@ -4017,13 +4225,19 @@ export function createSalomaApiApp() {
 
   app.get('/api/me/session', requireAuth, async (req: AuthedRequest, res: Response) => {
     try {
+      await ensureCoreAppwriteTables(false).catch(() => {});
       const userId = req.authUser!.$id;
+      const repairedUser =
+        req.userRow ||
+        ((await getUserRowByUserIdOrEmail(userId, req.authUser?.email).catch(() => null)) as
+          | (Record<string, unknown> & { $id: string })
+          | null);
       const wallet = await getOrCreateWalletRow(userId);
       res.json({
         userId,
         requiresEmailVerification: false,
-        user: req.userRow
-          ? sanitizeUserRow({ ...req.userRow, email_verifie: true })
+        user: repairedUser
+          ? sanitizeUserRow({ ...repairedUser, email_verifie: true })
           : { user_id: userId, email: req.authUser!.email, nom: req.authUser!.name, email_verifie: true },
         wallet: serializeWallet(wallet as unknown as Record<string, unknown>)
       });
@@ -4037,39 +4251,49 @@ export function createSalomaApiApp() {
 
   app.get('/api/me/dashboard', requireAuth, requireVerified, async (req: AuthedRequest, res: Response) => {
     try {
+      await ensureCoreAppwriteTables(false).catch(() => {});
       const userId = req.authUser!.$id;
       await settleLiquidatedTradesForUser(userId);
+
+      let userRow =
+        req.userRow ||
+        ((await getUserRowByUserIdOrEmail(userId, req.authUser?.email).catch(() => null)) as
+          | (Record<string, unknown> & { $id: string })
+          | null);
+
       const [wallet, tradesRes, echangesRes, depotsRes, earnRes, notifRes] = await Promise.all([
         getOrCreateWalletRow(userId),
-        adminDb.listRows({
-          databaseId: APPWRITE_DATABASE_ID,
-          tableId: TABLES.TRADES,
-          queries: [Query.equal('user_id', userId), Query.orderDesc('$createdAt'), Query.limit(100)]
-        }),
-        adminDb.listRows({
-          databaseId: APPWRITE_DATABASE_ID,
-          tableId: TABLES.ECHANGES,
-          queries: [Query.equal('user_id', userId), Query.orderDesc('$createdAt'), Query.limit(100)]
-        }),
-        adminDb.listRows({
-          databaseId: APPWRITE_DATABASE_ID,
-          tableId: TABLES.DEPOTS_RETRAITS,
-          queries: [Query.equal('user_id', userId), Query.orderDesc('$createdAt'), Query.limit(100)]
-        }),
-        adminDb.listRows({
-          databaseId: APPWRITE_DATABASE_ID,
-          tableId: TABLES.EARN,
-          queries: [Query.equal('user_id', userId), Query.orderDesc('$createdAt'), Query.limit(100)]
-        }),
-        adminDb.listRows({
-          databaseId: APPWRITE_DATABASE_ID,
-          tableId: TABLES.NOTIFICATIONS,
-          queries: [Query.equal('user_id', userId), Query.orderDesc('$createdAt'), Query.limit(100)]
-        })
+        safeUserTableListRows('TRADES', [
+          Query.equal('user_id', userId),
+          Query.orderDesc('$createdAt'),
+          Query.limit(100)
+        ]),
+        safeUserTableListRows('ECHANGES', [
+          Query.equal('user_id', userId),
+          Query.orderDesc('$createdAt'),
+          Query.limit(100)
+        ]),
+        safeUserTableListRows('DEPOTS_RETRAITS', [
+          Query.equal('user_id', userId),
+          Query.orderDesc('$createdAt'),
+          Query.limit(100)
+        ]),
+        safeUserTableListRows('EARN', [
+          Query.equal('user_id', userId),
+          Query.orderDesc('$createdAt'),
+          Query.limit(100)
+        ]),
+        safeUserTableListRows('NOTIFICATIONS', [
+          Query.equal('user_id', userId),
+          Query.orderDesc('$createdAt'),
+          Query.limit(100)
+        ])
       ]);
 
       res.json({
-        user: req.userRow ? sanitizeUserRow(req.userRow) : null,
+        user: userRow
+          ? sanitizeUserRow({ ...userRow, email_verifie: true })
+          : { user_id: userId, email: req.authUser!.email, nom: req.authUser!.name, email_verifie: true },
         wallet: serializeWallet(wallet as unknown as Record<string, unknown>),
         walletAddresses: getUserWalletAddresses(userId),
         trades: tradesRes.rows,
@@ -9802,6 +10026,7 @@ async function startServer() {
 
   startExchangeWebSockets();
   refreshMarketPrices(true).catch(() => {});
+  ensureCoreAppwriteTables(true).catch(() => {});
 
   if (process.env.NODE_ENV !== 'production') {
     app.get('/@vite-plugin-pwa/pwa-entry-point-loaded', (_req, res) => {
